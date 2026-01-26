@@ -1,0 +1,22 @@
+# version: "3.9"
+
+services:
+  ros2:
+    build:
+      context: ../docker/ros2-humble-base
+      dockerfile: Dockerfile.txt
+    container_name: ros2_dev
+    volumes:
+      - ./src:/ros2_ws/src
+      # - /etc/localtime:/etc/localtime:ro
+      # - /etc/timezone:/etc/timezone:ro
+    working_dir: /ros2_ws
+    tty: true
+    stdin_open: true
+    ports: 
+      - "18944:18944"
+    environment:
+      - DISPLAY=host.docker.internal:0
+      - QT_X11_NO_MITSHM=1
+      - QT_QPA_PLATFORM=xcb
+      - TZ=America/New_York

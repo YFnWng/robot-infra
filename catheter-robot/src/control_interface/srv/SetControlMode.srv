@@ -1,0 +1,12 @@
+# Constants
+uint8 NONE          = 0
+uint8 CARTESIAN_TWIST = 1
+uint8 CARTESIAN_POS = 2
+uint8 JOINT_VEL    = 3
+uint8 JOINT_POS   = 4
+
+uint8 mode
+string source
+---
+bool success
+string message
