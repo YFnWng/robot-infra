@@ -10,13 +10,18 @@ ENV BASE_WS=/opt/ros_ws_base
 # install bootstrap tools
 RUN apt-get update && apt-get install --no-install-recommends -y \
     build-essential \
+    cmake \
     git \
+    libssl-dev \
+    zlib1g-dev \
     python3-colcon-common-extensions \
     python3-colcon-mixin \
     python3-rosdep \
     python3-vcstool \
+    python3-pip \
     software-properties-common \
-    x11-apps \
+    # X server related
+    x11-apps \ 
     libx11-6 \
     libx11-xcb1 \
     libxcb1 \
@@ -27,7 +32,11 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     libxkbcommon-x11-0 \
     libxrender1 \
     mesa-utils \
-    libopenigtlink-dev \
+    # network tools
+    iproute2 \
+    tcpdump \
+    iputils-ping \
+    # libopenigtlink-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # bootstrap rosdep
@@ -56,22 +65,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # install python packages
 RUN pip3 install --no-cache-dir pyserial
 
-# Create workspace
-# RUN mkdir -p $ROS_WS/src
-
 # get and build infrastructure source packages
-WORKDIR $BASE_WS/src
-RUN git clone https://github.com/openigtlink/ros2_igtl_bridge
+WORKDIR /opt/igtl
+RUN git clone https://github.com/openigtlink/OpenIGTLink.git
+WORKDIR /opt/igtl/OpenIGTLink-build
+RUN cmake -DBUILD_SHARED_LIBS:BOOL=ON ../OpenIGTLink && \
+    make -j$(nproc) && \
+    make install
 
+WORKDIR $BASE_WS/src
+RUN git clone https://github.com/openigtlink/ros2_igtl_bridge && \
+    # change default ip to avoid server socket creation failure
+    sed -i 's/127.0.0.1/0.0.0.0/' $BASE_WS/src/ros2_igtl_bridge/src/igtl_node.cpp && \
+    sed -i 's/192.168.2.21/0.0.0.0/' $BASE_WS/src/ros2_igtl_bridge/launch/bridge.launch.py
 WORKDIR $BASE_WS
 RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
-    rosdep install --from-paths src --ignore-src -r -y && \
-    colcon build --symlink-install"
+    rosdep install --from-paths src --ignore-src -y && \
+    colcon build --cmake-args -DOpenIGTLink_DIR:PATH=/opt/igtl/OpenIGTLink-build"
 
 # add automatic ROS2 sourcing for interactive shells
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
     echo "source /opt/ros_ws_base/install/setup.bash" >> /root/.bashrc && \
-    echo "source /ros2_ws/install/setup.bash" >> /root/.bashrc && \
+    echo "export CMAKE_PREFIX_PATH=/usr/local:$CMAKE_PREFIX_PATH" >> /root/.bashrc && \
+    echo "/usr/local/lib/igtl" > /etc/ld.so.conf.d/openigtlink.conf && ldconfig && \
     echo "export QT_X11_NO_MITSHM=1" >> /root/.bashrc && \
     echo "export QT_X11_NO_MITSHM=1" >> /root/.bashrc && \
     echo "export QT_QPA_PLATFORM=xcb" >> /root/.bashrc && \
