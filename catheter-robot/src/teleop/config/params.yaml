@@ -1,4 +1,4 @@
-keyboard:
+slicer:
   ros__parameters:
     joint_names: ['catheter_lin', 'catheter_rot', 'catheter_bend', 
       'sheath_lin', 'sheath_rot', 'sheath_bend']

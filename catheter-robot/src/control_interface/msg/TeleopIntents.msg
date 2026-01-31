@@ -23,17 +23,6 @@ string source           # "keyboard", "slicer", "autonomy"
 # bool emergency_stop     # latched upstream, immediate stop request
 
 # ------------------------------------------------------------------
-# Control mode declaration (explicit, mandatory)
-# ------------------------------------------------------------------
-# uint8 control_mode
-# uint8 CONTROL_MODE_NONE          = 0
-# uint8 CONTROL_MODE_CARTESIAN_TWIST = 1
-# uint8 CONTROL_MODE_CARTESIAN_POS = 2
-# uint8 CONTROL_MODE_JOINT_VEL    = 3
-# uint8 CONTROL_MODE_JOINT_POS   = 4
-# uint8 CONTROL_MODE_AUTO   = 5
-
-# ------------------------------------------------------------------
 # CARTESIAN INTENT (used when control_mode == CARTESIAN_*)
 # ------------------------------------------------------------------
 
@@ -54,14 +43,14 @@ geometry_msgs/Pose cartesian_target
 # ------------------------------------------------------------------
 
 # joint names
-string[] joint_name
+# string[] joint_name
 
 # joint velocity commands
-float32[] joint_vel
+float64[] joint_vel
 # Units defined by robot (rad, m, or normalized)
 
 # Absolute joint targets
-float32[] joint_pos
+float64[] joint_pos
 
 # ------------------------------------------------------------------
 # AUTONOMY INTENT (used when control_mode == AUTO)

@@ -1,21 +1,20 @@
-import struct
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64
 from std_srvs.srv import Trigger
-from control_interface.msg import TeleopIntents
-from control_interface.msg import Bytes
-from control_interface.msg import ControllerFeedback
-from control_interface.srv import SetControlMode
+from control_interface.msg import TeleopIntents, DeviceMsg, ControllerFeedback
+from control_interface.srv import ManagerCmd, DeviceCmd, Debug
+
 from collections import defaultdict
 import time
 
-class ActuationManager(Node):
+class ControlManager(Node):
 
     def __init__(self):
         super().__init__('actuation_manager')
 
-        self.control_mode = None
+        # self.manager_req = ManagerCmd.Request()
+        self.control_mode = ManagerCmd.Request.NONE
 
         self.deadman = False
         self.scale = 0.3
@@ -29,7 +28,7 @@ class ActuationManager(Node):
 
         # subscriptions
         self.teleop_sub = self.create_subscription(
-            TeleopIntents, 'teleop', self.teleop_callback, 10)
+            TeleopIntents, '/teleop', self.teleop_callback, 10)
         self.teleop_sub
 
         # self.auto_sub = self.create_subscription(
@@ -37,7 +36,7 @@ class ActuationManager(Node):
         # self.auto_sub
 
         self.feedback_sub = self.create_subscription(
-            Bytes, 'hardware_feedback', self.feedback_callback, 10)
+            DeviceMsg, '/device/feedback', self.feedback_callback, 10)
         self.feedback_sub
 
         # self.sensor_sub = self.create_subscription(
@@ -46,26 +45,61 @@ class ActuationManager(Node):
 
         # publishers
         self.cmd_pub = self.create_publisher(
-            Bytes, 'hardware_cmd', 10)
+            DeviceMsg, '/manager/cmd', 10)
         
         self.feedback_pub = self.create_publisher(
-            ControllerFeedback, 'controller_feedback', 10)
+            ControllerFeedback, '/manager/feedback', 10)
 
         # services
-        self.create_service(SetControlMode, 'set_control_mode', self.control_mode_callback)
+        self.create_service(ManagerCmd, '/manager/cmd', self.cmd_callback)
+        self.create_service(Debug, '/manager/debug', self.debug_callback)
         # self.create_service(Trigger, 'e_stop', self.e_stop_callback)
         # self.create_service(Trigger, 'set_zero', self.set_zero_callback)
+        self.device_client = self.create_client(DeviceCmd, '/device/cmd')
+        while not self.device_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        self.device_req = DeviceCmd.Request()
 
         # self.timer = self.create_timer(0.01, self.update)
 
     def deadman_cb(self, msg):
         self.deadman = msg.data
 
-    def control_mode_callback(self, req, res):
+    def cmd_callback(self, req, res):
         self.active_source = req.source
-        self.control_mode = req.mode
-        res.success = True
-        res.message = "Control mode switched"
+
+        if req.cmd <= req.DEBUG:
+            self.control_mode = req.cmd
+            res.success = True
+            res.message = "Control mode switched"
+
+        else:
+            if req.cmd == req.START_MOTOR:
+                self.device_req.cmd = self.device_client.START
+                self.device_req.data = []
+            elif req.cmd == req.STOP_MOTOR:
+                self.device_req.cmd = self.device_client.STOP
+                self.device_req.data = []
+            elif req.cmd == req.SET_ZERO:
+                self.device_req.cmd = self.device_client.ZERO
+                self.device_req.data = []
+
+            future = self.device_client.call_async(self.device_req)
+            rclpy.spin_until_future_complete(self, future)
+            device_res = future.result()
+            res.success = device_res.success
+            res.message = device_res.response
+
+    def debug_callback(self, req, res):
+        if self.control_mode == ManagerCmd.Request.DEBUG:
+            self.device_req.cmd = req.cmd
+            future = self.device_client.call_async(self.device_req)
+            self.get_logger().info(f'Send raw cmd: {req.cmd}')
+            rclpy.spin_until_future_complete(self, future)
+            device_res = future.result()
+            res.success = device_res.success
+            res.message = device_res.response
+            
 
     # def e_stop_callback(self, req, res):
     #     self.estop = True
@@ -91,9 +125,9 @@ class ActuationManager(Node):
     def teleop_callback(self, msg):
         self.last_input_time[msg.source] = time.time()
 
-        if not self.deadman or \
+        if self.deadman or \
             self.estop or \
-            self.control_mode == SetControlMode.Request.NONE:
+            self.control_mode == ManagerCmd.Request.NONE:
             return
 
         if self.active_source is None:
@@ -102,17 +136,21 @@ class ActuationManager(Node):
         if msg.source != self.active_source:
             return
 
-        out = Bytes()
+        out = DeviceMsg()
         out.header.stamp = self.get_clock().now().to_msg()
 
-        if self.control_mode == SetControlMode.Request.JOINT_VEL:
-            prefix = Bytes.VEL.encode("ascii")
-            data = struct.pack("<6f", *msg.joint_vel)
-            out.byte_msg = prefix + data
-        elif self.control_mode == SetControlMode.Request.JOINT_POS:
-            prefix = Bytes.POS.encode("ascii")
-            data = struct.pack("<6f", *msg.joint_pos)
-            out.byte_msg = prefix + data
+        if self.control_mode == ManagerCmd.Request.JOINT_VEL:
+            # prefix = DeviceMsg.VEL.encode("ascii")
+            # data = struct.pack("<6f", *msg.joint_vel)
+            # out.byte_msg = prefix + data
+            out.predicate = DeviceMsg.VEL
+            out.data = msg.joint_vel
+        elif self.control_mode == ManagerCmd.Request.JOINT_POS:
+            # prefix = DeviceMsg.POS.encode("ascii")
+            # data = struct.pack("<6f", *msg.joint_pos)
+            # out.byte_msg = prefix + data
+            out.predicate = DeviceMsg.POS
+            out.data = msg.joint_pos
         
         self.cmd_pub.publish(out)
 
@@ -135,16 +173,16 @@ class ActuationManager(Node):
                 self.active_source = None
 
     def publish_zero(self):
-        out = Bytes()
+        out = DeviceMsg()
         out.header.stamp = self.get_clock().now().to_msg()
-        prefix = Bytes.POS.encode("ascii")
+        prefix = DeviceMsg.POS.encode("ascii")
         data = struct.pack("<6f", *([0.0]*6))
         out.byte_msg = prefix + data
         self.cmd_pub.publish(out)
 
 def main():
     rclpy.init()
-    node = ActuationManager()
+    node = ControlManager()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

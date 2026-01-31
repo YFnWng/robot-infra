@@ -25,7 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
             'slicer = teleop.slicer:main'
-            'keyboard = teleop.keyboard:main'
         ],
     },
 )

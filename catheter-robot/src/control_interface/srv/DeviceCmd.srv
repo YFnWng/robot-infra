@@ -1,0 +1,12 @@
+string START = "I"
+string STOP = "S"
+string ZERO = "Z"
+string DEBUG = "D"
+
+string cmd
+float64[] data
+bool need_device_response
+# uint16 timeout_ms
+---
+bool success
+string response       # raw reply or error message

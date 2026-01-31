@@ -1,0 +1,20 @@
+# Constants
+uint8 NONE              = 0
+uint8 CARTESIAN_TWIST   = 1
+uint8 CARTESIAN_POS     = 2
+uint8 JOINT_VEL         = 3
+uint8 JOINT_POS         = 4
+uint8 DEBUG             = 5
+uint8 START_MOTOR       = 6
+uint8 STOP_MOTOR        = 7
+uint8 SET_ZERO          = 8
+uint8 SET_TARGET_VEL    = 9
+
+string source
+uint8 cmd
+float64[] data
+bool need_device_response
+# uint16 timeout_ms
+---
+bool success
+string message
