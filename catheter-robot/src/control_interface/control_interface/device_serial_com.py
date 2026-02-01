@@ -1,11 +1,28 @@
+#!/usr/bin/env python3
 import struct
+import time
+import threading
+import uuid
+from typing import Optional
+
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.task import Future
+
 import serial
-import time
-from typing import Optional
-from control_interface.msg import DeviceMsg
+
+from control_interface.msg import DeviceStream, DeviceEvent, ManagerEvent
 from control_interface.srv import DeviceCmd
+
+stream_prefix = [DeviceStream.POS, DeviceStream.VEL, DeviceStream.ENC]
+event_prefix = [ManagerEvent.LIMIT]
+response_prefix = [ManagerEvent.CONNECT,
+                    ManagerEvent.MODE, 
+                    ManagerEvent.START_MOTOR,
+                    ManagerEvent.STOP_MOTOR,
+                    ManagerEvent.SET_ZERO,
+                    ManagerEvent.SET_TARGET_VEL]
 
 class SerialCommunication(Node):
     def __init__(self):
@@ -14,34 +31,47 @@ class SerialCommunication(Node):
             automatically_declare_parameters_from_overrides=True
             )
  
-        self.serial_port = None
+        # ---- Parameters ----
+        self.startMarker = b'<'
+        self.endMarker = b'>'
+        self.timeout_sec = self.declare_parameter('timeout_sec', 1.0).value
+
+        # ---- Serial ----
+        self.serial_port: Optional[serial.Serial] = None
         self.is_connected = False
-        self.check_buffer = self.declare_parameter('check_buffer', True).value  # Flag to check if the buffer is empty before reading
-        self.command_buffer = None
-        self.response_buffer = None
-        self.startMarker = b'<' # '<'
-        self.endMarker = b'>' # '>'
-        self.timeout_ms = self.declare_parameter('timeout_ms', 1000).value
 
-        self.sub = self.create_subscription(
-            DeviceMsg,
-            '/manager/cmd',
-            self.send_command,
-            10
+        # ---- ROS interfaces ----
+        self.control_sub = self.create_subscription(
+            DeviceStream, '/manager/control', self.on_manager_control, 10
         )
-        self.sub
 
-        self.pub = self.create_publisher(
-            DeviceMsg, '/device/feedback', 10)
-
-        timer_period = self.declare_parameter('timer_period', 0.01).value # 10 ms
-        self.timer = self.create_timer(timer_period, self.timer_callback)
-
-        self.srv = self.create_service(
-            DeviceCmd,
-            '/device/cmd',
-            self.handle_device_command
+        self.state_pub = self.create_publisher(
+            DeviceStream, '/device/state', 10
         )
+
+        self.event_pub = self.create_publisher(
+            DeviceEvent, '/device/event', 10
+        )
+
+        self.cmd_srv = self.create_service(
+            DeviceCmd, '/device/command', self.handle_device_command
+        )
+
+        # ---- Pending service requests ----
+        self.pending = {}  # req_id -> dict(future, deadline)
+        self.pending_lock = threading.Lock()
+
+        # ---- RX thread ----
+        self.rx_thread = threading.Thread(target=self.rx_loop, daemon=True)
+        self.rx_thread.start()
+
+        # ---- Timeout watchdog ----
+        self.create_timer(0.01, self.check_timeouts)
+
+
+    # ============================================================
+    # Serial connection
+    # ============================================================
 
     def connect(self, port: str, baudrate: int = 115200, timeout: int = 1000):
         """Connect to the specified serial port"""
@@ -49,13 +79,12 @@ class SerialCommunication(Node):
             self.serial_port.close()
         # the frequency of data receiving should be higher than the device sending
         self.serial_port = serial.Serial(port, baudrate, timeout=timeout) 
-        if self.serial_port.is_open:
-            self.is_connected = True
-            self.serial_port.set_buffer_size(rx_size=100, tx_size=100)
-            self.get_logger().info(f"Connected to {port} at {baudrate} baud.")
+        self.is_connected = self.serial_port.is_open
+
+        if self.is_connected:
+            self.get_logger().info(f"Connected to {port} @ {baudrate}")
         else:
-            self.is_connected = False
-            self.get_logger().warn(f"Failed to connect to {port}.")
+            self.get_logger().error("Failed to open serial port")
 
     def close(self):
         """Close the serial port connection"""
@@ -63,164 +92,167 @@ class SerialCommunication(Node):
             self.serial_port.close()
             self.is_connected = False
             self.get_logger().info(f"Serial port {self.serial_port.name} closed.")
-
-    # def send_str(self, command: str, expect_response: bool = False) -> Optional[str]:
-    #     """Send a command to the motor controller"""
-    #     try:
-    #         if self.serial_port and self.serial_port.is_open:
-    #             # print(f"Sending command: {command}")
-    #             self.serial_port.reset_input_buffer()
-    #             self.serial_port.write((command).encode())
-    #             if expect_response:
-    #                 return self.read_response()
-    #         else:
-    #             raise Exception("Serial port is not open.")
-    #     except serial.SerialException as e:
-    #         print(f"Serial communication error: {e}")
-    #         return None
-
-    # def read_str(self) -> Optional[str]:
-    #     if self.check_buffer:
-    #         condition = self.serial_port and self.serial_port.is_open and self.serial_port.in_waiting > 0
-    #     else:
-    #         condition = self.serial_port and self.serial_port.is_open
-    #     condition = self.serial_port and self.serial_port.is_open
-    #     if condition:
-    #         # t1 = time.time()
-    #         # response = self.serial_port.readline().decode("utf-8", errors="ignore").strip()
-    #         response = self.serial_port.read_until(b'\r').decode("utf-8", errors="ignore").strip()
-    #         while self.serial_port.in_waiting > 0:
-    #             # response = self.serial_port.readline().decode("utf-8", errors="ignore").strip()
-    #             response = self.serial_port.read_until(b'\r').decode("utf-8", errors="ignore").strip()
-    #         self.response_buffer = response
-    #         # current_time = time.time()
-    #         # elapsed_time = (current_time - t1) * 1000  # Convert to milliseconds
-    #         # print(f"read_response elapsed time: {elapsed_time:.2f} ms")
-    #         # print(f"Received response: {response}","byte waiting:",self.serial_port.in_waiting)
-    #         if response  == self.serial_port_node.GetParameter("Data"):
-    #             pass
-    #         else:
-    #             self.serial_port_node.SetParameter("Data", response )
-    #         return self.response_buffer
-    #     return None
     
-    def send_bytes(self, binaries: bytes) -> Optional[bytes]:
+    # ============================================================
+    # TX
+    # ============================================================
+
+    def send_bytes(self, payload: bytes) -> Optional[bytes]:
         """Send a command to the motor controller"""
         if not self.serial_port or not self.serial_port.is_open:
             self.get_logger().error("Serial port is not open.")
+            return
 
         try:
             self.serial_port.write(
-                self.startMarker + binaries + self.endMarker
+                self.startMarker + payload + self.endMarker
                 )
         except serial.SerialException as e:
-            self.get_logger().error(f"Serial communication error: {e}")
-            return None
-
-
-    def read_bytes(self, timeout: float = 1.0) -> Optional[bytes]:
-        if not self.serial_port or not self.serial_port.is_open:
-            self.get_logger().error("Serial port is not open.")
-            return None
-
-        start_time = time.time()
-        response = None
-
-        try:
-            while True:
-                # check overall timeout
-                if time.time() - start_time > timeout:
-                    self.get_logger().warn("Serial read timed out.")
-                    return None
-
-                if self.serial_port.in_waiting > 0:
-                    # read up to start marker
-                    self.serial_port.read_until(self.startMarker)
-
-                    # read until end marker
-                    response = self.serial_port.read_until(self.endMarker)
-                    
-                    # got a response, return immediately
-                    return response[:-1]
-
-                # small sleep to avoid busy-waiting
-                time.sleep(0.001)
-
-        except serial.SerialException as e:
-            self.get_logger().error(f"Serial communication error: {e}")
-            return None
-        # try:
-        #     if self.serial_port and self.serial_port.is_open:
-        #         response = None
-        #         while self.serial_port.in_waiting > 0:
-        #             self.serial_port.read_until(self.startMarker)
-        #             response = self.serial_port.read_until(self.endMarker)
-        #         return response
-        #     else:
-        #         self.get_logger().error("Serial port is not open.")
-        #         return None
-        # except serial.SerialException as e:
-        #     self.get_logger().error(f"Serial communication error: {e}")
-        #     return None
+            self.get_logger().error(f"Serial TX error: {e}")
         
-    
-    def send_command(self, msg):
-        prefix = msg.predicate.encode("ascii")
-        data = struct.pack("<6d", *msg.data)
+    def on_manager_control(self, msg: DeviceStream):
+        prefix = bytes([msg.predicate])
+        data = struct.pack("<" + "d" * len(msg.data), *msg.data)
         self.send_bytes(prefix + data)
 
-    def timer_callback(self):
-        response = self.read_bytes()
-        if response is not None:
-            out = DeviceMsg()
-            out.header.stamp = self.get_clock().now().to_msg()
-            out.predicate = response[:1].decode('utf-8')
-            n_floats = len(response[1:]) // 8
-            out.data = list(struct.unpack('<' + 'd'*n_floats, response[1:]))
-            self.pub.publish(out)
+    # ============================================================
+    # RX LOOP
+    # ============================================================
+
+    def rx_loop(self):
+        while rclpy.ok():
+            if not self.serial_port or not self.serial_port.is_open:
+                time.sleep(0.01)
+                continue
+
+            try:
+                raw = self.serial_port.read_until(self.endMarker)
+                if not raw.startswith(self.startMarker):
+                    continue
+
+                payload = raw[1:-1]
+                if not payload:
+                    continue
+
+                prefix = payload[0] # int 0–255
+
+                if prefix in stream_prefix:
+                    self.handle_device_stream(prefix, payload[1:])
+                elif prefix in event_prefix:
+                    self.handle_device_event(prefix, payload[1:])
+                elif prefix in response_prefix:
+                    self.handle_device_response(prefix, payload[1:])
+                else:
+                    self.get_logger().warn(f"Unknown prefix: {prefix}")
+
+            except serial.SerialException as e:
+                self.get_logger().error(f"Serial RX error: {e}")
     
-    # def set_timer_interval(self, interval: int):
-    #     """Set the timer interval for reading responses"""
-    #     self.timer.setInterval(interval)
+    # ============================================================
+    # Handlers
+    # ============================================================
+
+    def handle_device_stream(self, prefix: int, body: bytes):
+        n = len(body) // 8
+        values = struct.unpack("<" + "d" * n, body) # tuple of doubles
+
+        msg = DeviceStream()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.predicate = prefix
+        msg.data = list(values)
+        self.state_pub.publish(msg)
+
+    def handle_device_event(self, prefix: int, body: bytes):
+        msg = DeviceEvent()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.predicate = prefix
+        msg.state = list(body)
+        self.event_pub.publish(msg)
+
+    def handle_device_response(self, prefix: int, body: bytes):
+        """
+        Expected: body = req_id(16 bytes) + response_payload
+        """
+        if len(body) < 16:
+            self.get_logger().warn("Malformed response")
+            return
+
+        req_id = body[:16]
+        payload = body[16:]
+
+        with self.pending_lock:
+            entry = self.pending.pop(req_id, None)
+
+        if not entry:
+            self.get_logger().warn("Unmatched response id={req_id}")
+            return
+
+        entry["future"].set_result({
+            "success": True,
+            "response": payload.decode("utf-8", errors="ignore")
+        })
+
+    # ============================================================
+    # Service
+    # ============================================================
 
     def handle_device_command(self, request, response):
-        self.get_logger().info(f"Received serial command: {request.command}")
+        req_id = uuid.uuid4().bytes  # 16 bytes
 
-        try:
-            # ---- SEND ----
-            self.send_bytes(request.cmd.encode("ascii"))
-            # time.sleep(0.01)  # simulate transmission latency
+        payload = bytes([request.predicate]) + \
+              req_id + request.cmd.encode('utf-8')
+        self.send_bytes(payload)
 
-            # ---- WAIT ----
-            self.read_bytes()
-            start = time.time()
-            while time.time() - start < self.timeout_ms:
-                if self.serial.in_waiting:
-                    reply = self.serial.readline().decode()
-                    break
-                # time.sleep(0.005)
-                # reply = "OK"  # simulate reply
-                break
-            else:
-                response.success = False
-                response.response = "Timeout waiting for device"
-                return response
+        future = Future()
+        with self.pending_lock:
+            self.pending[req_id] = {
+                "future": future,
+                "deadline": time.time() + self.timeout_sec
+            }
 
-            response.success = True
-            response.response = reply
+        # BLOCK here safely if using MultiThreadedExecutor
+        rclpy.spin_until_future_complete(self, future)
 
-        except Exception as e:
-            response.success = False
-            response.response = str(e)
+        result = future.result()
+        response.success = result["success"]
+        response.response = result["response"]
 
         return response
 
+    # ============================================================
+    # Timeout watchdog
+    # ============================================================
+
+    def check_timeouts(self):
+        now = time.time()
+        expired = []
+
+        with self.pending_lock:
+            for req_id, entry in self.pending.items():
+                if now > entry["deadline"]:
+                    entry["future"].set_result({
+                        "success": False,
+                        "response": "Timeout"
+                    })
+                    expired.append(req_id)
+
+            for req_id in expired:
+                del self.pending[req_id]
+
 def main():
     rclpy.init()
+
     node = SerialCommunication()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+
+    try:
+        executor.spin()
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

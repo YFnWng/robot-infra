@@ -1,11 +1,7 @@
-string START = "I"
-string STOP = "S"
-string ZERO = "Z"
-string DEBUG = "D"
-
+uint8 predicate
 string cmd
 float64[] data
-bool need_device_response
+# bool need_device_response
 # uint16 timeout_ms
 ---
 bool success

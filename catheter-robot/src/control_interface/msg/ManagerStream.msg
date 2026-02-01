@@ -1,7 +1,7 @@
 std_msgs/Header header
 
 # joint names
-string[] joint_name
+# string[] joint_name
 
 # joint velocity readings
 float64[] joint_vel

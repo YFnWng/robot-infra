@@ -1,9 +1,9 @@
 # ============================================================
-# TeleopIntent
+# ControlStream
 #
-# High-level operator intent for teleoperation.
+# High-level operator intent for teleoperation/automation.
 # Exactly ONE of the intent sections below should be populated
-# per message. The teleop manager is responsible for enforcing
+# per message. The control manager is responsible for enforcing
 # exclusivity and safety.
 # ============================================================
 
@@ -51,12 +51,6 @@ float64[] joint_vel
 
 # Absolute joint targets
 float64[] joint_pos
-
-# ------------------------------------------------------------------
-# AUTONOMY INTENT (used when control_mode == AUTO)
-# ------------------------------------------------------------------
-
-# TODO
 
 # ------------------------------------------------------------------
 # Optional scaling hints (non-authoritative)
