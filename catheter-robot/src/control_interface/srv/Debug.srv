@@ -1,5 +1,0 @@
-string cmd
-# uint16 timeout_ms
----
-bool success
-string response

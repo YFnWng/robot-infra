@@ -17,8 +17,9 @@ from control_interface.srv import DeviceCmd
 
 stream_prefix = [DeviceStream.POS, DeviceStream.VEL, DeviceStream.ENC]
 event_prefix = [ManagerEvent.LIMIT]
-response_prefix = [ManagerEvent.CONNECT,
+response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.MODE, 
+                    ManagerEvent.DEBUG, 
                     ManagerEvent.START_MOTOR,
                     ManagerEvent.STOP_MOTOR,
                     ManagerEvent.SET_ZERO,
@@ -73,7 +74,7 @@ class SerialCommunication(Node):
     # Serial connection
     # ============================================================
 
-    def connect(self, port: str, baudrate: int = 115200, timeout: int = 1000):
+    def connect(self, port: str, baudrate: int = 115200, timeout: float = 1.0):
         """Connect to the specified serial port"""
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
@@ -198,6 +199,16 @@ class SerialCommunication(Node):
 
     def handle_device_command(self, request, response):
         req_id = uuid.uuid4().bytes  # 16 bytes
+
+        if request.predicate == ManagerEvent.CONNECTION:
+            self.connect(port=request.cmd)
+            response.success = self.is_connected
+            response.response = result["response"]
+            if self.is_connected:
+                response.response = f"Connected to {request.cmd}"
+            else:
+                response.response = "Not connected"
+            return response
 
         payload = bytes([request.predicate]) + \
               req_id + request.cmd.encode('utf-8')

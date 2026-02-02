@@ -12,7 +12,7 @@ std_msgs/Header header
 # ------------------------------------------------------------------
 # Source metadata
 # ------------------------------------------------------------------
-string source           # "keyboard", "slicer", "autonomy"
+# string source           # "keyboard", "slicer", "autonomy"
 # string operator_id      # optional (empty if not applicable)
 
 # ------------------------------------------------------------------

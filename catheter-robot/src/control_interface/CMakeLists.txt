@@ -7,15 +7,41 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
+find_package(ament_cmake_python REQUIRED)
+
+find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+
 find_package(rosidl_default_generators REQUIRED)
 
+# Messages / Services
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/TeleopIntents.msg"
+  "msg/ControlStream.msg"
+  "msg/ManagerStream.msg"
+  "msg/ManagerEvent.msg"
+  "msg/DeviceStream.msg"
+  "msg/DeviceEvent.msg"
+  "srv/DeviceCmd.srv"
   DEPENDENCIES std_msgs geometry_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
+)
+
+# Export runtime dependency for generated Python/C++ interfaces
+ament_export_dependencies(rosidl_default_runtime)
+
+# Install Python modules
+ament_python_install_package(${PROJECT_NAME}_py)
+# Install Python executables
+install(PROGRAMS
+  control_interface_py/manager.py
+  control_interface_py/device_serial_com.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install launch files.
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
 )
 
 if(BUILD_TESTING)
