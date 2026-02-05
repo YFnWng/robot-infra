@@ -83,9 +83,16 @@ RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
     rosdep install --from-paths src --ignore-src -y && \
     colcon build --cmake-args -DOpenIGTLink_DIR:PATH=/opt/igtl/OpenIGTLink-build"
 
+# build overlay
+# WORKDIR $ROS_WS
+# RUN /bin/bash -c "source /opt/ros_ws_base/install/setup.bash && \
+#     find src/control_interface/control_interface_py -type f -name "*.py" ! -name "__init__.py" -exec chmod +x {} + && \
+#     colcon build --symlink-install"
+
 # add automatic ROS2 sourcing for interactive shells
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
     echo "source /opt/ros_ws_base/install/setup.bash" >> /root/.bashrc && \
+    echo "source /ros2_ws/install/setup.bash" >> /root/.bashrc && \
     echo "export CMAKE_PREFIX_PATH=/usr/local:$CMAKE_PREFIX_PATH" >> /root/.bashrc && \
     echo "/usr/local/lib/igtl" > /etc/ld.so.conf.d/openigtlink.conf && ldconfig && \
     echo "export QT_X11_NO_MITSHM=1" >> /root/.bashrc && \

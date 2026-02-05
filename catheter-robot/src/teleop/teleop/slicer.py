@@ -13,25 +13,42 @@ as ControlStream messages.
 CTRL-C to quit
 """
 
-DOMAIN = "robot/"
+DOMAIN = "robot"
 
 class SlicerHandler(Node):
 
     def __init__(self):
-        super().__init__(
-            'slicer',
-            automatically_declare_parameters_from_overrides=True
-            )
+        super().__init__('slicer')
 
         # --- parameters ---
         # read_only = rcl_interfaces.msg.ParameterDescriptor(read_only=True)
-        self.joint_names = self.get_parameter('joint_names').value
-        self.key_bindings = self.get_parameter('key_bindings').value
+        self.declare_parameter('joints', [])
+        self.declare_parameter('keys', [])
+        self.declare_parameter('key_joint_idx', [])
+        self.declare_parameter('directions', [])
+        self.declare_parameter('joint_vels', [])
+
+        self.joints = self.get_parameter('joints').value
+        self.keys = self.get_parameter('keys').value
+        key_joint_idx = self.get_parameter('key_joint_idx').value
+        directions = self.get_parameter('directions').value
         self.vel = self.get_parameter('joint_vels').value
 
-        self.add_on_set_parameters_callback(
-            self._on_parameter_update
-        )
+        self.key_bindings = {
+            k: (j, d*v)
+            for k, j, d, v in zip(self.keys, key_joint_idx, 
+                                  directions, self.vel)
+        }
+        # print(self.keys)
+        # print(self.key_bindings)
+        self.get_logger().info(f"Node name: {self.get_name()}")
+        for param_name in ['joints', 'keys', 'key_joint_idx', 'directions', 'joint_vels']:
+            param = self.get_parameter(param_name)
+            self.get_logger().info(f"{param_name} = {param.value}")
+
+        # self.add_on_set_parameters_callback(
+        #     self._on_parameter_update
+        # )
 
         # --- message types ---
         self.teleop_stream = ControlStream()
@@ -39,9 +56,9 @@ class SlicerHandler(Node):
         self.teleop_event = ManagerEvent()
         self.teleop_event.header.frame_id = "slicer"
         self.joint_pos_stream = ros2_igtl_bridge.msg.PointArray()
-        self.joint_pos_stream.name = DOMAIN + "joint_pos_stream"
+        self.joint_pos_stream.name = DOMAIN + "/joint_pos_stream"
         self.manager_event = ros2_igtl_bridge.msg.String()
-        self.manager_event.name = DOMAIN + "event"
+        self.manager_event.name = DOMAIN + "/event"
 
         # --- subscriptions ---
         self.string_sub = self.create_subscription(
@@ -93,8 +110,6 @@ class SlicerHandler(Node):
         domain, role = msg.name.split("/", 1)
         if domain != DOMAIN:
             return
-        
-        self.get_logger().info('Publishing: "%s"' % msg.data)
 
         if role == "joint_vel_target":
             self.vel = [msg.pointdata[0].x,
@@ -103,6 +118,8 @@ class SlicerHandler(Node):
                         msg.pointdata[1].x,
                         msg.pointdata[1].y,
                         msg.pointdata[1].z]
+            self.get_logger().info(f"Set velocity: {self.vel}")
+
         elif msg.name == "joint_pos_target":
             self.teleop_stream.joint_pos = [msg.pointdata[0].x,
                                          msg.pointdata[0].y,
@@ -114,6 +131,7 @@ class SlicerHandler(Node):
             self.teleop_stream.header.stamp = \
                 self.get_clock().now().to_msg()
             self.intent_pub.publish(self.teleop_stream)
+            self.get_logger().info(f"Control position: {self.teleop_stream.joint_pos}")
 
     # Compute current motion based on pressed keys and publish
     def string_callback(self, msg):
@@ -134,23 +152,26 @@ class SlicerHandler(Node):
             if n > 1:
                 self.teleop_event.text = msg.data[1:]
             else:
-                self.teleop_event.text = []
+                self.teleop_event.text = ""
 
             self.teleop_event.header.stamp = \
                 self.get_clock().now().to_msg()
             self.teleop_event_pub.publish(self.teleop_event)
+            self.get_logger().info('Command: "%s"' % msg.data)
 
         elif role == "key": # key command
             self.teleop_stream.joint_vel = [0.0] * 6
             for key in msg.data:
-                if key in self.key_bindings:
-                    for i in range(6):
-                        self.teleop_stream.joint_vel[i] += \
-                            self.key_bindings[key][i]*self.vel[key][i]
+                # self.get_logger().info(f"key pressed: {key}")
+                if key in self.keys:
+                    # later key overrides
+                    joint, vel = self.key_bindings[key]
+                    self.teleop_stream.joint_vel[joint] = vel
 
             self.teleop_stream.header.stamp = \
                 self.get_clock().now().to_msg()
             self.intent_pub.publish(self.teleop_stream)
+            self.get_logger().info(f"Control joint vel: {self.teleop_stream.joint_vel}")
 
     def manager_event_callback(self, msg: ManagerEvent):
         if msg.text != "":

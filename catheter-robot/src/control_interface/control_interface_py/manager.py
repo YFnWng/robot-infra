@@ -99,16 +99,21 @@ class ControlManager(Node):
         self.active_source = msg.header.frame_id
 
         if msg.predicate == ManagerEvent.MODE:
-            self.control_mode = msg.state[0]
-            self.get_logger().info(f'Control mode switched to {self.control_mode}')
+            if len(msg.text) != 1:
+                self.get_logger().info(f'Invalid control mode request')
+            self.control_mode = ord(msg.text)
+            self.get_logger().info(f'Control mode switched to {msg.text}')
 
         else:
             self.device_req.predicate = msg.predicate
             self.device_req.cmd = msg.text
             self.device_req.data = msg.data
 
+            
             future = self.device_client.call_async(self.device_req)
+            
             rclpy.spin_until_future_complete(self, future)
+            self.get_logger().info(f"Command {msg.predicate}")
             device_res = future.result()
             if device_res.success:
                 out = ManagerEvent()

@@ -6,13 +6,11 @@ def generate_launch_description():
         Node(
             package='control_interface',
             executable='manager.py',
-            name='manager',
-            arguments=['--ros-args', '--log-level', 'info']
+            name='manager'
         ),
         Node(
             package='control_interface',
             executable='device_serial_com.py',
-            name='device_serial_com',
-            ros_arguments=['--log-level', 'warn']
+            name='device_serial_com'
         )
     ])

@@ -10,6 +10,10 @@ services:
       - ./src:/ros2_ws/src
       # - /etc/localtime:/etc/localtime:ro
       # - /etc/timezone:/etc/timezone:ro
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    group_add:
+      - dialout
     working_dir: /ros2_ws
     tty: true
     stdin_open: true

@@ -20,77 +20,106 @@ constexpr uint8_t LimitSwitch[] = { 9, 10, 11 };
 
 // Serial communication
 HardwareSerialIMXRT *HWSerials[] = { &Serial2, &Serial3, &Serial4, &Serial5, &Serial6, &Serial7 };
-constexpr uint8_t TE[] = { 5, 6, 12, 18, 19, 22 };
+// constexpr uint8_t TE[] = { 5, 6, 12, 18, 19, 22 };
 constexpr uint8_t numHWSerials = 6;
-constexpr char startMarker = '$';
-constexpr char endMarker = '\x0A'; // <LF>, '\n'
-constexpr char PCCharStartMarker = '<';
-constexpr char PCCharEndMarker = '>';
-constexpr uint8_t PCByteStartMarker = 0x3C;  // '<'
-constexpr uint8_t PCByteEndMarker = 0x3E;    // '>'
-constexpr uint8_t numChars = 32;
-constexpr uint8_t numBytes = 32;
-char receivedHWChars[numHWSerials][numChars];
-char receivedPCChars[numChars];
-uint8_t receivedPCBytes[numBytes];
-uint8_t numRecvdBytes = 0;
-char sendingPCChars[numChars];
-uint8_t sendingPCBytes[numBytes];
-char sendingHWChars[numHWSerials][numChars];
-uint8_t numSendingHWChars[numHWSerials] = { 0 };
+
+constexpr size_t BUFFER_LEN = 32;
+uint8_t receivedHWBytes[numHWSerials][BUFFER_LEN];
+uint8_t receivedPCBytes[BUFFER_LEN];
+size_t PCBytes_len = 0;
+size_t HWBytes_len[numHWSerials] = { 0 };
+uint8_t sendingPCBytes[BUFFER_LEN];
+char sendingHWChars[numHWSerials][BUFFER_LEN];
+size_t numsendingHWChars[numHWSerials] = { 0 };
 bool newHWMsg[numHWSerials] = { false };
 bool newPCMsg = false;
+bool newJointVelCmd = false;
+bool newJointPosCmd = false;
+bool newTargetVelCmd = false;
 
 // Protocals
-uint8_t VEL = 0x56 // "V"
-uint8_t POS = 0x50 // "P"
-uint8_t ENC = 0x45 // "E"
-uint8_t START = 0x49 // "I"
-uint8_t STOP = 0x53 // "S"
-uint8_t ZERO = 0x5A // "Z"
-uint8_t LIMIT = 0x4C // "L"
+constexpr size_t REQ_ID_LEN    = 16;
+
+constexpr uint8_t startMarker = '$';
+constexpr uint8_t endMarker = '\n'; // <LF>
+constexpr uint8_t respMarker = '!';
+constexpr uint8_t PCStartMarker = '<';
+constexpr uint8_t PCEndMarker = '>';
+
+constexpr uint8_t VEL = 'V';
+constexpr uint8_t POS = 'P';
+constexpr uint8_t ENC = 'E';
+constexpr uint8_t START = 'I';
+constexpr uint8_t STOP = 'S';
+constexpr uint8_t ZERO = 'Z';
+constexpr uint8_t SET_VEL = 'F';
+constexpr uint8_t DEBUG = 'D';
+constexpr uint8_t CONNECT = 'C';
+constexpr uint8_t LIMIT = 'L';
+constexpr uint8_t LIMIT_P = 'c';
+constexpr uint8_t LIMIT_C = 'b';
+constexpr uint8_t LIMIT_M = 'a';
+constexpr uint8_t LIMIT_N = 'n';
+
+// constexpr uint8_t MAX_PENDING_ACKS = 8;
+constexpr uint32_t ACK_TIMEOUT_MS = 1000;
+struct PendingAck {
+  bool valid = false;
+  uint8_t prefix;
+  uint8_t uuid[REQ_ID_LEN];
+  // uint32_t t_start_ms;
+};
+
+PendingAck pendingAck; // task acknowledgement
 
 // Quadrature decoder
 QuadEncoder Enc1(1, 0, 1); // A, B
 QuadEncoder Enc2(2, 2, 3);
 QuadEncoder Enc4(3, 4, 30);
 QuadEncoder Enc5(4, 31, 33);
-Encoder Enc3(26, 23);  // B, A
-Encoder Enc6(32, 27);
+Encoder Enc0(26, 23);  // B, A
+Encoder Enc3(32, 27);
 QuadEncoder *HWEncoders[] = {&Enc1, &Enc2, &Enc4, &Enc5};
-Encoder *SWEncoders[] = {&Enc3, &Enc6};
+Encoder *SWEncoders[] = {&Enc0, &Enc3};
 
-// Encoder Enc1(1, 0); // B, A
-// Encoder Enc2(3, 2);
-// QuadEncoder *HWEncoders[] = {&Enc4, &Enc5};
-// Encoder *SWEncoders[] = {&Enc1, &Enc2, &Enc3, &Enc6};
-constexpr float EncRes = 0.045; // deg
+constexpr float EncRes = 0.045f; // deg
 constexpr uint16_t maxRPM = 250;
-long EncCounts[numHWSerials] = { 10,20,30,40,50,60 };
-float EncPos[numHWSerials] = { 0.0 }
-float jointPos[numHWSerials] = { 0.0 };
-float jointVel[numHWSerials] = { 0.0 };
+long EncCounts[numHWSerials] = { 0 };
+float EncPos[numHWSerials] = { 0.0f };
+// float jointPos[numHWSerials] = { 0.0f };
+// float jointVel[numHWSerials] = { 0.0f };
 
-// Joint transmission, joint/motor, positive direction: ?
-constexpr float linRate = 67.319841f/60.0f; // mm*min/rev*s
-constexpr float rotRate = 0.375f/60.0f; // rev*min/rev*s
-constexpr float catheterBendRate = 1.190625f/60.0f; // mm*min/rev*s
-constexpr float sheathBendRate = 0.375f/60.0f; // rev*min/rev*s
-constexpr float jointRate[numHWSerials] = { linRate, rotRate, catheterBendRate, linRate, rotRate, sheathBendRate};
+// Joint transmission, joint/motor, positive direction: right-hand or forward
+constexpr float linRate = 67.319841f; // mm/rev
+constexpr float rotRate = 0.375f; // rev/rev
+constexpr float catheterBendRate = -1.190625f; // mm/rev
+constexpr float sheathBendRate = 0.375f; // rev/rev
+constexpr float jointPRate[numHWSerials] = { linRate/360.0f, rotRate, catheterBendRate/360.0f, 
+                                            linRate/360.0f, rotRate, sheathBendRate }; // mm/deg, deg/deg
+constexpr float jointVRate[numHWSerials] = { linRate/60.0f, rotRate/60.0f, catheterBendRate/60.0f, 
+                                            linRate/60.0f, rotRate/60.0f, sheathBendRate/60.0f }; // mm*min/rev*s, rev*min/rev*s
+constexpr float catheterBendUB = 20.8f;
+constexpr float catheterBendLB = 0.0f;
+constexpr float sheathBendUB = 360.0f;
+constexpr float sheathBendLB = -360.0f;
 
-// Variables
-int isLimitSwitchBlocked[3] = { 0 };
-// double targetPositions[numHWSerials];
-long targetCounts[numHWSerials];
-long targetHz[numHWSerials];
-float receivedVel[numHWSerials] = { 0.0 };
+// State Variables
+int limitState[5] = { 0 };
+// long targetCounts[numHWSerials];
+// long targetHz[numHWSerials];
+float targetPos[numHWSerials] = { 0.0f };
+uint16_t targetDeg[numHWSerials] = { 0 };
+float currentPos[numHWSerials] = { 0.0f }; // decoupled
+float currentSheathBendPos = 0.0f; // coupled
+float targetVel[numHWSerials] = { 0.0f };
 uint16_t targetRPM[numHWSerials] = { 0 };
-uint8_t rotationDirection[numHWSerials] = { 1 };
-
+uint8_t targetDir[numHWSerials] = { '1' }; // '0': right-hand, '1': left-hand
+uint8_t currentDir[numHWSerials] = { '1' };
 
 // Timing
-elapsedMillis sincePrintEnc;
-// elapsedMicros sinceRecvPCMsg;
+elapsedMillis sinceLastCycle;
+elapsedMillis sinceLastPCMsg;
+constexpr uint32_t PC_SILENCE_MS = 10000;
 
 void setup() {
   // put your setup code here, to run once:
@@ -99,16 +128,14 @@ void setup() {
 
   // set up motor communications
   for (uint8_t i = 0; i < numHWSerials; i++) {
-    HWSerials[i]->transmitterEnable(TE[i]);
+    // HWSerials[i]->transmitterEnable(TE[i]);
     HWSerials[i]->begin(115200);
 
     // set motors in closed-loop mode
-    snprintf(sendingHWChars[i], sizeof(sendingHWChars[i]), "$L1\n");
-    HWSerials[i]->print(sendingHWChars[i]);
-    snprintf(sendingHWChars[i], sizeof(sendingHWChars[i]), "$S%u\n", rotationDirection[i]);
-    HWSerials[i]->print(sendingHWChars[i]);
+    HWSerials[i]->write("$L1\n", 4);
+    snprintf(sendingHWChars[i], sizeof(sendingHWChars[i]), "$S%u\n", currentDir[i]);
+    HWSerials[i]->write(sendingHWChars[i]);
     sendingHWChars[i][0] = '\0';
-    // Serial.println(i);
   }
 
   // set up encoders
@@ -118,102 +145,69 @@ void setup() {
     HWEncoders[i]->init();
   }
 
-  // Sync encoder count with PMD401
-  // alignEncoders();
-
   for (uint8_t i = 0; i < 3; i++) {
     pinMode(LimitSwitch[i], INPUT_PULLUP);
   }
 }
 
 void loop() {
-    // put your main code here, to run repeatedly:
-    CheckLimitSwitches();
-    // digitalWrite(LED_BUILTIN, HIGH);
-
-    
-    recvSerialBytes();
+    // Asychronous I/O 
+    recvPCSerial();
     procPCBytes();
+    recvHWSerials();
+    procHWBytes();
     
-    if (sincePrintEnc > 100) {
+    // control Cycle 100Hz
+    if (sinceLastCycle > 10) {
+      sinceLastCycle = 0;
       readEncoders();
-      sincePrintEnc = 0;
+      CheckLimitSwitches();
+      sendMotorCmds();
     }
 
-    // debug
-    // recvSerialChars();
-    // procPCChars();
-    // recvHWSerials();
-    // printCharMsg();
+    // watchdog
+    if (sinceLastPCMsg > PC_SILENCE_MS) {
+      for (uint8_t i = 0; i < numHWSerials; i++)
+        HWSerials[i]->print("$O0\n");
+    }
 }
 
 void recvHWSerials() {
     static bool recvInProgress[numHWSerials] = {false};
     static uint8_t ndx[numHWSerials] = {0};
-    char rc;
+    uint8_t rb;
 
     for (uint8_t i = 0; i < numHWSerials; i++){
       while (HWSerials[i]->available() > 0 && newHWMsg[i] == false) {
-          rc = HWSerials[i]->read();
+          rb = HWSerials[i]->read();
 
           if (recvInProgress[i] == true) {
-              if (rc != endMarker) {
-                  receivedHWChars[i][ndx[i]] = rc;
+              if (rb != endMarker) {
+                  receivedHWBytes[i][ndx[i]] = rb;
                   ndx[i]++;
-                  if (ndx[i] >= numChars) {
-                      ndx[i] = numChars - 1;
+                  if (ndx[i] >= BUFFER_LEN) {
+                      ndx[i] = BUFFER_LEN - 1;
                   }
               }
               else {
-                  receivedHWChars[i][ndx[i]] = '\0'; // terminate the string
+                  // receivedHWBytes[i][ndx[i]] = '\0'; // terminate the string
+                  HWBytes_len[i] = ndx[i];
                   recvInProgress[i] = false;
                   ndx[i] = 0;
                   newHWMsg[i] = true;
               }
           }
 
-          else if (rc == startMarker) {
+          else if (rb == respMarker) {
               recvInProgress[i] = true;
-              receivedHWChars[i][0] = rc; // including start marker for hardware serial
+              receivedHWBytes[i][0] = rb; // including start marker for hardware serial
               ndx[i]++;
           }
       }
     }
 }
 
-void recvSerialChars() {
-    static bool recvInProgress = false;
-    static uint8_t ndx = 0;
-    char rc;
-
-    while (Serial.available() > 0 && newPCMsg == false) {
-      rc = Serial.read();
-
-      if (recvInProgress == true) {
-        if (rc != PCCharEndMarker) {
-          receivedPCChars[ndx] = rc;
-          ndx++;
-          if (ndx >= numChars) {
-            ndx = numChars - 1;
-          }
-        }
-        else {
-          receivedPCChars[ndx] = '\0'; // terminate the string
-          // numRecvdBytes = ndx;
-          recvInProgress = false;
-          ndx = 0;
-          newPCMsg = true;
-          // sinceRecvPCMsg = 0;
-        }
-      }
-
-      else if (rc == PCCharStartMarker) {
-        recvInProgress = true;
-      }
-    }
-}
-
-void recvSerialBytes() {
+void recvPCSerial() {
     static bool recvInProgress = false;
     static uint8_t ndx = 0;
     uint8_t rb;
@@ -222,326 +216,453 @@ void recvSerialBytes() {
       rb = Serial.read();
 
       if (recvInProgress == true) {
-        if (rb != PCByteEndMarker) {
+        if (rb != PCEndMarker) {
           receivedPCBytes[ndx] = rb;
           ndx++;
-          if (ndx >= numBytes) {
-            ndx = numBytes - 1;
+          if (ndx >= BUFFER_LEN) {
+            ndx = BUFFER_LEN - 1;
           }
         }
         else {
-          receivedPCBytes[ndx] = '\0'; // terminate the string
-          numRecvdBytes = ndx;
+          // receivedPCBytes[ndx] = '\0'; // terminate the string
+          PCBytes_len = ndx;
           recvInProgress = false;
           ndx = 0;
           newPCMsg = true;
-          // sinceRecvPCMsg = 0;
+          sinceLastPCMsg = 0;
         }
       }
 
-      else if (rb == PCByteStartMarker) {
+      else if (rb == PCStartMarker) {
         recvInProgress = true;
       }
     }
 }
 
-bool alignEncoders() {
-  // uint8_t failedAxis = 0;
-  uint32_t startTime;
-  for (uint8_t i = 0; i < numHWSerials; i++) {
-    snprintf(sendingHWChars[i], sizeof(sendingHWChars[i]), "X%dE\r", i+1);
-    HWSerials[i]->print(sendingHWChars[i]);
-    startTime = millis();
-    while (newHWMsg[i] == false) {
-      recvHWSerials();
-      if (newHWMsg[i] == false && millis() - startTime > 500) {
-        // failedAxis = i+1;
-        return false;
-      }
-    }
-    sscanf(receivedHWChars[i], "X%*dE:%ld\r", &EncCounts[i]); // should return 1
-    newHWMsg[i] = false;
-  }
-  // for (uint8_t i = 0; i < 3; i++) {
-  //   SWEncoders[i]->write(EncCounts[i]);
-  // }
-  // for (uint8_t i = 0; i < 2; i++) {
-  //   HWEncoders[i]->write(EncCounts[i+3]);
-  // }
-  // for (uint8_t i = 0; i < 1; i++) {
-  //   SWEncoders[i+3]->write(EncCounts[i+5]);
-  // }
-  return true;
+static inline bool hasUUID(uint8_t cmd) {
+  return (cmd != VEL && cmd != POS && cmd != CONNECT);
 }
 
-void readEncoders() {
-  for (uint8_t i = 0; i < 3; i++) {
-    EncCounts[i] = SWEncoders[i]->read();
-    EncPos[i] = EncCounts[i]*EncRes;
-    jointPos[i] = 
-    // snprintf(sendingPCChars, sizeof(sendingPCChars), "Enc%d: ", i+1);
-    // Serial.print(sendingPCChars);
-    // Serial.println(EncCounts[i]);
-  }
-  for (uint8_t i = 0; i < 2; i++) {
-    EncCounts[i+3] = HWEncoders[i]->read();
-    EncPos[i+3] = EncCounts[i+3]*EncRes;
-    // snprintf(sendingPCChars, sizeof(sendingPCChars), "Enc%d: ", i+4);
-    // Serial.print(sendingPCChars);
-    // Serial.println(EncCounts[i+3]);
-  }
-  for (uint8_t i = 0; i < 1; i++) {
-    EncCounts[i+5] = SWEncoders[i+3]->read();
-    EncPos[i+5] = EncCounts[i+5]*EncRes;
-    // snprintf(sendingPCChars, sizeof(sendingPCChars), "Enc%d: ", i+6);
-    // Serial.print(sendingPCChars);
-    // Serial.println(EncCounts[i+5]);
-  }
+// bool registerPendingAck(uint8_t prefix, const uint8_t* uuid) {
+//   for (uint8_t i = 0; i < MAX_PENDING_ACKS; i++) {
+//     if (!pendingAcks[i].valid) {
+//       pendingAcks[i].valid = true;
+//       pendingAcks[i].prefix = prefix;
+//       memcpy(pendingAcks[i].uuid, uuid, REQ_ID_LEN);
+//       pendingAcks[i].t_start_ms = millis();
+//       return true;
+//     }
+//   }
+//   return false;  // table full → drop or NACK
+// }
 
-  // uint32_t startTime;
-  // for (uint8_t i = 0; i < numHWSerials; i++) {
-  //   snprintf(sendingHWChars[i], sizeof(sendingHWChars[i]), "X%dE\r", i+1); //i+1
-  //   HWSerials[i]->print(sendingHWChars[i]);
-  //   startTime = millis();
-  //   while (newHWMsg[i] == false) {
-  //     recvHWSerials();
-  //     if (newHWMsg[i] == false && millis() - startTime > 100) {
-  //       // failedAxis = i+1;
-  //       // return false;
-  //       break;
-  //     }
-  //   }
-  //   sscanf(receivedHWChars[i], "X%*dE:%ld\r", &EncCounts[i]); // should return 1
-  //   newHWMsg[i] = false;
-  // }
+void sendAckIfPending() {
+  if (!pendingAck.valid) return;
 
-  sendingPCBytes[0] = PCByteStartMarker;
-  sendingPCBytes[1] = ENC; // 'E'
-  memcpy(sendingPCBytes + 2, jointPos, sizeof(jointPos));
-  sendingPCBytes[2 + sizeof(jointPos)] = PCByteEndMarker;
-  Serial.write(sendingPCBytes, 3 + sizeof(jointPos));
-}
+  Serial.write(&PCStartMarker, 1);
+  Serial.write(&pendingAck.prefix, 1);
+  Serial.write(pendingAck.uuid, REQ_ID_LEN);
+  Serial.write(&PCEndMarker, 1);
 
-void procPCChars() {
-  static uint8_t axis = 0;
-  uint8_t pos = 0;
-  if (newPCMsg) {
-    // Serial.println(receivedPCChars);
-    // Serial1.print("X1E\r");
-    switch (receivedPCChars[0]) {
-
-      case startMarker: // Directly sending command to PMD401
-        pos = 0;
-        for (uint8_t i = 0; receivedPCChars[i] != '\0'; i++) {
-          if (receivedPCChars[i] == startMarker && receivedPCChars[i + 1] != '\0') { // check next char exists
-            // TODO: check axis validity, including the scenario that 'X' is the last byte
-            if (i != 0) {
-              sendingHWChars[axis][pos++] = endMarker;
-              numSendingHWChars[axis] = pos;
-              sendingHWChars[axis][pos] = '\0';
-            }
-            axis = receivedPCChars[i + 1] - '0' - 1;
-            sendingHWChars[axis][0] = startMarker;
-            pos = 1;
-          }
-          else {
-            sendingHWChars[axis][pos++] = receivedPCChars[i];
-            if (receivedPCChars[i + 1] == '\0') {
-              sendingHWChars[axis][pos++] = endMarker;
-              numSendingHWChars[axis] = pos;
-              sendingHWChars[axis][pos] = '\0';
-            }
-          }
-        }
-        // for (uint8_t i = 0; i < numHWSerials; i++) {
-          // Serial.write((const uint8_t*)sendingHWChars[i], numSendingHWChars[i]);
-          // Serial.write('\n');
-          // Serial.write(0);
-          // Serial.println(sendingHWChars[i]);
-        // }
-        sendCmd();
-        // Serial1.print("X1EX2E\r");
-        break;
-
-      default:
-        break;
-    }
-  }
-  newPCMsg = false;
+  pendingAck.valid = false;
 }
 
 void procPCBytes() {
   // static uint8_t axis = 0;
   // uint8_t pos = 0;
-  static uint8_t targetDirection = 1;
-  static uint8_t sign;
-  static float abs;
+  static float temp;
+  // static float abs;
+  // static uint8_t req_id[16]
 
   if (newPCMsg) {
+      newPCMsg = false;
 
-    for (uint8_t i = 0; i < numRecvdBytes; i++){ // only iterates through predicates
+    // for (uint8_t i = 0; i < PCBytes_len; i++){ // only iterates through predicates
       // digitalWrite(LED_BUILTIN,HIGH);
-      switch (receivedPCBytes[i]) {
+      uint8_t cmd = receivedPCBytes[0];
 
-        case VEL: // 'V'
+      if (hasUUID(cmd)) {
+        // Capture ACK info immediately
+        pendingAck.valid = true;
+        pendingAck.prefix = cmd;
+        memcpy(pendingAck.uuid, receivedPCBytes + 1, REQ_ID_LEN);
+        // if (!registerPendingAck(cmd, receivedPCBytes + 1)) {
+        //   // optional: send immediate NACK or error
+        //   newPCMsg = false;
+        //   return;
+        // }   
+      }
+
+      switch (cmd) {
+
+        case VEL: {// 'V'
+          newJointPosCmd = false;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            receivedVel[axis] = (float)receivedPCBytes[++i];
-            receivedVel[axis] |= (float)receivedPCBytes[++i] << 8;
-            receivedVel[axis] |= (float)receivedPCBytes[++i] << 16;
-            receivedVel[axis] |= (float)receivedPCBytes[++i] << 24;
+            memcpy(&targetVel[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
+            newJointVelCmd = isVelCmdValid(axis);
+            if (!newJointVelCmd) { break; }
 
-            if (axis == 5) { receivedVel[5] += receivedVel[4]; }
+            if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
 
-            sign = (receivedVel[axis] >= 0.0f) ? 1 : 0;
-            abs = std::fabsf(receivedVel[axis]);
-            
-            targetRPM[axis] = static_cast<uint16_t>(std::roundf(abs/jointRate[axis]));
+            temp = targetVel[axis]/jointVRate[axis];
+
+            targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
+            targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
 
             if (targetRPM[axis] > maxRPM) { targetRPM[axis] = maxRPM; }
-
-            if (sign != rotationDirection[axis]) {
-              snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), 
-                "$S%u | C%hu\n", sign, targetPRM[axis]);
-              rotationDirection[axis] = sign;
-            } else {
-              snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), 
-                "$C%hu\n", targetPRM[axis]);
-            }
-            
-            HWSerials[axis]->print(sendingHWChars[axis]);
           }
           break;
+        }
 
-        case POS: // 'P'
-          // digitalWrite(LED_BUILTIN,HIGH);
+        case POS: {// 'P'
+          newJointVelCmd = false;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            targetHz[axis] = (long)receivedPCBytes[++i];
-            targetHz[axis] |= (long)receivedPCBytes[++i] << 8;
-            targetHz[axis] |= (long)receivedPCBytes[++i] << 16;
-            targetHz[axis] |= (long)receivedPCBytes[++i] << 24;
-            snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "$F%ld\n", targetHz[axis]);
-            HWSerials[axis]->print(sendingHWChars[axis]);
+            memcpy(&targetPos[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
+            newJointPosCmd = isPosCmdValid(axis);
+            if (!newJointPosCmd) { break; }
+
+            if (axis == 5) { targetPos[5] += targetPos[4]; } // decouple rot and bend for sheath
+
+            temp = (targetPos[axis] - currentPos[axis])/jointPRate[axis];
+
+            targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
+            targetDeg[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
           }
           break;
+        }
 
-        case 0x41: // 'A' check motor serial connection and align encoder readings
-          bool aligned = false;
-          while (!aligned) {
-            aligned = alignEncoders();
-          }
-          sendingPCBytes[0] = PCByteStartMarker;
-          sendingPCBytes[1] = 0x41; // 'A'
-          sendingPCBytes[2] = PCByteEndMarker;
-          Serial.write(sendingPCBytes, 3);
-          // Unpark motors
+        case SET_VEL: {// 'F', set target velocity for pos control
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "X%dS\r", axis+1);
-            HWSerials[axis]->print(sendingHWChars[axis]);
+            memcpy(&targetVel[axis], receivedPCBytes + 1 + REQ_ID_LEN + axis*4, 4); // float size 4
+
+            if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
+
+            temp = targetVel[axis]/jointVRate[axis];
+            targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
           }
+          newTargetVelCmd = true;
+          newJointVelCmd = false;
+          sendAckIfPending();
           break;
+        }
 
-        case ZERO: // 'Z', set all encoders to 0
-          // for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-          //   snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "X%dE0\r", axis+1);
-          //   HWSerials[axis]->print(sendingHWChars[axis]);
-          // }
-
+        case ZERO: {// 'Z', set all encoders to 0
           for (uint8_t i = 0; i < 4; i++) {
             HWEncoders[i]->write(0);
           }
           for (uint8_t i = 0; i < 2; i++) {
-            SWEncoders[i+4]->write(0);
+            SWEncoders[i]->write(0);
           }
-          break;
-
-        case STOP: // 'S', stop all motors
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "$O0\n");
-            HWSerials[axis]->print(sendingHWChars[axis]);
+            EncCounts[axis] = 0;
+            currentPos[axis] = 0.0f;
+            currentSheathBendPos = 0.0f;
           }
+          sendAckIfPending();
           break;
+        }
 
-        case START: // 'I', initialize all motors
+        case STOP: {// 'S', stop all motors
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "$O1\n");
-            HWSerials[axis]->print(sendingHWChars[axis]);
+            // snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "$O0\n");
+            // HWSerials[axis]->print(sendingHWChars[axis]);
+            HWSerials[axis]->print("$O0\n");
           }
           break;
+        }
+
+        // case START: {// 'I', initialize all motors
+        //   for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+        //     // snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "$O1\n");
+        //     // HWSerials[axis]->print(sendingHWChars[axis]);
+        //     HWSerials[axis]->print("$O1\n");
+        //   }
+        //   break;
+        // }
+
+        case DEBUG: {// 'D', send and read raw command
+          // if (PCBytes_len < 1 + REQ_ID_LEN) return;
+
+          // uint8_t axis = receivedPCBytes[1 + REQ_ID_LEN] - '0';
+          // const uint8_t* payload = receivedPCBytes + 2 + REQ_ID_LEN;
+          // size_t payload_len = PCBytes_len - (2 + REQ_ID_LEN);
+          // HWSerials[axis]->write(payload, payload_len);
+
+          uint8_t axis = receivedPCBytes[1 + REQ_ID_LEN] - '0';
+          const uint8_t* payload = receivedPCBytes + 2 + REQ_ID_LEN;
+          size_t payload_len = PCBytes_len - 2 - REQ_ID_LEN;
+          HWSerials[axis]->write(&startMarker, 1);
+          HWSerials[axis]->write(payload, payload_len);
+          HWSerials[axis]->write(&endMarker, 1);
+          
+          break;
+        }
+
+        case CONNECT: { // 'C', confirm PC connection
+          digitalWrite(LED_BUILTIN, HIGH);
+          sendAckIfPending();
+          break;
+        }
 
         default:
           break;
       }
-    }
+    // }
   }
-  newPCMsg = false;
-  // numRecvdBytes = 0;
+  // PCBytes_len = 0;
 }
 
-void ProcDriverChars() {
-  // TODO
-  ;
+static inline bool isVelCmdValid(uint8_t axis) {
+  switch (axis) {
+    case 0: {
+      return !((limitState[2] && (limitState[1] || targetVel[0] < 0.0f)) ||
+              (limitState[1] && targetVel[3] > 0.0f));
+    }
+    case 2: {
+      return !((limitState[3] < 0 && targetVel[2] < 0.0f) || 
+              (limitState[3] > 0 && targetVel[2] > 0.0f));
+    }
+    case 3: {
+      return !((limitState[0] && (limitState[1] || targetPos[3] > 0.0f)) ||
+              (limitState[1] && targetVel[3] < 0.0f));
+    }
+    case 5: {
+      return !((limitState[4] < 0 && targetVel[5] < 0.0f) || 
+              (limitState[4] > 0 && targetVel[5] > 0.0f));
+    }
+    default: { return true;}
+  }
+}
+
+static inline bool isPosCmdValid(uint8_t axis) {
+  switch (axis) {
+    case 0: {
+      return !((limitState[2] && (limitState[1] || targetPos[0] < currentPos[0])) ||
+              (limitState[1] && targetPos[0] > currentPos[0]));
+    }
+    case 2: {
+      return !((limitState[3] < 0 && targetPos[2] < currentPos[2]) || 
+              (limitState[3] > 0 && targetPos[2] > currentPos[2]));
+    }
+    case 3: {
+      return !((limitState[0] && (limitState[1] || targetPos[3] > currentPos[3])) ||
+              (limitState[1] && targetPos[3] < currentPos[3]));
+    }
+    case 5: {
+      return !((limitState[4] < 0 && targetPos[5] < currentSheathBendPos) || 
+              (limitState[4] > 0 && targetVel[5] > currentSheathBendPos));
+    }
+    default: { return true;}
+  }
+}
+
+void procHWBytes() {
+  ; // TODO
+
+  // switch (pendingAck.prefix) {
+  //   case STOP: {
+  //     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+  //       if (newHWMsg[axis]) {
+  //         // parse hardware response
+  //         // if response indicates completion:
+  //         sendAckIfPending();
+  //         newHWMsg[axis] = false;
+  //       }
+  //     }
+  //     break;
+  //   }
+  // }
+}
+
+void readEncoders() {
+  EncCounts[0] = Enc0.read();
+  EncCounts[1] = Enc1.read();
+  EncCounts[2] = Enc2.read();
+  EncCounts[3] = Enc3.read();
+  EncCounts[4] = Enc4.read();
+  EncCounts[5] = Enc5.read();
+  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+    // EncPos[axis] = EncCounts[axis]*EncRes;
+    currentPos[axis] = EncCounts[axis]*EncRes*jointPRate[axis];
+  }
+  // coupled rot and bend for sheath
+  currentSheathBendPos = currentPos[5] - currentPos[4];
+
+  sendingPCBytes[0] = PCStartMarker;
+  sendingPCBytes[1] = POS;
+  memcpy(sendingPCBytes + 2, currentPos, 20); // 5*float
+  memcpy(sendingPCBytes + 22, &currentSheathBendPos, 4); // 1*float
+  sendingPCBytes[26] = PCEndMarker;
+  Serial.write(sendingPCBytes, 27);
 }
 
 void CheckLimitSwitches() {
-  bool trigger_event = false;
-  int temp = 0;
+  static bool trigger_event = false;
+  static int temp = 0;
+  static uint8_t *p;
+
+  p = sendingPCBytes;
+  *p++ = LIMIT;
+
+  // linear physical switches
   for (uint8_t i = 0; i < 3; i++) {
     temp = digitalRead(LimitSwitch[i]);
-    if (temp != isLimitSwitchBlocked[i]) {
-      isLimitSwitchBlocked[i] = temp;
+    if (temp != limitState[i]) {
+      limitState[i] = temp;
       trigger_event = true;
+      *p++ = LIMIT_C + limitState[i];
+    } else {
+      *p++ = LIMIT_N;
     }
   }
-  // digitalWrite(LED_BUILTIN, isLimitSwitchBlocked[0]);
+
+  // catheter bending
+  if (currentPos[2] >= catheterBendUB) {
+      temp = 1;
+  } else if (currentPos[2] <= catheterBendLB) {
+      temp = -1;
+  } else {
+      temp = 0;
+  }
+  if (temp != limitState[3]) {
+    limitState[3] = temp;
+    trigger_event = true;
+    *p++ = LIMIT_C + limitState[3];
+  } else {
+    *p++ = LIMIT_N;
+  }
+
+  // sheath bending
+  if (currentPos[5] >= sheathBendUB) {
+      temp = 1;
+  } else if (currentPos[5] <= sheathBendLB) {
+      temp = -1;
+  } else {
+      temp = 0;
+  }
+  if (temp != limitState[4]) {
+    limitState[4] = temp;
+    trigger_event = true;
+    *p++ = limitState[4] + LIMIT_C;
+  } else {
+    *p++ = LIMIT_N;
+  }
+
+  // digitalWrite(LED_BUILTIN, limitState[0]);
   if (trigger_event) {
-    sendingPCBytes[0] = PCByteStartMarker;
-    sendingPCBytes[1] = LIMIT; // 'L'
-    for (uint8_t i = 0; i < 3; i++) {
-      sendingPCBytes[i+2] = isLimitSwitchBlocked[i]? 0x31 : 0x30; // 0:1
+    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      HWSerials[axis]->write("$O0\n", 4);
     }
-    sendingPCBytes[5] = PCByteEndMarker;
+    Serial.write(&PCStartMarker, 1);
     Serial.write(sendingPCBytes, 6);
+    Serial.write(&PCEndMarker, 1);
   }
 }
 
-void sendCmd() {
-  for (uint8_t i = 0; i < numHWSerials; i++) {
-    sendingHWChars[i][numSendingHWChars[i]] = '\0';
-    HWSerials[i]->print(sendingHWChars[i]);
-    // Serial.println(sendingHWChars[i]);
-    // HWSerials[i]->write((const uint8_t*)sendingHWChars[i], numSendingHWChars[i]);
-    numSendingHWChars[i] = 0;
-    // delayMicroseconds(1000); // for single RS485 bus
-  }
-}
+void sendMotorCmds() {
+  static char *p;
+  if (newJointVelCmd) {
+    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      p = sendingHWChars[axis];
 
-void printCharMsg() {
-  for (uint8_t i = 0; i < numHWSerials; i++) {
-    if (newHWMsg[i]) {
-      snprintf(sendingPCChars, sizeof(sendingPCChars), "Serial%d received: ", i+1);
-      Serial.print(sendingPCChars);
-      Serial.println(receivedHWChars[i]);
-      newHWMsg[i] = false;
-      // if (i == 4) {
-      //   Serial.print("Time elasped since msg received: ");
-      //   Serial.print((unsigned long)sinceRecvPCMsg);
-      //   Serial.println("us");
-      // }
+      if (targetDir[axis] != currentDir[axis]) {
+        // ("$S%u\n", targetDir[axis])
+        *p++ = startMarker;
+        *p++ = 'S';
+        *p++ = targetDir[axis];
+        *p++ = endMarker;
+        currentDir[axis] = targetDir[axis];
+      }
+
+      *p++ = startMarker;
+      *p++ = 'C';
+      p = write_uint16(p, targetRPM[axis]);
+      *p++ = endMarker;
+
+      HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
     }
+    newJointVelCmd = false;
+
+  } else if (newJointPosCmd) {
+    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      p = sendingHWChars[axis];
+      
+
+      if (targetDir[axis] != currentDir[axis]) {
+        // ("$S%u\n", targetDir[axis])
+        *p++ = startMarker;
+        *p++ = 'S';
+        *p++ = targetDir[axis];
+        *p++ = endMarker;
+        currentDir[axis] = targetDir[axis];
+      }
+
+      if (newTargetVelCmd) {
+        *p++ = startMarker;
+        *p++ = 'C';
+        p = write_uint16(p, targetVel[axis]);
+        *p++ = endMarker;
+      }
+
+      *p++ = startMarker;
+      *p++ = 'A';
+      p = write_uint16(p, targetDeg[axis]);
+      *p++ = endMarker;
+
+      HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
+    }
+    newJointPosCmd = false;
+    newTargetVelCmd = false;
   }
 }
 
-void float_sign_abs(float x, uint8_t &sign, float &abs_x) {
-    static uint32_t bits = 1;
+static inline char* write_uint16(char *p, uint16_t v) {
+    char tmp[5];
+    uint8_t i = 0;
 
-    // copy float bits to uint32_t
-    memcpy(&bits, &x, sizeof(bits));
+    do {
+        tmp[i++] = '0' + (v % 10);
+        v /= 10;
+    } while (v);
 
-    sign = (bits >> 31) & 1;
+    while (i--)
+        *p++ = tmp[i];
 
-    // clear sign bit for absolute value
-    bits &= 0x7FFFFFFF;
-
-    // copy back to float
-    memcpy(&abs_x, &bits, sizeof(abs_x));
+    return p;
 }
+
+// =======================================================================
+
+// static inline void set_zero_vel()
+// {
+//   for (uint8_t axis = 0; axis < numHWSerials; axis++){
+//     HWSerials[axis]->write("$C0\n", 4);
+//   }
+// }
+
+// void printCharMsg() {
+//   for (uint8_t i = 0; i < numHWSerials; i++) {
+//     if (newHWMsg[i]) {
+//       snprintf(sendingPCChars, sizeof(sendingPCChars), "Serial%d received: ", i+1);
+//       Serial.print(sendingPCChars);
+//       Serial.write(receivedHWBytes[i], HWBytes_len[i]);
+//       Serial.print("\r\n");
+//       newHWMsg[i] = false;
+//     }
+//   }
+// }
+
+// void float_sign_abs(float x, uint8_t &sign, float &abs_x) {
+//     static uint32_t bits = 1;
+
+//     // copy float bits to uint32_t
+//     memcpy(&bits, &x, sizeof(bits));
+
+//     sign = (bits >> 31) & 1;
+
+//     // clear sign bit for absolute value
+//     bits &= 0x7FFFFFFF;
+
+//     // copy back to float
+//     memcpy(&abs_x, &bits, sizeof(abs_x));
+// }

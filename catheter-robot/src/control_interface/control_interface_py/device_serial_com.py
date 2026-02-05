@@ -28,14 +28,12 @@ response_prefix = [ManagerEvent.CONNECTION,
 class SerialCommunication(Node):
     def __init__(self):
         super().__init__(
-            'device_serial_com',
-            automatically_declare_parameters_from_overrides=True
-            )
+            'device_serial_com')
  
         # ---- Parameters ----
         self.startMarker = b'<'
         self.endMarker = b'>'
-        self.timeout_sec = self.declare_parameter('timeout_sec', 1.0).value
+        self.timeout_sec = 1.0
 
         # ---- Serial ----
         self.serial_port: Optional[serial.Serial] = None
@@ -74,18 +72,22 @@ class SerialCommunication(Node):
     # Serial connection
     # ============================================================
 
-    def connect(self, port: str, baudrate: int = 115200, timeout: float = 1.0):
+    def connect(self, port: str='/dev/ttyACM0', baudrate: int = 115200, timeout: float = 1.0):
         """Connect to the specified serial port"""
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
-        # the frequency of data receiving should be higher than the device sending
-        self.serial_port = serial.Serial(port, baudrate, timeout=timeout) 
-        self.is_connected = self.serial_port.is_open
-
-        if self.is_connected:
-            self.get_logger().info(f"Connected to {port} @ {baudrate}")
-        else:
-            self.get_logger().error("Failed to open serial port")
+        
+        for i in range(20):
+            try:
+                self.serial_port = serial.Serial(port, baudrate, timeout=1)
+                self.is_connected = self.serial_port.is_open
+                self.get_logger().info(f"Serial connected: {port}")
+                return
+            except serial.SerialException as e:
+                self.get_logger().warn(f"Attempt {i+1}: cannot open {port}, {e}, retrying...")
+                self.is_connected = False
+                time.sleep(0.1)
+        self.get_logger().error(f"Failed to open serial port {port}")
 
     def close(self):
         """Close the serial port connection"""
@@ -108,12 +110,13 @@ class SerialCommunication(Node):
             self.serial_port.write(
                 self.startMarker + payload + self.endMarker
                 )
+            self.get_logger().info(f"sending bytes: {payload}")
         except serial.SerialException as e:
             self.get_logger().error(f"Serial TX error: {e}")
         
     def on_manager_control(self, msg: DeviceStream):
         prefix = bytes([msg.predicate])
-        data = struct.pack("<" + "d" * len(msg.data), *msg.data)
+        data = struct.pack("<" + "f" * len(msg.data), *msg.data) # convert to float32
         self.send_bytes(prefix + data)
 
     # ============================================================
@@ -123,8 +126,15 @@ class SerialCommunication(Node):
     def rx_loop(self):
         while rclpy.ok():
             if not self.serial_port or not self.serial_port.is_open:
-                time.sleep(0.01)
+                time.sleep(0.1)
                 continue
+            # if not self.is_connected:
+            #     # Try reconnecting automatically
+            #     try:
+            #         self.connect('/dev/ttyACM0')
+            #     except Exception:
+            #         time.sleep(0.1)
+            #         continue
 
             try:
                 raw = self.serial_port.read_until(self.endMarker)
@@ -148,6 +158,8 @@ class SerialCommunication(Node):
 
             except serial.SerialException as e:
                 self.get_logger().error(f"Serial RX error: {e}")
+                self.is_connected = False
+                time.sleep(0.1)
     
     # ============================================================
     # Handlers
@@ -198,18 +210,26 @@ class SerialCommunication(Node):
     # ============================================================
 
     def handle_device_command(self, request, response):
-        req_id = uuid.uuid4().bytes  # 16 bytes
+
+        self.get_logger().info(f"Command {request.predicate}")
 
         if request.predicate == ManagerEvent.CONNECTION:
-            self.connect(port=request.cmd)
-            response.success = self.is_connected
-            response.response = result["response"]
-            if self.is_connected:
-                response.response = f"Connected to {request.cmd}"
+            if self.serial_port is not None and self.serial_port.port == request.cmd:
+                self.close()
+                response.success = True
+                response.response = "Serial disconnected"
             else:
-                response.response = "Not connected"
+                self.connect(port='/dev/ttyACM0') # request.cmd
+                self.send_bytes(bytes([request.predicate]))
+                response.success = self.is_connected
+                response.response = "Finished. See success flag"
+                # if self.is_connected:
+                #     response.response = f"Connected to {request.cmd}"
+                # else:
+                #     response.response = f"Failed to connect to {request.cmd}"
             return response
 
+        req_id = uuid.uuid4().bytes  # 16 bytes
         payload = bytes([request.predicate]) + \
               req_id + request.cmd.encode('utf-8')
         self.send_bytes(payload)
