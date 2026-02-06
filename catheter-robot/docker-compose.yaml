@@ -8,10 +8,13 @@ services:
     container_name: ros2_dev
     volumes:
       - ./src:/ros2_ws/src
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
       # - /etc/localtime:/etc/localtime:ro
       # - /etc/timezone:/etc/timezone:ro
-    devices:
-      - /dev/ttyACM0:/dev/ttyACM0
+    # devices:
+    #   - /dev/ttyACM0:/dev/ttyACM0
+    privileged: true
     group_add:
       - dialout
     working_dir: /ros2_ws

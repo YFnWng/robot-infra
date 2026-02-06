@@ -22,11 +22,12 @@ class SlicerHandler(Node):
 
         # --- parameters ---
         # read_only = rcl_interfaces.msg.ParameterDescriptor(read_only=True)
-        self.declare_parameter('joints', [])
-        self.declare_parameter('keys', [])
-        self.declare_parameter('key_joint_idx', [])
-        self.declare_parameter('directions', [])
-        self.declare_parameter('joint_vels', [])
+        self.declare_parameter('joints', [''])
+        self.declare_parameter('keys', [''])
+        self.declare_parameter('key_joint_idx', [0])
+        self.declare_parameter('directions', [0])
+        self.declare_parameter('joint_vels', [0.0])
+        # must declare default value with the correct type, otherwise loading from yaml will fail silently.
 
         self.joints = self.get_parameter('joints').value
         self.keys = self.get_parameter('keys').value
@@ -35,16 +36,16 @@ class SlicerHandler(Node):
         self.vel = self.get_parameter('joint_vels').value
 
         self.key_bindings = {
-            k: (j, d*v)
-            for k, j, d, v in zip(self.keys, key_joint_idx, 
-                                  directions, self.vel)
+            k: (j, d)
+            for k, j, d in zip(self.keys, key_joint_idx, directions)
         }
         # print(self.keys)
         # print(self.key_bindings)
-        self.get_logger().info(f"Node name: {self.get_name()}")
-        for param_name in ['joints', 'keys', 'key_joint_idx', 'directions', 'joint_vels']:
-            param = self.get_parameter(param_name)
-            self.get_logger().info(f"{param_name} = {param.value}")
+        
+        # for param_name in ['joints', 'keys', 'key_joint_idx', 'directions', 'joint_vels']:
+        #     param = self.get_parameter(param_name)
+        #     self.get_logger().info(f"{param_name} = {param.value}")
+        # self.get_logger().info(f"{self.key_bindings}")
 
         # self.add_on_set_parameters_callback(
         #     self._on_parameter_update
@@ -165,8 +166,8 @@ class SlicerHandler(Node):
                 # self.get_logger().info(f"key pressed: {key}")
                 if key in self.keys:
                     # later key overrides
-                    joint, vel = self.key_bindings[key]
-                    self.teleop_stream.joint_vel[joint] = vel
+                    joint, dir = self.key_bindings[key]
+                    self.teleop_stream.joint_vel[joint] = self.vel[joint]*dir
 
             self.teleop_stream.header.stamp = \
                 self.get_clock().now().to_msg()

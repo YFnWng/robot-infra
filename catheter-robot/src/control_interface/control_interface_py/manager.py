@@ -61,7 +61,6 @@ class ControlManager(Node):
         self.device_client = self.create_client(DeviceCmd, '/device/command')
         while not self.device_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('service not available, waiting again...')
-        self.device_req = DeviceCmd.Request()
 
         # self.timer = self.create_timer(0.01, self.update)
 
@@ -100,28 +99,43 @@ class ControlManager(Node):
 
         if msg.predicate == ManagerEvent.MODE:
             if len(msg.text) != 1:
-                self.get_logger().info(f'Invalid control mode request')
+                self.get_logger().warn(f'Invalid control mode request')
+                return
+            
             self.control_mode = ord(msg.text)
             self.get_logger().info(f'Control mode switched to {msg.text}')
+            return
 
-        else:
-            self.device_req.predicate = msg.predicate
-            self.device_req.cmd = msg.text
-            self.device_req.data = msg.data
+        req = DeviceCmd.Request()
+        req.predicate = msg.predicate
+        req.cmd = msg.text
+        req.data = msg.data
+        
+        future = self.device_client.call_async(req)
+        future.add_done_callback(
+            lambda f: self._on_device_response(f, req)
+        )
 
-            
-            future = self.device_client.call_async(self.device_req)
-            
-            rclpy.spin_until_future_complete(self, future)
-            self.get_logger().info(f"Command {msg.predicate}")
-            device_res = future.result()
-            if device_res.success:
-                out = ManagerEvent()
-                out.header.stamp = self.get_clock().now().to_msg()
-                out.predicate = self.device_req.predicate
-                # out.state = msg.state
-                self.event_pub.publish(out)
-                # res.message = device_res.response
+    def _on_device_response(self, future, req: DeviceCmd.Request):
+        try:
+            res = future.result()
+        except Exception as e:
+            self.get_logger().error(f'Device service failed: {e}')
+            return
+
+        if not res.success:
+            self.get_logger().warn(
+                f'Device command failed: predicate={req.predicate}'
+            )
+            return
+
+        # Publish manager event
+        out = ManagerEvent()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.predicate = req.predicate
+        self.event_pub.publish(out)
+
+        self.get_logger().info(f'Manager Command {req.predicate} completed')
 
     def device_state_callback(self, msg: DeviceStream):
         out = ManagerStream()

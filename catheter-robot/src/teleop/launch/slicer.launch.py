@@ -32,6 +32,7 @@ def generate_launch_description():
             name='slicer',
             parameters=[config],
             output='screen',
+            emulate_tty=True
     )
 
     return LaunchDescription([

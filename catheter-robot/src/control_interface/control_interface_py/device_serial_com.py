@@ -110,13 +110,14 @@ class SerialCommunication(Node):
             self.serial_port.write(
                 self.startMarker + payload + self.endMarker
                 )
-            self.get_logger().info(f"sending bytes: {payload}")
+            # self.get_logger().info(f"sending bytes: {payload}")
         except serial.SerialException as e:
             self.get_logger().error(f"Serial TX error: {e}")
         
     def on_manager_control(self, msg: DeviceStream):
         prefix = bytes([msg.predicate])
-        data = struct.pack("<" + "f" * len(msg.data), *msg.data) # convert to float32
+        data = struct.pack("<" + "f" * len(msg.data), 
+                           *[float(x) for x in msg.data]) # convert to float32
         self.send_bytes(prefix + data)
 
     # ============================================================
@@ -154,7 +155,8 @@ class SerialCommunication(Node):
                 elif prefix in response_prefix:
                     self.handle_device_response(prefix, payload[1:])
                 else:
-                    self.get_logger().warn(f"Unknown prefix: {prefix}")
+                    # self.get_logger().warn(f"Unknown prefix: {prefix}")
+                    self.get_logger().warn(payload.decode('utf-8'))
 
             except serial.SerialException as e:
                 self.get_logger().error(f"Serial RX error: {e}")
@@ -211,8 +213,6 @@ class SerialCommunication(Node):
 
     def handle_device_command(self, request, response):
 
-        self.get_logger().info(f"Command {request.predicate}")
-
         if request.predicate == ManagerEvent.CONNECTION:
             if self.serial_port is not None and self.serial_port.port == request.cmd:
                 self.close()
@@ -221,6 +221,7 @@ class SerialCommunication(Node):
             else:
                 self.connect(port='/dev/ttyACM0') # request.cmd
                 self.send_bytes(bytes([request.predicate]))
+                self.get_logger().info(f"Serial command {request.predicate}")
                 response.success = self.is_connected
                 response.response = "Finished. See success flag"
                 # if self.is_connected:
