@@ -23,7 +23,7 @@ HardwareSerialIMXRT *HWSerials[] = { &Serial2, &Serial3, &Serial4, &Serial5, &Se
 // constexpr uint8_t TE[] = { 5, 6, 12, 18, 19, 22 };
 constexpr uint8_t numHWSerials = 6;
 
-constexpr size_t BUFFER_LEN = 32;
+constexpr size_t BUFFER_LEN = 256;
 uint8_t receivedHWBytes[numHWSerials][BUFFER_LEN];
 uint8_t receivedPCBytes[BUFFER_LEN];
 size_t PCBytes_len = 0;
@@ -164,17 +164,17 @@ void setup() {
 }
 
 void loop() {
-    // Asychronous I/O 
+    // Asychronous I/O, atomic message processing
     recvPCSerial();
     procPCBytes();
     recvHWSerials();
-    procHWBytes();
+    // procHWBytes();
     
     // control Cycle 100Hz
     if (sinceLastCycle > 10) {
       sinceLastCycle = 0;
-      // readEncoders();
-      // CheckLimitSwitches();
+      readEncoders();
+      CheckLimitSwitches();
       sendMotorCmds();
     }
 
@@ -224,14 +224,15 @@ void recvHWSerials() {
 
 void recvPCSerial() {
     static bool recvInProgress = false;
+    static bool expectLenByte = false;
     static uint8_t ndx = 0;
     uint8_t rb;
 
     while (Serial.available() > 0 && newPCMsg == false) {
       rb = Serial.read();
 
-      if (recvInProgress == true) {
-        if (rb != PCEndMarker) {
+      if (recvInProgress) {
+        if (ndx < PCBytes_len) {
           receivedPCBytes[ndx] = rb;
           ndx++;
           if (ndx >= BUFFER_LEN) {
@@ -240,17 +241,26 @@ void recvPCSerial() {
         }
         else {
           // receivedPCBytes[ndx] = '\0'; // terminate the string
-          PCBytes_len = ndx;
+          newPCMsg = (rb == PCEndMarker);
+          if (newPCMsg) {
+            sinceLastPCMsg = 0;
+            watchdog_engaged = true;
+          }
           recvInProgress = false;
           ndx = 0;
-          newPCMsg = true;
-          sinceLastPCMsg = 0;
-          watchdog_engaged = true;
         }
       }
 
       else if (rb == PCStartMarker) {
-        recvInProgress = true;
+        expectLenByte = true;
+      }
+
+      else if (expectLenByte) {
+        PCBytes_len = rb;
+        expectLenByte = false;
+        if (PCBytes_len <= BUFFER_LEN) {
+          recvInProgress = true;
+        }
       }
     }
 }
@@ -276,6 +286,7 @@ void sendAckIfPending() {
   if (!pendingAck.valid) return;
 
   Serial.write(&PCStartMarker, 1);
+  Serial.write(1+REQ_ID_LEN);
   Serial.write(&pendingAck.prefix, 1);
   Serial.write(pendingAck.uuid, REQ_ID_LEN);
   Serial.write(&PCEndMarker, 1);
@@ -479,6 +490,7 @@ void procHWBytes() {
     if (newHWMsg[i]) {
       // snprintf(sendingPCChars, sizeof(sendingPCChars), "Serial%d received: ", i+1);
       Serial.write(&PCStartMarker, 1);
+      Serial.write(18+HWBytes_len[i]);
       Serial.printf("serial%d received: ", i+1);
       Serial.write(receivedHWBytes[i], HWBytes_len[i]);
       Serial.write(&PCEndMarker, 1);
@@ -518,11 +530,12 @@ void readEncoders() {
   currentSheathBendPos = currentPos[5] - currentPos[4];
 
   sendingPCBytes[0] = PCStartMarker;
-  sendingPCBytes[1] = POS;
-  memcpy(sendingPCBytes + 2, currentPos, 20); // 5*float
-  memcpy(sendingPCBytes + 22, &currentSheathBendPos, 4); // 1*float
-  sendingPCBytes[26] = PCEndMarker;
-  Serial.write(sendingPCBytes, 27);
+  sendingPCBytes[1] = 25;
+  sendingPCBytes[2] = POS;
+  memcpy(sendingPCBytes + 3, currentPos, 20); // 5*float
+  memcpy(sendingPCBytes + 23, &currentSheathBendPos, 4); // 1*float
+  sendingPCBytes[27] = PCEndMarker;
+  Serial.write(sendingPCBytes, 28);
 }
 
 void CheckLimitSwitches() {
@@ -584,6 +597,7 @@ void CheckLimitSwitches() {
       HWSerials[axis]->write("$O0\n", 4);
     }
     Serial.write(&PCStartMarker, 1);
+    Serial.write(6);
     Serial.write(sendingPCBytes, 6);
     Serial.write(&PCEndMarker, 1);
   }

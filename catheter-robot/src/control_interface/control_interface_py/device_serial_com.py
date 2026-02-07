@@ -25,6 +25,10 @@ response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.SET_ZERO,
                     ManagerEvent.SET_TARGET_VEL]
 
+# ================================================================================= #
+# message structure: [startMarker][len(prefix+payload)][prefix][payload][endMarker] #
+# ================================================================================= #
+
 class SerialCommunication(Node):
     def __init__(self):
         super().__init__(
@@ -76,6 +80,8 @@ class SerialCommunication(Node):
         """Connect to the specified serial port"""
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
+            self.get_logger().info(f"Serial disconnected: {port}")
+            return
         
         for i in range(20):
             try:
@@ -108,7 +114,7 @@ class SerialCommunication(Node):
 
         try:
             self.serial_port.write(
-                self.startMarker + payload + self.endMarker
+                self.startMarker + bytes([len(payload)]) + payload + self.endMarker
                 )
             # self.get_logger().info(f"sending bytes: {payload}")
         except serial.SerialException as e:
@@ -138,14 +144,29 @@ class SerialCommunication(Node):
             #         continue
 
             try:
-                raw = self.serial_port.read_until(self.endMarker)
-                if not raw.startswith(self.startMarker):
+                 # --- 1. Wait for start marker ---
+                b = self.serial_port.read(1)
+                if not b or b != self.startMarker:
                     continue
 
-                payload = raw[1:-1]
-                if not payload:
+                # --- 2. Read payload length ---
+                length_bytes = self.serial_port.read(1)
+                if len(length_bytes) != 1:
                     continue
 
+                length = length_bytes[0]
+
+                # --- 3. Read payload (prefix + data) ---
+                payload = self.serial_port.read(length)
+                if len(payload) != length:
+                    continue
+
+                # --- 4. Validate end marker ---
+                end = self.serial_port.read(1)
+                if end != self.endMarker:
+                    continue
+
+                # --- 5. Dispatch ---
                 prefix = payload[0] # int 0–255
 
                 if prefix in stream_prefix:
@@ -168,13 +189,15 @@ class SerialCommunication(Node):
     # ============================================================
 
     def handle_device_stream(self, prefix: int, body: bytes):
-        n = len(body) // 8
-        values = struct.unpack("<" + "d" * n, body) # tuple of doubles
+        # self.get_logger().info(f"number of bytes: {len(body)}")
+        # if len(body) != 24:
+        #     self.get_logger().info(f"malformed message: {prefix}, {body}")
+        values = struct.unpack("<6f", body) # tuple of floats
 
         msg = DeviceStream()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.predicate = prefix
-        msg.data = list(values)
+        msg.data = [float(x) for x in values]
         self.state_pub.publish(msg)
 
     def handle_device_event(self, prefix: int, body: bytes):
@@ -221,7 +244,6 @@ class SerialCommunication(Node):
             else:
                 self.connect(port='/dev/ttyACM0') # request.cmd
                 self.send_bytes(bytes([request.predicate]))
-                self.get_logger().info(f"Serial command {request.predicate}")
                 response.success = self.is_connected
                 response.response = "Finished. See success flag"
                 # if self.is_connected:
