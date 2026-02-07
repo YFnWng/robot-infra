@@ -1,6 +1,6 @@
 
 from control_interface.msg import ControlStream, ManagerStream, ManagerEvent
-# from control_interface.srv import DeviceCmd, Debug
+from geometry_msgs.msg import Point
 import ros2_igtl_bridge.msg
 import rclpy
 from rclpy.node import Node
@@ -52,12 +52,15 @@ class SlicerHandler(Node):
         # )
 
         # --- message types ---
+        # ros2 bridge to openigtlink name limit: 20 bytes
         self.teleop_stream = ControlStream()
         self.teleop_stream.header.frame_id = "slicer"
         self.teleop_event = ManagerEvent()
         self.teleop_event.header.frame_id = "slicer"
         self.joint_pos_stream = ros2_igtl_bridge.msg.PointArray()
-        self.joint_pos_stream.name = DOMAIN + "/joint_pos_stream"
+        self.joint_pos_stream.name = DOMAIN + "/joint_pos"
+        self.joint_pos_stream.pointdata = [Point(x=0.0, y=0.0, z=0.0),
+                                           Point(x=0.0, y=0.0, z=0.0)]
         self.manager_event = ros2_igtl_bridge.msg.String()
         self.manager_event.name = DOMAIN + "/event"
 
@@ -88,7 +91,7 @@ class SlicerHandler(Node):
 
         self.manager_stream_sub = self.create_subscription(
             ManagerStream,
-            '/manager/stream',
+            '/manager/state',
             self.manager_stream_callback,
             10
         )
@@ -112,7 +115,7 @@ class SlicerHandler(Node):
         if domain != DOMAIN:
             return
 
-        if role == "joint_vel_target":
+        if role.startswith("joint_vel_target"): # openigtlink -> ros2 bridge adds number after node name
             self.vel = [msg.pointdata[0].x,
                         msg.pointdata[0].y,
                         msg.pointdata[0].z,
@@ -120,8 +123,9 @@ class SlicerHandler(Node):
                         msg.pointdata[1].y,
                         msg.pointdata[1].z]
             self.get_logger().info(f"Set velocity: {self.vel}")
+            # catheter lm motor doesn't move when velocity > 10.6mm/s
 
-        elif msg.name == "joint_pos_target":
+        elif role.startswith("joint_pos_target"):
             self.teleop_stream.joint_pos = [msg.pointdata[0].x,
                                          msg.pointdata[0].y,
                                          msg.pointdata[0].z,
