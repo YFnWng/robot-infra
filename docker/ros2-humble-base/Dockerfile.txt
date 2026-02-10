@@ -74,10 +74,10 @@ RUN cmake -DBUILD_SHARED_LIBS:BOOL=ON ../OpenIGTLink && \
     make install
 
 WORKDIR $BASE_WS/src
-RUN git clone https://github.com/openigtlink/ros2_igtl_bridge && \
+RUN git clone https://github.com/openigtlink/ros2_igtl_bridge
     # change default ip to avoid server socket creation failure
-    sed -i 's/127.0.0.1/0.0.0.0/' $BASE_WS/src/ros2_igtl_bridge/src/igtl_node.cpp && \
-    sed -i 's/192.168.2.21/0.0.0.0/' $BASE_WS/src/ros2_igtl_bridge/launch/bridge.launch.py
+    # sed -i 's/127.0.0.1/0.0.0.0/' $BASE_WS/src/ros2_igtl_bridge/src/igtl_node.cpp && \
+    # sed -i 's/192.168.2.21/0.0.0.0/' $BASE_WS/src/ros2_igtl_bridge/launch/bridge.launch.py
 WORKDIR $BASE_WS
 RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
     rosdep install --from-paths src --ignore-src -y && \

@@ -14,14 +14,15 @@ services:
       # - /etc/timezone:/etc/timezone:ro
     # devices:
     #   - /dev/ttyACM0:/dev/ttyACM0
+    network_mode: host
     privileged: true
     group_add:
       - dialout
     working_dir: /ros2_ws
     tty: true
     stdin_open: true
-    ports: 
-      - "18944:18944"
+    # ports: 
+    #   - "18944:18944"
     environment:
       - DISPLAY=host.docker.internal:0
       - QT_X11_NO_MITSHM=1
