@@ -3,7 +3,7 @@
 services:
   ros2:
     build:
-      context: ../docker/ros2-humble-base
+      context: ./docker/ros2-humble-base
       dockerfile: Dockerfile.txt
     container_name: ros2_dev
     volumes:
