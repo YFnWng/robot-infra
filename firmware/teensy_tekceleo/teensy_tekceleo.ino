@@ -73,12 +73,12 @@ struct PendingAck {
 PendingAck pendingAck; // task acknowledgement
 
 // Quadrature decoder
-QuadEncoder Enc1(1, 0, 1); // A, B
-QuadEncoder Enc2(2, 2, 3);
+QuadEncoder Enc1(1, 1, 0); // A, B
+QuadEncoder Enc2(2, 3, 2);
 QuadEncoder Enc4(3, 4, 30);
-QuadEncoder Enc5(4, 31, 33);
-Encoder Enc0(26, 23);  // B, A
-Encoder Enc3(32, 27);
+QuadEncoder Enc5(4, 33, 31);
+Encoder Enc0(23, 26);  // B, A
+Encoder Enc3(27, 32);
 QuadEncoder *HWEncoders[] = {&Enc1, &Enc2, &Enc4, &Enc5};
 Encoder *SWEncoders[] = {&Enc0, &Enc3};
 
@@ -96,8 +96,8 @@ constexpr float catheterBendRate = -1.190625f; // mm/rev
 constexpr float sheathBendRate = 0.375f; // rev/rev
 constexpr float jointPRate[numHWSerials] = { linRate/360.0f, rotRate, catheterBendRate/360.0f, 
                                             linRate/360.0f, rotRate, sheathBendRate }; // mm/deg, deg/deg
-constexpr float jointVRate[numHWSerials] = { linRate/60.0f, rotRate/60.0f, catheterBendRate/60.0f, 
-                                            linRate/60.0f, rotRate/60.0f, sheathBendRate/60.0f }; // mm*min/rev*s, rev*min/rev*s
+constexpr float jointVRate[numHWSerials] = { linRate/60.0f, rotRate/60.0f*360.0f, catheterBendRate/60.0f, 
+                                            linRate/60.0f, rotRate/60.0f*360.0f, sheathBendRate/60.0f*360.0f }; // mm*min/rev*s, deg*min/rev*s
 constexpr float catheterBendUB = 20.8f;
 constexpr float catheterBendLB = 0.0f;
 constexpr float sheathBendUB = 360.0f;
@@ -121,13 +121,13 @@ elapsedMillis sinceLastCycle;
 elapsedMillis sinceLastPCMsg;
 constexpr uint32_t PC_SILENCE_MS = 10000;
 bool watchdog_engaged = true;
-constexpr uint16_t DRIVER_DELAY_us = 700;  // delay serial write for the next command to register
+constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next command to register
 
 void setup() {
   // put your setup code here, to run once:
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(115200);
- 
+
   memset(HWBytes_len, 0, sizeof(HWBytes_len));
   memset(newHWMsg, 0, sizeof(newHWMsg));
   memset(EncCounts, 0, sizeof(EncCounts));
@@ -265,6 +265,38 @@ void recvPCSerial() {
     }
 }
 
+// void recvPCSerial() { //old version for serial monitor debug
+//     static bool recvInProgress = false;
+//     static uint8_t ndx = 0;
+//     uint8_t rb;
+
+//     while (Serial.available() > 0 && newPCMsg == false) {
+//       rb = Serial.read();
+
+//       if (recvInProgress) {
+//         if (rb != PCEndMarker) {
+//           receivedPCBytes[ndx] = rb;
+//           ndx++;
+//           if (ndx >= BUFFER_LEN) {
+//             ndx = BUFFER_LEN - 1;
+//           }
+//         } else {
+//           // receivedPCBytes[ndx] = '\0'; // terminate the string
+//           PCBytes_len = ndx;
+//           newPCMsg = true;
+//           sinceLastPCMsg = 0;
+//           watchdog_engaged = true;
+//           recvInProgress = false;
+//           ndx = 0;
+//         }
+//       }
+
+//       else if (rb == PCStartMarker) {
+//         recvInProgress = true;
+//       }
+//     }
+// }
+
 static inline bool hasUUID(uint8_t cmd) {
   return (cmd != VEL && cmd != POS && cmd != CONNECT && cmd != DEBUG);
 }
@@ -323,14 +355,34 @@ void procPCBytes() {
       switch (cmd) {
 
         case VEL: {// 'V'
-        digitalWrite(LED_BUILTIN,HIGH);
+        
           newJointPosCmd = false;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             memcpy(&targetVel[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
             newJointVelCmd = isVelCmdValid(axis);
-            if (!newJointVelCmd) { break; }
+            // if (!newJointVelCmd) { break; }
+            if (!newJointVelCmd) { 
+              Serial.write(&PCStartMarker, 1);
+              Serial.write(5);
+              Serial.print("false");
+              Serial.write(&PCEndMarker, 1);
+              break; }
 
             if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
+
+            // if (axis == 5) {
+            //   char buffer[32];
+            //   snprintf(buffer, sizeof(buffer), "%f", targetVel[axis]);
+            //   Serial.write(&PCStartMarker, 1);
+            //   Serial.write(strlen(buffer));
+            //   Serial.write(buffer, strlen(buffer));
+            //   Serial.write(&PCEndMarker, 1);
+            //   snprintf(buffer, sizeof(buffer), "%f", jointVRate[axis]);
+            //   Serial.write(&PCStartMarker, 1);
+            //   Serial.write(strlen(buffer));
+            //   Serial.write(buffer, strlen(buffer));
+            //   Serial.write(&PCEndMarker, 1);
+            // }
 
             temp = targetVel[axis]/jointVRate[axis];
 
@@ -428,7 +480,7 @@ void procPCBytes() {
         }
 
         case CONNECT: { // 'C', confirm PC connection
-          digitalWrite(LED_BUILTIN, HIGH);
+          // digitalWrite(LED_BUILTIN, HIGH);
           sendAckIfPending();
           break;
         }
@@ -487,7 +539,7 @@ static inline bool isPosCmdValid(uint8_t axis) {
 
 void procHWBytes() {
   for (uint8_t i = 0; i < numHWSerials; i++) {
-    if (newHWMsg[i]) {
+    if (newHWMsg[i] && i == 5) {
       // snprintf(sendingPCChars, sizeof(sendingPCChars), "Serial%d received: ", i+1);
       Serial.write(&PCStartMarker, 1);
       Serial.write(18+HWBytes_len[i]);
@@ -606,6 +658,7 @@ void CheckLimitSwitches() {
 void sendMotorCmds() {
   static char *p;
   if (newJointVelCmd) {
+    // digitalWrite(LED_BUILTIN,HIGH);
     
     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
 
@@ -617,6 +670,13 @@ void sendMotorCmds() {
         *p++ = targetDir[axis];
         *p++ = endMarker;
         HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
+        if (axis == 2) {
+        Serial.write(&PCStartMarker, 1);
+        Serial.write(5);
+        Serial.write('0' + axis);
+        Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
+        Serial.write(&PCEndMarker, 1);
+        }
         delayMicroseconds(DRIVER_DELAY_us);
         currentDir[axis] = targetDir[axis];
       }
@@ -627,6 +687,12 @@ void sendMotorCmds() {
       p = write_uint16(p, targetRPM[axis]);
       *p++ = endMarker;
       HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
+      if (axis == 2) {
+      Serial.write(&PCStartMarker, 1);
+      Serial.write(p - sendingHWChars[axis] + 1);
+      Serial.write('0' + axis);
+      Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
+      Serial.write(&PCEndMarker, 1);}
       delayMicroseconds(DRIVER_DELAY_us);
 
       p = sendingHWChars[axis];
@@ -635,12 +701,18 @@ void sendMotorCmds() {
       *p++ = '1';
       *p++ = endMarker;
       HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
+      if (axis == 2) {
+      Serial.write(&PCStartMarker, 1);
+      Serial.write(5);
+      Serial.write('0' + axis);
+      Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
+      Serial.write(&PCEndMarker, 1);}
       
-      if (axis == 0) {
-        Serial.write(&PCStartMarker, 1);
-        Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
-        Serial.write(&PCEndMarker, 1);
-        }
+      // if (axis == 0) {
+      //   Serial.write(&PCStartMarker, 1);
+      //   Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
+      //   Serial.write(&PCEndMarker, 1);
+      //   }
     }
     newJointVelCmd = false;
 
