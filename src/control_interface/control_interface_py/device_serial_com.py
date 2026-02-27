@@ -176,6 +176,7 @@ class SerialCommunication(Node):
                 elif prefix in response_prefix:
                     self.handle_device_response(prefix, payload[1:])
                 else:
+                    pass
                     # self.get_logger().warn(f"Unknown prefix: {prefix}")
                     self.get_logger().warn(payload.decode('utf-8'))
 
