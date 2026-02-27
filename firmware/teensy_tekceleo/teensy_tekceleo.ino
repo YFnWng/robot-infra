@@ -55,6 +55,7 @@ constexpr uint8_t ZERO = 'Z';
 constexpr uint8_t SET_VEL = 'F';
 constexpr uint8_t DEBUG = 'D';
 constexpr uint8_t CONNECT = 'C';
+constexpr uint8_t CALIBRATION = 'K';
 constexpr uint8_t LIMIT = 'L';
 constexpr uint8_t LIMIT_P = 'c';
 constexpr uint8_t LIMIT_C = 'b';
@@ -75,7 +76,7 @@ PendingAck pendingAck; // task acknowledgement
 // Quadrature decoder
 QuadEncoder Enc1(1, 1, 0); // A, B
 QuadEncoder Enc2(2, 3, 2);
-QuadEncoder Enc4(3, 4, 30);
+QuadEncoder Enc4(3, 30, 4);
 QuadEncoder Enc5(4, 33, 31);
 Encoder Enc0(23, 26);  // B, A
 Encoder Enc3(27, 32);
@@ -90,10 +91,10 @@ long EncCounts[numHWSerials];
 // float jointVel[numHWSerials] = { 0.0f };
 
 // Joint transmission, joint/motor, positive direction: right-hand or forward
-constexpr float linRate = 67.319841f; // mm/rev
-constexpr float rotRate = 0.375f; // rev/rev
-constexpr float catheterBendRate = -1.190625f; // mm/rev
-constexpr float sheathBendRate = 0.375f; // rev/rev
+constexpr float linRate = 67.319841f/20.0f; // mm/rev
+constexpr float rotRate = 0.375f/5.0f; // rev/rev
+constexpr float catheterBendRate = -1.190625f/5.0f; // mm/rev
+constexpr float sheathBendRate = 0.375f/5.0f; // rev/rev
 constexpr float jointPRate[numHWSerials] = { linRate/360.0f, rotRate, catheterBendRate/360.0f, 
                                             linRate/360.0f, rotRate, sheathBendRate }; // mm/deg, deg/deg
 constexpr float jointVRate[numHWSerials] = { linRate/60.0f, rotRate/60.0f*360.0f, catheterBendRate/60.0f, 
@@ -110,6 +111,7 @@ int limitState[5] = { 0, 0, 0, 0, 0 };
 float targetPos[numHWSerials];
 uint16_t targetDeg[numHWSerials];
 float currentPos[numHWSerials]; // decoupled
+float currentCatheterLMPos = 0.0f; // coupled
 float currentSheathBendPos = 0.0f; // coupled
 float targetVel[numHWSerials];
 uint16_t targetRPM[numHWSerials];
@@ -152,7 +154,7 @@ void setup() {
   }
 
   // set up encoders
-  for (uint8_t i = 0; i < 2; i++) {
+  for (uint8_t i = 0; i < 4; i++) {
     HWEncoders[i]->setInitConfig();
     // HWEncoders[i]->EncConfig.positionInitialValue = EncCounts[i];
     HWEncoders[i]->init();
@@ -174,7 +176,7 @@ void loop() {
     if (sinceLastCycle > 10) {
       sinceLastCycle = 0;
       readEncoders();
-      CheckLimitSwitches();
+      // CheckLimitSwitches();
       sendMotorCmds();
     }
 
@@ -357,32 +359,23 @@ void procPCBytes() {
         case VEL: {// 'V'
         
           newJointPosCmd = false;
+          memcpy(targetVel, receivedPCBytes + 1, 24); // float size 4
+          targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
+          targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            memcpy(&targetVel[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
+            // memcpy(&targetVel[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
             newJointVelCmd = isVelCmdValid(axis);
-            // if (!newJointVelCmd) { break; }
-            if (!newJointVelCmd) { 
-              Serial.write(&PCStartMarker, 1);
-              Serial.write(5);
-              Serial.print("false");
-              Serial.write(&PCEndMarker, 1);
-              break; }
-
-            if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
-
-            // if (axis == 5) {
-            //   char buffer[32];
-            //   snprintf(buffer, sizeof(buffer), "%f", targetVel[axis]);
+            if (!newJointVelCmd) { break; }
+            // if (!newJointVelCmd) { 
             //   Serial.write(&PCStartMarker, 1);
-            //   Serial.write(strlen(buffer));
-            //   Serial.write(buffer, strlen(buffer));
+            //   Serial.write(5);
+            //   Serial.print("false");
             //   Serial.write(&PCEndMarker, 1);
-            //   snprintf(buffer, sizeof(buffer), "%f", jointVRate[axis]);
-            //   Serial.write(&PCStartMarker, 1);
-            //   Serial.write(strlen(buffer));
-            //   Serial.write(buffer, strlen(buffer));
-            //   Serial.write(&PCEndMarker, 1);
-            // }
+            //   break; }
+
+            // if (axis == 0) { targetVel[0] -= targetVel[2]; } // decouple lm and bend for catheter
+
+            // if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
 
             temp = targetVel[axis]/jointVRate[axis];
 
@@ -396,12 +389,14 @@ void procPCBytes() {
 
         case POS: {// 'P'
           newJointVelCmd = false;
+          memcpy(targetPos, receivedPCBytes + 1, 24); // float size 4
+          targetPos[0] -= targetPos[2]; // decouple lm and bend for catheter
+          targetPos[5] += targetPos[4]; // decouple rot and bend for sheath
+          
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            memcpy(&targetPos[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
+            // memcpy(&targetPos[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
             newJointPosCmd = isPosCmdValid(axis);
             if (!newJointPosCmd) { break; }
-
-            if (axis == 5) { targetPos[5] += targetPos[4]; } // decouple rot and bend for sheath
 
             temp = (targetPos[axis] - currentPos[axis])/jointPRate[axis];
 
@@ -437,6 +432,7 @@ void procPCBytes() {
             EncCounts[axis] = 0;
             currentPos[axis] = 0.0f;
           }
+          currentCatheterLMPos = 0.0f;
           currentSheathBendPos = 0.0f;
           sendAckIfPending();
           break;
@@ -482,6 +478,14 @@ void procPCBytes() {
         case CONNECT: { // 'C', confirm PC connection
           // digitalWrite(LED_BUILTIN, HIGH);
           sendAckIfPending();
+          break;
+        }
+
+        case CALIBRATION: { // 'K', start motor calibration
+          // digitalWrite(LED_BUILTIN, HIGH);
+          for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+            HWSerials[axis]->print("$K1\n");
+          }
           break;
         }
 
@@ -539,7 +543,7 @@ static inline bool isPosCmdValid(uint8_t axis) {
 
 void procHWBytes() {
   for (uint8_t i = 0; i < numHWSerials; i++) {
-    if (newHWMsg[i] && i == 5) {
+    if (newHWMsg[i]) {
       // snprintf(sendingPCChars, sizeof(sendingPCChars), "Serial%d received: ", i+1);
       Serial.write(&PCStartMarker, 1);
       Serial.write(18+HWBytes_len[i]);
@@ -578,16 +582,20 @@ void readEncoders() {
     // EncPos[axis] = EncCounts[axis]*EncRes;
     currentPos[axis] = EncCounts[axis]*EncRes*jointPRate[axis];
   }
+  // coupled lm and bend for catheter
+  currentCatheterLMPos = currentPos[0] + currentPos[2];
   // coupled rot and bend for sheath
   currentSheathBendPos = currentPos[5] - currentPos[4];
 
   sendingPCBytes[0] = PCStartMarker;
   sendingPCBytes[1] = 25;
   sendingPCBytes[2] = POS;
-  memcpy(sendingPCBytes + 3, currentPos, 20); // 5*float
+  memcpy(sendingPCBytes + 3, &currentCatheterLMPos, 4); // 1*float
+  memcpy(sendingPCBytes + 7, &currentPos[1], 16); // 4*float
   memcpy(sendingPCBytes + 23, &currentSheathBendPos, 4); // 1*float
   sendingPCBytes[27] = PCEndMarker;
   Serial.write(sendingPCBytes, 28);
+  
 }
 
 void CheckLimitSwitches() {
