@@ -11,10 +11,12 @@ uint8 STOP_MOTOR        = 83 # "S"
 uint8 SET_ZERO          = 90 # "Z"
 uint8 SET_TARGET_VEL    = 70 # "F"
 uint8 LIMIT             = 76 # "L"
-uint8 LIMIT_P           = 97 # "a"
-uint8 LIMIT_M           = 98 # "b"
-uint8 LIMIT_C           = 99 # "c"
-uint8 LIMIT_N           = 110 # "n"
+uint8 STALL             = 84 # "T"
+uint8 TRIGGER_M           = 97 # "a"
+uint8 TRIGGER_C           = 98 # "b"
+uint8 TRIGGER_P           = 99 # "c"
+uint8 TRIGGER_N           = 110 # "n"
+
 
 std_msgs/Header header
 
