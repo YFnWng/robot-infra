@@ -16,7 +16,7 @@ from control_interface.msg import DeviceStream, DeviceEvent, ManagerEvent
 from control_interface.srv import DeviceCmd
 
 stream_prefix = [DeviceStream.POS, DeviceStream.VEL, DeviceStream.ENC]
-event_prefix = [ManagerEvent.LIMIT]
+event_prefix = [ManagerEvent.LIMIT, ManagerEvent.STALL]
 response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.MODE, 
                     ManagerEvent.DEBUG, 
@@ -172,13 +172,14 @@ class SerialCommunication(Node):
                 if prefix in stream_prefix:
                     self.handle_device_stream(prefix, payload[1:])
                 elif prefix in event_prefix:
+                    self.get_logger().warn(payload.decode('utf-8'))
                     self.handle_device_event(prefix, payload[1:])
                 elif prefix in response_prefix:
                     self.handle_device_response(prefix, payload[1:])
                 else:
                     pass
                     # self.get_logger().warn(f"Unknown prefix: {prefix}")
-                    self.get_logger().warn(payload.decode('utf-8'))
+                    # self.get_logger().warn(payload.decode('utf-8'))
 
             except serial.SerialException as e:
                 self.get_logger().error(f"Serial RX error: {e}")
@@ -244,6 +245,7 @@ class SerialCommunication(Node):
                 response.response = "Serial disconnected"
             else:
                 self.connect(port='/dev/ttyACM0') # request.cmd
+                time.sleep(0.3)
                 self.send_bytes(bytes([request.predicate]))
                 response.success = self.is_connected
                 response.response = "Finished. See success flag"
