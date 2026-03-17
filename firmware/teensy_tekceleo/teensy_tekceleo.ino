@@ -57,10 +57,11 @@ constexpr uint8_t DEBUG = 'D';
 constexpr uint8_t CONNECT = 'C';
 constexpr uint8_t CALIBRATION = 'K';
 constexpr uint8_t LIMIT = 'L';
-constexpr uint8_t LIMIT_P = 'c';
-constexpr uint8_t LIMIT_C = 'b';
-constexpr uint8_t LIMIT_M = 'a';
-constexpr uint8_t LIMIT_N = 'n';
+constexpr uint8_t STALL = 'T';
+constexpr uint8_t TRIGGER_P = 'c';
+constexpr uint8_t TRIGGER_C = 'b';
+constexpr uint8_t TRIGGER_M = 'a';
+constexpr uint8_t TRIGGER_N = 'n';
 
 // constexpr uint8_t MAX_PENDING_ACKS = 8;
 constexpr uint32_t ACK_TIMEOUT_MS = 1000;
@@ -111,14 +112,17 @@ int limitState[5] = { 0, 0, 0, 0, 0 };
 float targetPos[numHWSerials];
 uint16_t targetDeg[numHWSerials];
 float currentPos[numHWSerials]; // decoupled
+float previousPos[numHWSerials]; // decoupled
 float currentCatheterLMPos = 0.0f; // coupled
 float currentSheathBendPos = 0.0f; // coupled
 float targetVel[numHWSerials];
+float currentVel[numHWSerials];
 uint16_t targetRPM[numHWSerials];
 uint8_t targetDir[numHWSerials]; // '0': right-hand, '1': left-hand
 uint8_t currentDir[numHWSerials];
 
 // Timing
+constexpr uint8_t controlCycle = 10; // ms
 elapsedMillis sinceLastCycle;
 elapsedMillis sinceLastPCMsg;
 constexpr uint32_t PC_SILENCE_MS = 10000;
@@ -135,6 +139,7 @@ void setup() {
   memset(EncCounts, 0, sizeof(EncCounts));
   memset(targetDeg, 0, sizeof(targetDeg));
   memset(currentPos, 0.0f, sizeof(currentPos));
+  memset(previousPos, 0.0f, sizeof(currentPos));
   memset(targetRPM, 0, sizeof(targetRPM));
   memset(targetDir, '1', sizeof(targetDir));
   memset(currentDir, '1', sizeof(currentDir));
@@ -163,6 +168,7 @@ void setup() {
   for (uint8_t i = 0; i < 3; i++) {
     pinMode(LimitSwitch[i], INPUT_PULLUP);
   }
+  // digitalWrite(LED_BUILTIN, HIGH);
 }
 
 void loop() {
@@ -173,10 +179,11 @@ void loop() {
     // procHWBytes();
     
     // control Cycle 100Hz
-    if (sinceLastCycle > 10) {
+    if (sinceLastCycle > controlCycle) {
       sinceLastCycle = 0;
       readEncoders();
-      // CheckLimitSwitches();
+      checkStall();
+      checkLimitSwitches();
       sendMotorCmds();
     }
 
@@ -407,11 +414,11 @@ void procPCBytes() {
         }
 
         case SET_VEL: {// 'F', set target velocity for pos control
+          memcpy(targetPos, receivedPCBytes + 1 + REQ_ID_LEN, 24); // float size 4
+          targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
+          targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
+
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            memcpy(&targetVel[axis], receivedPCBytes + 1 + REQ_ID_LEN + axis*4, 4); // float size 4
-
-            if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
-
             temp = targetVel[axis]/jointVRate[axis];
             targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
           }
@@ -476,8 +483,9 @@ void procPCBytes() {
         }
 
         case CONNECT: { // 'C', confirm PC connection
-          // digitalWrite(LED_BUILTIN, HIGH);
+          digitalWrite(LED_BUILTIN, HIGH);
           sendAckIfPending();
+          reportLimitStates();
           break;
         }
 
@@ -572,6 +580,7 @@ void procHWBytes() {
 }
 
 void readEncoders() {
+  memcpy(previousPos, currentPos, sizeof(currentPos));
   EncCounts[0] = Enc0.read();
   EncCounts[1] = Enc1.read();
   EncCounts[2] = Enc2.read();
@@ -581,6 +590,7 @@ void readEncoders() {
   for (uint8_t axis = 0; axis < numHWSerials; axis++) {
     // EncPos[axis] = EncCounts[axis]*EncRes;
     currentPos[axis] = EncCounts[axis]*EncRes*jointPRate[axis];
+    currentVel[axis] = (currentPos[axis] - previousPos[axis])/controlCycle*1000.0f;
   }
   // coupled lm and bend for catheter
   currentCatheterLMPos = currentPos[0] + currentPos[2];
@@ -598,7 +608,7 @@ void readEncoders() {
   
 }
 
-void CheckLimitSwitches() {
+void checkLimitSwitches() {
   static bool trigger_event;
   static int temp = 0;
   static uint8_t *p;
@@ -606,18 +616,21 @@ void CheckLimitSwitches() {
   trigger_event = false;
   p = sendingPCBytes;
   *p++ = LIMIT;
+  *p++ = TRIGGER_N;
+  *p++ = TRIGGER_N;
+  *p++ = TRIGGER_N;
 
   // linear physical switches
-  for (uint8_t i = 0; i < 3; i++) {
-    temp = digitalRead(LimitSwitch[i]);
-    if (temp != limitState[i]) {
-      limitState[i] = temp;
-      trigger_event = true;
-      *p++ = LIMIT_C + limitState[i];
-    } else {
-      *p++ = LIMIT_N;
-    }
-  }
+  // for (uint8_t i = 0; i < 3; i++) {
+  //   temp = digitalRead(LimitSwitch[i]);
+  //   if (temp != limitState[i]) {
+  //     limitState[i] = temp;
+  //     trigger_event = true;
+  //     *p++ = TRIGGER_C + limitState[i];
+  //   } else {
+  //     *p++ = TRIGGER_N;
+  //   }
+  // }
 
   // catheter bending
   if (currentPos[2] >= catheterBendUB) {
@@ -630,9 +643,9 @@ void CheckLimitSwitches() {
   if (temp != limitState[3]) {
     limitState[3] = temp;
     trigger_event = true;
-    *p++ = LIMIT_C + limitState[3];
+    *p++ = TRIGGER_C + limitState[3];
   } else {
-    *p++ = LIMIT_N;
+    *p++ = TRIGGER_N;
   }
 
   // sheath bending
@@ -646,9 +659,9 @@ void CheckLimitSwitches() {
   if (temp != limitState[4]) {
     limitState[4] = temp;
     trigger_event = true;
-    *p++ = limitState[4] + LIMIT_C;
+    *p++ = limitState[4] + TRIGGER_C;
   } else {
-    *p++ = LIMIT_N;
+    *p++ = TRIGGER_N;
   }
 
   // digitalWrite(LED_BUILTIN, limitState[0]);
@@ -659,6 +672,101 @@ void CheckLimitSwitches() {
     Serial.write(&PCStartMarker, 1);
     Serial.write(6);
     Serial.write(sendingPCBytes, 6);
+    Serial.write(&PCEndMarker, 1);
+  }
+}
+
+void reportLimitStates() {
+  sendingPCBytes[0] = LIMIT;
+
+  // linear physical switches
+  // for (uint8_t i = 0; i < 3; i++) {
+  //   limitState[i] = digitalRead(LimitSwitch[i]);
+  //   if (limitState[i]) {
+  //     sendingPCBytes[i+1] = TRIGGER_P;
+  //   } else {
+  //     sendingPCBytes[i+1] = TRIGGER_N;
+  //   }
+  // }
+  sendingPCBytes[1] = TRIGGER_N;
+  sendingPCBytes[2] = TRIGGER_N;
+  sendingPCBytes[3] = TRIGGER_N;
+
+  // catheter bending
+  if (currentPos[2] >= catheterBendUB) {
+      limitState[3] = 1;
+      sendingPCBytes[4] = TRIGGER_P;
+  } else if (currentPos[2] <= catheterBendLB) {
+      limitState[3] = -1;
+      sendingPCBytes[4] = TRIGGER_M;
+  } else {
+      limitState[3] = 0;
+      sendingPCBytes[4] = TRIGGER_N;
+  }
+
+  // sheath bending
+  if (currentPos[5] >= sheathBendUB) {
+      limitState[4] = 1;
+      sendingPCBytes[5] = TRIGGER_P;
+  } else if (currentPos[5] <= sheathBendLB) {
+      limitState[4] = -1;
+      sendingPCBytes[5] = TRIGGER_M;
+  } else {
+      limitState[4] = 0;
+      sendingPCBytes[5] = TRIGGER_N;
+  }
+
+  Serial.write(&PCStartMarker, 1);
+  Serial.write(6);
+  Serial.write(sendingPCBytes, 6);
+  Serial.write(&PCEndMarker, 1);
+}
+
+void checkStall() {
+  static uint8_t stallCount[numHWSerials] = {0};
+  static bool stalled;
+
+  stalled = false;
+  sendingPCBytes[0] = STALL;
+
+  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+
+    if (std::fabs(currentVel[axis]) < std::fabs(targetVel[axis])/2.5f ||
+        std::fabs(currentVel[axis]) > std::fabs(targetVel[axis])*2.5f) {
+      stallCount[axis] += 1;
+
+      if (stallCount[axis] >= 20) {
+        stalled = true;
+        HWSerials[axis]->write("$O0\n", 4);
+
+        if (std::signbit(targetVel[axis])) {
+          sendingPCBytes[axis+1] = TRIGGER_M;
+        } else {
+          sendingPCBytes[axis+1] = TRIGGER_P;
+        }
+        
+        if (axis == 0) { // coupling
+          HWSerials[2]->write("$O0\n", 4);
+        } else if (axis == 2) {
+          HWSerials[0]->write("$O0\n", 4);
+        } else if (axis == 4) {
+          HWSerials[5]->write("$O0\n", 4);
+        } else if (axis == 5) {
+          HWSerials[4]->write("$O0\n", 4);
+        }
+      } else {
+        sendingPCBytes[axis+1] = TRIGGER_N;
+      }
+    } else {
+      stallCount[axis] = 0;
+      sendingPCBytes[axis+1] = TRIGGER_N;
+    }
+  }
+
+  if (stalled) {
+    Serial.write(&PCStartMarker, 1);
+    Serial.write(7);
+    Serial.write(sendingPCBytes, 7);
     Serial.write(&PCEndMarker, 1);
   }
 }
