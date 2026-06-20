@@ -380,7 +380,7 @@ void procPCBytes() {
       switch (cmd) {
 
         case VEL: {// 'V'
-          digitalWrite(LED_BUILTIN, HIGH);
+          // digitalWrite(LED_BUILTIN, HIGH);
         
           newJointPosCmd = false;
           memcpy(targetVel, receivedPCBytes + 1, 24); // float size 4
@@ -481,7 +481,7 @@ void procPCBytes() {
         // }
 
         case DEBUG: {// 'D', send and read raw command
-          digitalWrite(LED_BUILTIN, HIGH);
+          // digitalWrite(LED_BUILTIN, HIGH);
           // if (PCBytes_len < 1 + REQ_ID_LEN) return;
 
           // uint8_t axis = receivedPCBytes[1 + REQ_ID_LEN] - '0';
@@ -503,10 +503,12 @@ void procPCBytes() {
           // digitalWrite(LED_BUILTIN, HIGH);
           if (!pc_connected) {
             pc_connected = true;
+            digitalWrite(LED_BUILTIN, HIGH);
             sendAckIfPending();
             reportLimitStates();
           } else {
             pc_connected = false;
+            digitalWrite(LED_BUILTIN, LOW);
           }
           break;
         }
