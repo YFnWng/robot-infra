@@ -30,12 +30,8 @@ _se_path = os.environ.get(
 if _se_path not in sys.path:
     sys.path.insert(0, os.path.dirname(_se_path))
 
-from state_estimation import (  # noqa: E402
-    QuasiStaticKinematicsEstimator,
-    RodConfig,
-    NoiseConfig,
-    MeasurementPacket,
-)
+from state_estimation import QuasiStaticKinematicsEstimator  # noqa: E402
+from cr_common.configs import RodConfig, NoiseConfig, MeasurementPacket
 
 from control_interface.msg import DeviceStream  # noqa: E402
 
