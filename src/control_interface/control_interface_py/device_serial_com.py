@@ -81,6 +81,7 @@ class SerialCommunication(Node):
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
             self.get_logger().info(f"Serial disconnected: {port}")
+            self.is_connected = False
             return
         
         for i in range(20):
@@ -240,6 +241,7 @@ class SerialCommunication(Node):
 
         if request.predicate == ManagerEvent.CONNECTION:
             if self.serial_port is not None and self.serial_port.port == request.cmd:
+                self.send_bytes(bytes([request.predicate]))
                 self.close()
                 response.success = True
                 response.response = "Serial disconnected"
