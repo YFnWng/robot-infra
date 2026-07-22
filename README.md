@@ -8,6 +8,28 @@ Currently under construction.
 
 Tested on Windows 11 + WSL2, Ubuntu 22.04 + ROS2 Humble
 
+## Live catheter shape estimation
+
+Use a Python 3.10 virtual environment that can also see the ROS 2 Humble
+system packages. From the workspace root:
+
+```bash
+python3 -m venv --system-site-packages ~/cr-venv
+source ~/cr-venv/bin/activate
+python -m pip install -r state_estimation/requirements.txt
+python -m pip install -e cr-common
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+cd robot-infra
+python -m colcon build --packages-select automation teleop --symlink-install
+source install/setup.bash
+ros2 launch teleop slicer.launch.py
+```
+
+The launch starts the Slicer bridge on TCP 18944 and an isolated tracking
+bridge on TCP 18945. In Slicer, connect the main IGTL interface, send the
+shape configuration, and start the coil simulator. Internal estimator values
+use SI units; the OpenIGTLink boundary uses RAS mm.
+
 ## Serial device
 
 To expose serial device to WSL2, in host powershell(admin), install usbipd:

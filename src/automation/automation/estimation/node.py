@@ -1,146 +1,195 @@
-"""StateEstimationNode: ROS2 wrapper around QuasiStaticKinematicsEstimator.
-
-Imports the state_estimation library (pure Python, no ROS2) and wraps it
-in a ROS2 node that subscribes to sensor topics and publishes estimated poses.
-
-Data flow:
-    /device/state (DeviceStream) → joint positions → base pose + cable disp
-    /em_tracker/poses (TBD)      → EM coil poses
-    → QuasiStaticKinematicsEstimator.update()
-    → /estimator/tip_pose  (PoseStamped)
-    → /estimator/rod_state (PoseArray)
-"""
+"""ROS 2 coordinator for live position-only catheter shape estimation."""
 from __future__ import annotations
 
+import json
 import os
-import sys
+from pathlib import Path
+import time
 
+from geometry_msgs.msg import Point
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, PoseArray, Pose
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from ros2_igtl_bridge.msg import PointArray, String
 
-import numpy as np
+from cr_common.configs import MeasurementPacket, NoiseConfig, RodConfig
+from state_estimation import QuasiStaticKinematicsEstimator
 
-# Allow state_estimation library to be found even if not installed via pip.
-# Set STATE_ESTIMATION_PATH env var or rely on PYTHONPATH.
-_se_path = os.environ.get(
-    "STATE_ESTIMATION_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "state_estimation"),
+from .protocol import (
+    ShapeConfig,
+    ShapeConfigError,
+    coil_points_mm_to_positions,
+    parse_shape_config,
+    stream_is_stale,
 )
-if _se_path not in sys.path:
-    sys.path.insert(0, os.path.dirname(_se_path))
 
-from state_estimation import QuasiStaticKinematicsEstimator  # noqa: E402
-from cr_common.configs import RodConfig, NoiseConfig, MeasurementPacket
 
-from control_interface.msg import DeviceStream  # noqa: E402
+CONFIG_DEVICE = "estimator/config"
+STATUS_DEVICE = "estimator/status"
+SHAPE_DEVICE = "estimator/shape"
 
 
 class StateEstimationNode(Node):
-    """ROS2 node wrapping QuasiStaticKinematicsEstimator.
-
-    Loads rod and noise config from the path specified by the
-    ``config_path`` ROS parameter (defaults to
-    ``state_estimation/configs/catheter_ablation.yaml``).
-
-    Topics
-    ------
-    Subscriptions:
-        /device/state (DeviceStream) — joint positions [lin, rot, bend, ...]
-    Publications:
-        /estimator/tip_pose  (PoseStamped)
-        /estimator/rod_state (PoseArray)   — one Pose per estimation node
-    """
+    """Join Slicer configuration and tracker POINT frames in ROS 2."""
 
     def __init__(self) -> None:
         super().__init__("state_estimator")
-
-        self.declare_parameter(
-            "config_path",
-            os.path.join(_se_path, "configs", "catheter_ablation.yaml"),
+        default_config = os.environ.get(
+            "STATE_ESTIMATION_CONFIG",
+            str(Path.home() / "state_estimation" / "configs" / "live_coil_estimation.yaml"),
         )
-        config_path = self.get_parameter("config_path").get_parameter_value().string_value
+        self.declare_parameter("config_path", default_config)
+        self.declare_parameter("stale_timeout_sec", 0.5)
+        config_path = self.get_parameter("config_path").value
+        self._noise = NoiseConfig.from_yaml(config_path)
+        self._stale_timeout = float(self.get_parameter("stale_timeout_sec").value)
 
-        noise = NoiseConfig.from_yaml(config_path)
-        rod = RodConfig.from_yaml(config_path) if hasattr(RodConfig, "from_yaml") \
-              else RodConfig(length=160.0, n_sections=32)
+        self._config: ShapeConfig | None = None
+        self._estimator: QuasiStaticKinematicsEstimator | None = None
+        self._last_frame_monotonic: float | None = None
+        self._last_estimate_time: float | None = None
+        self._stream_stale = False
+        self._has_published_frame = False
+        self._last_error: tuple[str, float] | None = None
 
-        self._estimator = QuasiStaticKinematicsEstimator(rod, noise, solver="lm")
-        self._base_pose = np.array([0.0, 0.0, -160.0, 0.0, 0.0, 0.0, 1.0])
-        self._cable_disp = 0.0
+        latest_frame_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
 
-        # Subscriptions
+        self.create_subscription(String, "/IGTL_STRING_IN", self._config_cb, 10)
         self.create_subscription(
-            DeviceStream,
-            "/device/state",
-            self._device_state_cb,
-            10,
+            PointArray,
+            "/tracking/igtl/point_in",
+            self._coil_cb,
+            latest_frame_qos,
+        )
+        self._shape_pub = self.create_publisher(
+            PointArray, "/IGTL_POINT_OUT", latest_frame_qos
+        )
+        self._status_pub = self.create_publisher(String, "/IGTL_STRING_OUT", 10)
+        self.create_timer(0.1, self._check_stale)
+        self.get_logger().info(f"Live shape estimator ready; noise config: {config_path}")
+
+    def _config_cb(self, msg: String) -> None:
+        if msg.name != CONFIG_DEVICE:
+            return
+        try:
+            config = parse_shape_config(msg.data)
+            rod = RodConfig(
+                length=config.rod_length_m,
+                n_sections=config.n_sections,
+                proximal_node_idx=config.proximal_node_idx,
+            )
+            estimator = QuasiStaticKinematicsEstimator(
+                rod,
+                self._noise,
+                solver="lm",
+                known_base_pose=False,
+                compute_marginals=False,
+                max_iterations=20,
+            )
+        except (ShapeConfigError, ValueError, RuntimeError) as exc:
+            self._publish_status("error", str(exc))
+            return
+
+        self._config = config
+        self._estimator = estimator
+        self._last_frame_monotonic = None
+        self._last_estimate_time = None
+        self._stream_stale = False
+        self._has_published_frame = False
+        self._last_error = None
+        self._publish_status_payload(config.status_payload())
+        self.get_logger().info(
+            f"Configured {len(config.coil_node_indices)} coils on nodes "
+            f"{list(config.coil_node_indices)}"
         )
 
-        # Publishers
-        self._tip_pub = self.create_publisher(PoseStamped, "/estimator/tip_pose", 10)
-        self._rod_pub = self.create_publisher(PoseArray, "/estimator/rod_state", 10)
-
-        # Run estimator at device update rate via timer (10 ms = 100 Hz)
-        self.create_timer(0.01, self._estimate)
-
-        self.get_logger().info("StateEstimationNode ready.")
-
-    def _device_state_cb(self, msg: DeviceStream) -> None:
-        """Cache latest joint state for use in next estimation step."""
-        if msg.predicate == DeviceStream.POS and len(msg.data) >= 3:
-            # Joint layout: [catheter_lin, catheter_rot, catheter_bend, ...]
-            self._cable_disp = float(msg.data[2])  # bend ≈ cable displacement
-
-    def _estimate(self) -> None:
-        """Build a MeasurementPacket from cached state and run estimation."""
-        now = self.get_clock().now()
-        t = now.nanoseconds * 1e-9
-
+    def _coil_cb(self, msg: PointArray) -> None:
+        config = self._config
+        estimator = self._estimator
+        if config is None or estimator is None:
+            self._publish_error_throttled("coil frame received before configuration")
+            return
+        now_monotonic = time.monotonic()
+        now_ros = self.get_clock().now()
+        timestamp = now_ros.nanoseconds * 1.0e-9
+        dt = 0.05 if self._last_estimate_time is None else max(
+            1.0e-4, min(1.0, timestamp - self._last_estimate_time)
+        )
+        try:
+            positions = coil_points_mm_to_positions(
+                [(point.x, point.y, point.z) for point in msg.pointdata],
+                config.local_coil_indices,
+            )
+        except ShapeConfigError as exc:
+            self._publish_error_throttled(str(exc))
+            return
         packet = MeasurementPacket(
-            timestamp=t,
-            dt=0.01,
-            base_pose=self._base_pose.copy(),
-            cable_disp=self._cable_disp,
-            # Sensor observations filled in by ROS sensor adapters (TBD)
-            positions={},
-            poses={},
-            strains={},
+            timestamp=timestamp,
+            dt=dt,
+            base_pose=None,
+            positions=positions,
         )
+        try:
+            state = estimator.update(packet)
+        except Exception as exc:  # optimizer errors must not terminate the ROS node
+            self._publish_error_throttled(f"estimation failed: {exc}")
+            return
 
-        state = self._estimator.update(packet)
-        self._publish(state, now)
+        shape = PointArray()
+        shape.name = SHAPE_DEVICE
+        shape.pointdata = [
+            Point(
+                x=float(node.position[0] * 1000.0),
+                y=float(node.position[1] * 1000.0),
+                z=float(node.position[2] * 1000.0),
+            )
+            for node in state.nodes
+        ]
+        self._shape_pub.publish(shape)
+        self._last_frame_monotonic = now_monotonic
+        self._last_estimate_time = timestamp
+        if (
+            not self._has_published_frame
+            or self._stream_stale
+            or self._last_error is not None
+        ):
+            self._stream_stale = False
+            self._last_error = None
+            self._publish_status("streaming", "valid coil frames received")
+        self._has_published_frame = True
 
-    def _publish(self, state, stamp) -> None:
-        header_kwargs = {"frame_id": "world"}
+    def _check_stale(self) -> None:
+        if self._last_frame_monotonic is None or self._stream_stale:
+            return
+        if stream_is_stale(
+            self._last_frame_monotonic, time.monotonic(), self._stale_timeout
+        ):
+            self._stream_stale = True
+            self._publish_status("stale", "no fresh coil frame")
 
-        # Tip pose
-        tip = state.tip
-        tip_msg = PoseStamped()
-        tip_msg.header.stamp = stamp.to_msg()
-        tip_msg.header.frame_id = "world"
-        _fill_pose(tip_msg.pose, tip.pose)
-        self._tip_pub.publish(tip_msg)
+    def _publish_error_throttled(self, message: str) -> None:
+        now = time.monotonic()
+        if self._last_error and self._last_error[0] == message and now - self._last_error[1] < 1.0:
+            return
+        self._last_error = (message, now)
+        self._publish_status("error", message)
 
-        # Full rod state
-        rod_msg = PoseArray()
-        rod_msg.header.stamp = stamp.to_msg()
-        rod_msg.header.frame_id = "world"
-        for node in state.nodes:
-            p = Pose()
-            _fill_pose(p, node.pose)
-            rod_msg.poses.append(p)
-        self._rod_pub.publish(rod_msg)
+    def _publish_status(self, state: str, message: str) -> None:
+        self._publish_status_payload({
+            "schema_version": 1,
+            "state": state,
+            "message": message,
+        })
 
-
-def _fill_pose(pose_msg: Pose, vec7: np.ndarray) -> None:
-    pose_msg.position.x = float(vec7[0])
-    pose_msg.position.y = float(vec7[1])
-    pose_msg.position.z = float(vec7[2])
-    pose_msg.orientation.x = float(vec7[3])
-    pose_msg.orientation.y = float(vec7[4])
-    pose_msg.orientation.z = float(vec7[5])
-    pose_msg.orientation.w = float(vec7[6])
+    def _publish_status_payload(self, payload: dict) -> None:
+        msg = String()
+        msg.name = STATUS_DEVICE
+        msg.data = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        self._status_pub.publish(msg)
 
 
 def main(args=None) -> None:
@@ -148,6 +197,8 @@ def main(args=None) -> None:
     node = StateEstimationNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()

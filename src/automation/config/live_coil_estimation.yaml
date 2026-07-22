@@ -1,0 +1,17 @@
+# Installed copy of the live estimator noise configuration (SI units).
+noise:
+  Qc_translation: 1.0e-4
+  Qc_rotation: 1.0e-2
+  base_pose_std: 1.0e-3
+  tip_strain_std: 50.0
+  temporal_pose_std: 0.0
+  temporal_strain_std: 0.0
+  cold_start_torsion_std: 0.01
+  kin_factor_decoupled: false
+sensors:
+  mri_coils:
+    position_std: 0.0025
+estimator:
+  variant: qs_kinematics
+  solver: lm
+  known_base_pose: false

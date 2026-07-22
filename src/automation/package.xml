@@ -9,6 +9,8 @@
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
   <depend>control_interface</depend>
+  <depend>ros2_igtl_bridge</depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

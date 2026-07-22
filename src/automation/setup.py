@@ -9,7 +9,10 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/launch", ["launch/estimator.launch.py"]),
+        (f"share/{package_name}/launch",
+         ["launch/estimator.launch.py", "launch/collection.launch.py"]),
+        (f"share/{package_name}/config",
+         ["config/live_coil_estimation.yaml", "config/catheter_limits.yaml"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -20,6 +23,8 @@ setup(
     entry_points={
         "console_scripts": [
             "state_estimator = automation.estimation.node:main",
+            "em_bridge = automation.collection.em_bridge:main",
+            "collection = automation.collection.node:main",
         ],
     },
 )

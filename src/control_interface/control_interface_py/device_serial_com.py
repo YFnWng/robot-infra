@@ -182,8 +182,10 @@ class SerialCommunication(Node):
                     # self.get_logger().warn(f"Unknown prefix: {prefix}")
                     # self.get_logger().warn(payload.decode('utf-8'))
 
-            except serial.SerialException as e:
-                self.get_logger().error(f"Serial RX error: {e}")
+            except (serial.SerialException, OSError, TypeError):
+                # Port can be closed mid-read (pyserial sets fd=None before
+                # is_open=False) during connect/disconnect. Drop back to the
+                # top-of-loop guard, which resumes once the port is (re)opened.
                 self.is_connected = False
                 time.sleep(0.1)
     
@@ -192,15 +194,14 @@ class SerialCommunication(Node):
     # ============================================================
 
     def handle_device_stream(self, prefix: int, body: bytes):
-        # self.get_logger().info(f"number of bytes: {len(body)}")
-        # if len(body) != 24:
-        #     self.get_logger().info(f"malformed message: {prefix}, {body}")
-        values = struct.unpack("<6f", body) # tuple of floats
+        # ENC = raw encoder counts (int32); POS/VEL = physical values (float32).
+        fmt = "<6i" if prefix == DeviceStream.ENC else "<6f"
+        values = struct.unpack(fmt, body)
 
         msg = DeviceStream()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.predicate = prefix
-        msg.data = [float(x) for x in values]
+        msg.data = [float(x) for x in values]  # int32 -> float64 is exact
         self.state_pub.publish(msg)
 
     def handle_device_event(self, prefix: int, body: bytes):
@@ -260,21 +261,37 @@ class SerialCommunication(Node):
         req_id = uuid.uuid4().bytes  # 16 bytes
         payload = bytes([request.predicate]) + \
               req_id + request.cmd.encode('utf-8')
-        self.send_bytes(payload)
 
+        # Register the pending request BEFORE sending, so a fast firmware ack
+        # can't arrive before we're ready to match it.
         future = Future()
         with self.pending_lock:
             self.pending[req_id] = {
                 "future": future,
                 "deadline": time.time() + self.timeout_sec
             }
+        self.send_bytes(payload)
 
-        # BLOCK here safely if using MultiThreadedExecutor
-        rclpy.spin_until_future_complete(self, future)
+        # Poll for completion instead of rclpy.spin_until_future_complete(). The
+        # future is resolved by handle_device_response() on the rx thread. Nesting
+        # a spin inside this (MultiThreadedExecutor) callback DEADLOCKS the whole
+        # executor when a command gets no firmware ack (e.g. START_MOTOR/STOP_MOTOR
+        # have no firmware handler) — it wedges on_manager_control (velocity TX)
+        # and check_timeouts forever. A plain timed poll can't deadlock.
+        deadline = time.time() + self.timeout_sec
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.005)
 
-        result = future.result()
-        response.success = result["success"]
-        response.response = result["response"]
+        with self.pending_lock:
+            self.pending.pop(req_id, None)
+
+        if future.done():
+            result = future.result()
+            response.success = result["success"]
+            response.response = result["response"]
+        else:
+            response.success = False
+            response.response = "Timeout"
 
         return response
 

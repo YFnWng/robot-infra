@@ -190,6 +190,8 @@ class SlicerHandler(Node):
         self.manager_event_pub.publish(self.manager_event)
 
     def manager_stream_callback(self, msg: ManagerStream):
+        if len(msg.joint_pos) < 6:      # e.g. a joint_vel-only frame; nothing to show
+            return
         self.joint_pos_stream.pointdata[0].x = msg.joint_pos[0]
         self.joint_pos_stream.pointdata[0].y = msg.joint_pos[1]
         self.joint_pos_stream.pointdata[0].z = msg.joint_pos[2]
