@@ -621,13 +621,26 @@ void readEncoders() {
   // coupled rot and bend for sheath
   currentSheathBendPos = currentPos[5] - currentPos[4];
 
-  if (pc_connected && Serial.availableForWrite() >= 28 && Serial.available() == 0) {
+  if (pc_connected && Serial.availableForWrite() >= 56 && Serial.available() == 0) {
+    // POS frame: physical joint positions (coupling + transmission applied)
     sendingPCBytes[0] = PCStartMarker;
     sendingPCBytes[1] = 25;
     sendingPCBytes[2] = POS;
     memcpy(sendingPCBytes + 3, &currentCatheterLMPos, 4); // 1*float
     memcpy(sendingPCBytes + 7, &currentPos[1], 16); // 4*float
     memcpy(sendingPCBytes + 23, &currentSheathBendPos, 4); // 1*float
+    sendingPCBytes[27] = PCEndMarker;
+    Serial.write(sendingPCBytes, 28);
+
+    // ENC frame: raw encoder counts, uncoupled, int32 (little-endian). No
+    // transmission/coupling applied, so downstream models learn the mapping.
+    sendingPCBytes[0] = PCStartMarker;
+    sendingPCBytes[1] = 25;
+    sendingPCBytes[2] = ENC;
+    for (uint8_t i = 0; i < numHWSerials; i++) {
+      int32_t c = static_cast<int32_t>(EncCounts[i]);
+      memcpy(sendingPCBytes + 3 + i*4, &c, 4); // 6*int32
+    }
     sendingPCBytes[27] = PCEndMarker;
     Serial.write(sendingPCBytes, 28);
   }
