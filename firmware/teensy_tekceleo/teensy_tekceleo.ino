@@ -120,6 +120,9 @@ float currentVel[numHWSerials];
 uint16_t targetRPM[numHWSerials];
 uint8_t targetDir[numHWSerials]; // '0': right-hand, '1': left-hand
 uint8_t currentDir[numHWSerials];
+bool directionValid[numHWSerials] = { false };
+bool motorEnabled[numHWSerials] = { false };
+uint32_t lastDirectionCommandMs[numHWSerials] = { 0 };
 
 // Timing
 constexpr uint8_t controlCycle = 10; // ms
@@ -128,6 +131,8 @@ elapsedMillis sinceLastPCMsg;
 constexpr uint32_t PC_SILENCE_MS = 10000;
 bool watchdog_engaged = true;
 constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next command to register
+constexpr uint32_t DIRECTION_REFRESH_MS = 100;
+constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 10;
 bool pc_connected = false;
 
 void setup() {
@@ -150,13 +155,12 @@ void setup() {
     // HWSerials[i]->transmitterEnable(TE[i]);
     HWSerials[i]->begin(115200);
 
-    // set motors in closed-loop mode
-    HWSerials[i]->write("$L1\n", 4);
-    // delay(1);
-    delayMicroseconds(DRIVER_DELAY_us);
-    snprintf(sendingHWChars[i], sizeof(sendingHWChars[i]), "$S%c\n", currentDir[i]);
-    HWSerials[i]->write(sendingHWChars[i], 4);
-    sendingHWChars[i][0] = '\0';
+    // Always establish a known disabled state before configuring a driver.
+    stopMotorAxis(i, true);
+    writeMotorCommand(i, "$C0\n", 4);
+    writeMotorCommand(i, "$L1\n", 4);
+    directionValid[i] = false;
+    ensureMotorDirection(i);
   }
 
   // set up encoders
@@ -191,7 +195,7 @@ void loop() {
     // watchdog
     if (sinceLastPCMsg > PC_SILENCE_MS && watchdog_engaged) {
       for (uint8_t i = 0; i < numHWSerials; i++) {
-        HWSerials[i]->print("$O0\n");
+        stopMotorAxis(i, true);
       }
       watchdog_engaged = false;
     }
@@ -203,7 +207,10 @@ void recvHWSerials() {
     uint8_t rb;
 
     for (uint8_t i = 0; i < numHWSerials; i++){
-      while (HWSerials[i]->available() > 0 && newHWMsg[i] == false) {
+      // Drain every response. Each valid Tekceleo command produces an
+      // acknowledgement; consuming only one frame per control loop can overflow
+      // the UART receive buffer at a 100 Hz command rate.
+      while (HWSerials[i]->available() > 0) {
           rb = HWSerials[i]->read();
 
           if (recvInProgress[i] == true) {
@@ -386,27 +393,24 @@ void procPCBytes() {
           memcpy(targetVel, receivedPCBytes + 1, 24); // float size 4
           targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
           targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
+          newJointVelCmd = true;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            // memcpy(&targetVel[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
-            newJointVelCmd = isVelCmdValid(axis);
-            if (!newJointVelCmd) { break; }
-            // if (!newJointVelCmd) { 
-            //   Serial.write(&PCStartMarker, 1);
-            //   Serial.write(5);
-            //   Serial.print("false");
-            //   Serial.write(&PCEndMarker, 1);
-            //   break; }
-
-            // if (axis == 0) { targetVel[0] -= targetVel[2]; } // decouple lm and bend for catheter
-
-            // if (axis == 5) { targetVel[5] += targetVel[4]; } // decouple rot and bend for sheath
+            if (!isVelCmdValid(axis)) {
+              newJointVelCmd = false;
+              break;
+            }
 
             temp = targetVel[axis]/jointVRate[axis];
-
             targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
             targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
-
             if (targetRPM[axis] > maxRPM) { targetRPM[axis] = maxRPM; }
+          }
+          if (!newJointVelCmd) {
+            // Never leave an older valid command running after rejecting a
+            // newer vector.
+            for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+              stopMotorAxis(axis, true);
+            }
           }
           break;
         }
@@ -464,10 +468,12 @@ void procPCBytes() {
 
         case STOP: {// 'S', stop all motors
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            // snprintf(sendingHWChars[axis], sizeof(sendingHWChars[axis]), "$O0\n");
-            // HWSerials[axis]->print(sendingHWChars[axis]);
-            HWSerials[axis]->print("$O0\n");
+            stopMotorAxis(axis, true);
+            targetRPM[axis] = 0;
           }
+          newJointVelCmd = false;
+          newJointPosCmd = false;
+          sendAckIfPending();
           break;
         }
 
@@ -705,7 +711,7 @@ void checkLimitSwitches() {
   // digitalWrite(LED_BUILTIN, limitState[0]);
   if (trigger_event) {
     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-      HWSerials[axis]->write("$O0\n", 4);
+      stopMotorAxis(axis, true);
     }
     Serial.write(&PCStartMarker, 1);
     Serial.write(6);
@@ -775,7 +781,7 @@ void checkStall() {
 
       if (stallCount[axis] >= 20) {
         stalled = true;
-        HWSerials[axis]->write("$O0\n", 4);
+        stopMotorAxis(axis, true);
 
         if (std::signbit(targetVel[axis])) {
           sendingPCBytes[axis+1] = TRIGGER_M;
@@ -784,13 +790,13 @@ void checkStall() {
         }
         
         if (axis == 0) { // coupling
-          HWSerials[2]->write("$O0\n", 4);
+          stopMotorAxis(2, true);
         } else if (axis == 2) {
-          HWSerials[0]->write("$O0\n", 4);
+          stopMotorAxis(0, true);
         } else if (axis == 4) {
-          HWSerials[5]->write("$O0\n", 4);
+          stopMotorAxis(5, true);
         } else if (axis == 5) {
-          HWSerials[4]->write("$O0\n", 4);
+          stopMotorAxis(4, true);
         }
       } else {
         sendingPCBytes[axis+1] = TRIGGER_N;
@@ -809,30 +815,99 @@ void checkStall() {
   }
 }
 
+static inline void writeMotorCommand(
+    uint8_t axis, const char* command, size_t length) {
+  HWSerials[axis]->write(command, length);
+  HWSerials[axis]->flush();
+  delayMicroseconds(DRIVER_DELAY_us);
+}
+
+static inline void writeMotorCommandNoDelay(
+    uint8_t axis, const char* command, size_t length) {
+  HWSerials[axis]->write(command, length);
+  HWSerials[axis]->flush();
+}
+
+static inline void drainMotorResponses(uint8_t axis) {
+  while (HWSerials[axis]->available() > 0) {
+    HWSerials[axis]->read();
+  }
+  newHWMsg[axis] = false;
+}
+
+static bool waitForMotorAck(uint8_t axis) {
+  const uint32_t start = millis();
+  bool inFrame = false;
+  while (millis() - start < MOTOR_ACK_TIMEOUT_MS) {
+    while (HWSerials[axis]->available() > 0) {
+      const uint8_t value = HWSerials[axis]->read();
+      if (!inFrame) {
+        inFrame = value == respMarker;
+      } else if (value == endMarker) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static inline void stopMotorAxis(uint8_t axis, bool force) {
+  if (force || motorEnabled[axis]) {
+    writeMotorCommand(axis, "$O0\n", 4);
+  }
+  motorEnabled[axis] = false;
+  // Reassert direction before this motor is enabled again. This prevents the
+  // firmware cache from surviving a stall, watchdog stop, or driver power cycle.
+  directionValid[axis] = false;
+}
+
+static bool ensureMotorDirection(uint8_t axis) {
+  const uint32_t now = millis();
+  const bool changed = !directionValid[axis] ||
+                       targetDir[axis] != currentDir[axis];
+  const bool refresh = directionValid[axis] &&
+                       now - lastDirectionCommandMs[axis] >=
+                           DIRECTION_REFRESH_MS;
+
+  if (changed) {
+    stopMotorAxis(axis, true);
+  }
+  if (changed || refresh) {
+    // Remove acknowledgements for earlier C/O commands so the next complete
+    // response belongs to this direction command.
+    drainMotorResponses(axis);
+    char *p = sendingHWChars[axis];
+    *p++ = startMarker;
+    *p++ = 'S';
+    *p++ = targetDir[axis];
+    *p++ = endMarker;
+    writeMotorCommand(axis, sendingHWChars[axis],
+                      p - sendingHWChars[axis]);
+    if (!waitForMotorAck(axis)) {
+      directionValid[axis] = false;
+      stopMotorAxis(axis, true);
+      return false;
+    }
+    currentDir[axis] = targetDir[axis];
+    directionValid[axis] = true;
+    lastDirectionCommandMs[axis] = now;
+  }
+  return directionValid[axis];
+}
+
 void sendMotorCmds() {
   static char *p;
   if (pc_connected && newJointVelCmd) {
-    // digitalWrite(LED_BUILTIN,HIGH);
-    
     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      if (targetRPM[axis] == 0) {
+        // Re-send motor-off for every zero command. A dropped O0 must not leave
+        // a previous non-zero command running.
+        stopMotorAxis(axis, true);
+        continue;
+      }
 
-      if (targetDir[axis] != currentDir[axis]) {
-        // ("$S%u\n", targetDir[axis])
-        p = sendingHWChars[axis];
-        *p++ = startMarker;
-        *p++ = 'S';
-        *p++ = targetDir[axis];
-        *p++ = endMarker;
-        HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
-        // if (axis == 2) {
-        // Serial.write(&PCStartMarker, 1);
-        // Serial.write(5);
-        // Serial.write('0' + axis);
-        // Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
-        // Serial.write(&PCEndMarker, 1);
-        // }
-        delayMicroseconds(DRIVER_DELAY_us);
-        currentDir[axis] = targetDir[axis];
+      if (!ensureMotorDirection(axis)) {
+        continue;
       }
 
       p = sendingHWChars[axis];
@@ -840,49 +915,18 @@ void sendMotorCmds() {
       *p++ = 'C';
       p = write_uint16(p, targetRPM[axis]);
       *p++ = endMarker;
-      HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
-      // if (axis == 2) {
-      // Serial.write(&PCStartMarker, 1);
-      // Serial.write(p - sendingHWChars[axis] + 1);
-      // Serial.write('0' + axis);
-      // Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
-      // Serial.write(&PCEndMarker, 1);}
-      delayMicroseconds(DRIVER_DELAY_us);
+      writeMotorCommand(axis, sendingHWChars[axis],
+                        p - sendingHWChars[axis]);
 
-      p = sendingHWChars[axis];
-      *p++ = startMarker;
-      *p++ = 'O';
-      *p++ = '1';
-      *p++ = endMarker;
-      HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
-      // if (axis == 2) {
-      // Serial.write(&PCStartMarker, 1);
-      // Serial.write(5);
-      // Serial.write('0' + axis);
-      // Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
-      // Serial.write(&PCEndMarker, 1);}
-      
-      // if (axis == 0) {
-      //   Serial.write(&PCStartMarker, 1);
-      //   Serial.write(sendingHWChars[axis], p - sendingHWChars[axis]);
-      //   Serial.write(&PCEndMarker, 1);
-      //   }
+      writeMotorCommandNoDelay(axis, "$O1\n", 4);
+      motorEnabled[axis] = true;
     }
     newJointVelCmd = false;
 
   } else if (newJointPosCmd) {
     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-
-      if (targetDir[axis] != currentDir[axis]) {
-        // ("$S%u\n", targetDir[axis])
-        p = sendingHWChars[axis];
-        *p++ = startMarker;
-        *p++ = 'S';
-        *p++ = targetDir[axis];
-        *p++ = endMarker;
-        HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
-        delayMicroseconds(DRIVER_DELAY_us);
-        currentDir[axis] = targetDir[axis];
+      if (!ensureMotorDirection(axis)) {
+        continue;
       }
 
       if (newTargetVelCmd) {
@@ -891,8 +935,8 @@ void sendMotorCmds() {
         *p++ = 'C';
         p = write_uint16(p, targetRPM[axis]);
         *p++ = endMarker;
-        HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
-        delayMicroseconds(DRIVER_DELAY_us);
+        writeMotorCommand(axis, sendingHWChars[axis],
+                          p - sendingHWChars[axis]);
       }
 
       p = sendingHWChars[axis];
@@ -900,15 +944,11 @@ void sendMotorCmds() {
       *p++ = 'A';
       p = write_uint16(p, targetDeg[axis]);
       *p++ = endMarker;
-      HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
-      delayMicroseconds(DRIVER_DELAY_us);
+      writeMotorCommand(axis, sendingHWChars[axis],
+                        p - sendingHWChars[axis]);
 
-      p = sendingHWChars[axis];
-      *p++ = startMarker;
-      *p++ = 'O';
-      *p++ = '1';
-      *p++ = endMarker;
-      HWSerials[axis]->write(sendingHWChars[axis], p - sendingHWChars[axis]);
+      writeMotorCommandNoDelay(axis, "$O1\n", 4);
+      motorEnabled[axis] = true;
     }
     newJointPosCmd = false;
     newTargetVelCmd = false;
