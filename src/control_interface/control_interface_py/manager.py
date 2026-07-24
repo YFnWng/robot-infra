@@ -9,6 +9,7 @@ from control_interface.msg import ControlStream, \
 from control_interface.srv import DeviceCmd
 
 from collections import defaultdict
+import math
 import time
 
 class ControlManager(Node):
@@ -26,7 +27,11 @@ class ControlManager(Node):
         self.last_input_time = defaultdict(lambda: 0.0)
 
         self.DEADMAN_TIMEOUT = 0.2
-        self.SOURCE_TIMEOUT = 0.2
+        self.declare_parameter("source_timeout_s", 0.5)
+        self.SOURCE_TIMEOUT = float(
+            self.get_parameter("source_timeout_s").value)
+        if self.SOURCE_TIMEOUT <= 0.0:
+            raise ValueError("source_timeout_s must be positive")
 
         # Exclusive-control arbitration: a "priority" source (the automation
         # pipeline) claims exclusive control so manual teleop can't override its
@@ -47,7 +52,13 @@ class ControlManager(Node):
         # No limits_file => no clamp.
         self.declare_parameter("limits_file", "")
         self.declare_parameter("catheter", "default")
-        self._pos_lower, self._pos_upper, self._vel_max = self._load_limits()
+        self.declare_parameter("position_guard_horizon_s", 0.05)
+        (self._pos_lower, self._pos_upper, self._vel_min,
+         self._vel_max) = self._load_limits()
+        self._position_guard_horizon_s = float(
+            self.get_parameter("position_guard_horizon_s").value)
+        if self._position_guard_horizon_s <= 0.0:
+            raise ValueError("position_guard_horizon_s must be positive")
         self._last_pos = None
 
         # subscriptions
@@ -84,7 +95,11 @@ class ControlManager(Node):
         while not self.device_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('service not available, waiting again...')
 
-        # self.timer = self.create_timer(0.01, self.update)
+        # Source-level deadman. Command origins must publish live state
+        # periodically; if Slicer/OpenIGTLink or automation disappears, send an
+        # explicit zero before the Teensy's independent watchdog is needed.
+        self.source_watchdog_timer = self.create_timer(
+            0.05, self._source_watchdog_tick)
 
     # def deadman_cb(self, msg):
     #     self.deadman = msg.data
@@ -121,6 +136,23 @@ class ControlManager(Node):
             out.data = self._clamp_command(DeviceStream.POS, msg.joint_pos)
 
         self.control_pub.publish(out)
+
+    def _source_watchdog_tick(self):
+        src = self.active_source
+        if src is None:
+            return
+        age = time.time() - self.last_input_time[src]
+        if age <= self.SOURCE_TIMEOUT:
+            return
+
+        out = DeviceStream()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.predicate = DeviceStream.VEL
+        out.data = [0.0] * 6
+        self.control_pub.publish(out)
+        self.active_source = None
+        self.get_logger().warn(
+            f"control source '{src}' stale for {age:.3f}s — commanded zero velocity")
 
     def teleop_event_callback(self, msg: ManagerEvent):
         src = msg.header.frame_id
@@ -215,12 +247,10 @@ class ControlManager(Node):
         self.state_pub.publish(out)
 
     def _load_limits(self):
-        """Load (pos_lower, pos_upper, vel_max), each a length-6 list, from the
-        YAML `limits_file` under profile `catheter`. Returns (None, None, None)
-        when no file is configured => clamp disabled."""
+        """Load position and reliable velocity bounds for all six joints."""
         path = self.get_parameter("limits_file").value
         if not path:
-            return None, None, None
+            return None, None, None, None
         import yaml
         with open(path) as f:
             cfg = yaml.safe_load(f)
@@ -230,11 +260,21 @@ class ControlManager(Node):
             raise ValueError(f"catheter '{name}' not in {path}; have {list(profiles)}")
         p = profiles[name]
         out = []
-        for k in ("pos_lower", "pos_upper", "vel_max"):
-            vals = [float(x) for x in p[k]]
+        for k, raw in (
+                ("pos_lower", p["pos_lower"]),
+                ("pos_upper", p["pos_upper"]),
+                ("vel_min", p.get("vel_min", [0.0] * 6)),
+                ("vel_max", p["vel_max"])):
+            vals = [float(x) for x in raw]
             if len(vals) != 6:
                 raise ValueError(f"'{k}' for catheter '{name}' must have 6 values")
             out.append(vals)
+        if any(value < 0.0 for value in out[2]):
+            raise ValueError("vel_min values must be non-negative")
+        if any(vmax <= 0.0 for vmax in out[3]):
+            raise ValueError("vel_max values must be positive")
+        if any(vmin > vmax for vmin, vmax in zip(out[2], out[3])):
+            raise ValueError("vel_min values cannot exceed vel_max")
         self.get_logger().info(
             f"joint-limit clamp ACTIVE: catheter '{name}' from {path}")
         return tuple(out)
@@ -242,10 +282,10 @@ class ControlManager(Node):
     def _clamp_command(self, predicate, data):
         """Bound a forwarded device command to the active catheter limits.
 
-        VEL: |v[j]| <= vel_max[j], and zero any component that would drive a
-        joint further past a position limit (using the latest reported pose;
-        position gating is skipped until a pose is seen). POS: target clamped
-        into [pos_lower, pos_upper]. Returns a plain list (no clamp => unchanged).
+        VEL: preserve exact zero; otherwise enforce
+        ``vel_min[j] <= |v[j]| <= vel_max[j]``. Position limits retain
+        authority: if their safe velocity is below ``vel_min``, command zero.
+        POS: target clamped into [pos_lower, pos_upper].
         """
         if self._vel_max is None:                    # no profile => no clamp
             return list(data)
@@ -255,12 +295,26 @@ class ControlManager(Node):
             for j in range(n):
                 vmax = self._vel_max[j]
                 d[j] = max(-vmax, min(vmax, d[j]))
+                vmin = self._vel_min[j]
+                if 0.0 < abs(d[j]) < vmin:
+                    d[j] = math.copysign(vmin, d[j])
                 if self._last_pos is not None and j < len(self._last_pos):
                     p = self._last_pos[j]
-                    if d[j] > 0.0 and p >= self._pos_upper[j]:
+                    if not math.isfinite(p):
                         d[j] = 0.0
-                    elif d[j] < 0.0 and p <= self._pos_lower[j]:
-                        d[j] = 0.0
+                    elif p < self._pos_lower[j]:
+                        d[j] = max(0.0, d[j])
+                    elif p > self._pos_upper[j]:
+                        d[j] = min(0.0, d[j])
+                    else:
+                        horizon = self._position_guard_horizon_s
+                        min_velocity = (self._pos_lower[j] - p) / horizon
+                        max_velocity = (self._pos_upper[j] - p) / horizon
+                        d[j] = max(min_velocity, min(max_velocity, d[j]))
+                # Never send a low-speed remnant created by the position guard.
+                # Stopping is safer than crossing a hard limit at vel_min.
+                if 0.0 < abs(d[j]) < vmin:
+                    d[j] = 0.0
         elif predicate == DeviceStream.POS:
             for j in range(n):
                 d[j] = max(self._pos_lower[j], min(self._pos_upper[j], d[j]))
@@ -271,6 +325,8 @@ class ControlManager(Node):
         out.header.stamp = self.get_clock().now().to_msg()
         out.predicate = msg.predicate
         out.state = msg.state
+        out.text = msg.text
+        out.data = msg.data
         self.event_pub.publish(out)
 
     # def update(self):

@@ -7,6 +7,8 @@
 #   catheter_bend : mm        sheath_bend : deg
 #
 #   pos_lower / pos_upper : position range the generator sweeps (per joint).
+#   vel_min               : per-joint minimum reliable nonzero speed. Zero is
+#                           always preserved as a stop command.
 #   vel_max               : per-joint max speed (mm/s or deg/s); also caps the
 #                           commanded velocity in the collection node.
 #
@@ -19,10 +21,11 @@ catheters:
   default:
     pos_lower: [0.0,   -180.0, 0.0,   0.0,   -180.0, -360.0]
     pos_upper: [100.0,  180.0, 20.8,  100.0,  180.0,  360.0]   # TODO: real lin/rot ranges
+    vel_min:   [0.0,     0.0,  0.0,   0.0,     0.0,    0.0]
     vel_max:   [5.0,    30.0,  1.0,   5.0,    30.0,   30.0]
 
-  # Example second catheter — copy and adjust per device.
   imricor_test:
     pos_lower: [0.0,   -180.0, 0.0,   0.0,   -180.0, -360.0]
     pos_upper: [40.0,   180.0, 10.0,  80.0,   180.0,  360.0]
+    vel_min:   [2.0,      0.0,  0.0,   0.0,     0.0,    0.0]
     vel_max:   [10.0,    40.0,  1.0,   4.0,    25.0,   25.0]

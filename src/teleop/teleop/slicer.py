@@ -166,7 +166,10 @@ class SlicerHandler(Node):
 
         elif role == "key": # key command
             self.teleop_stream.joint_vel = [0.0] * 6
-            for key in msg.data:
+            # Slicer appends '#<sequence>' so identical held-key states remain
+            # observable as a live deadman heartbeat through OpenIGTLink.
+            key_state = msg.data.split("#", 1)[0]
+            for key in key_state:
                 # self.get_logger().info(f"key pressed: {key}")
                 if key in self.keys:
                     # later key overrides
@@ -176,7 +179,8 @@ class SlicerHandler(Node):
             self.teleop_stream.header.stamp = \
                 self.get_clock().now().to_msg()
             self.intent_pub.publish(self.teleop_stream)
-            self.get_logger().info(f"Control joint vel: {self.teleop_stream.joint_vel}")
+            self.get_logger().debug(
+                f"Control joint vel: {self.teleop_stream.joint_vel}")
 
     def manager_event_callback(self, msg: ManagerEvent):
         if msg.text != "":

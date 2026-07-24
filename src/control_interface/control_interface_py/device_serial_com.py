@@ -22,6 +22,8 @@ response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.DEBUG, 
                     ManagerEvent.START_MOTOR,
                     ManagerEvent.STOP_MOTOR,
+                    ManagerEvent.RESET_FAULT,
+                    ManagerEvent.FAULT_STATUS,
                     ManagerEvent.SET_ZERO,
                     ManagerEvent.SET_TARGET_VEL]
 
@@ -173,7 +175,6 @@ class SerialCommunication(Node):
                 if prefix in stream_prefix:
                     self.handle_device_stream(prefix, payload[1:])
                 elif prefix in event_prefix:
-                    self.get_logger().warn(payload.decode('utf-8'))
                     self.handle_device_event(prefix, payload[1:])
                 elif prefix in response_prefix:
                     self.handle_device_response(prefix, payload[1:])
@@ -208,7 +209,50 @@ class SerialCommunication(Node):
         msg = DeviceEvent()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.predicate = prefix
-        msg.state = list(body)
+        # Legacy LIMIT/STALL payloads contain only the six axis-state bytes.
+        # Motion-monitor protocol v1 appends structured diagnostics.
+        msg.state = list(body[:6])
+        if (prefix == ManagerEvent.STALL and len(body) >= 29
+                and body[6] in (1, 2)):
+            values = struct.unpack_from("<BBBBBHfffHH", body, 6)
+            (version, transition, fault, axis, coupled_axis, sequence,
+             commanded_velocity, measured_velocity, displacement,
+             target_rpm, window_ms) = values
+            transition_names = {
+                1: "MOTION_SUSPECTED",
+                2: "MOTION_CONFIRMED",
+                3: "MOTION_RECOVERED",
+                4: "MOTION_RESET",
+                5: "MOTION_UNOBSERVABLE",
+                6: "MOTION_STATUS",
+            }
+            fault_names = {
+                0: "NONE",
+                1: "STALL",
+                2: "OVERSPEED",
+                3: "WRONG_DIRECTION",
+                4: "FEEDBACK_FAULT",
+                5: "SPEED_UNOBSERVABLE",
+                6: "DRIVER_COMMUNICATION",
+            }
+            msg.text = (
+                f"{transition_names.get(transition, 'MOTION_UNKNOWN')}:"
+                f"{fault_names.get(fault, 'UNKNOWN')}"
+            )
+            msg.data = [
+                float(version), float(transition), float(fault), float(axis),
+                float(-1 if coupled_axis == 255 else coupled_axis),
+                float(sequence), float(commanded_velocity),
+                float(measured_velocity), float(displacement),
+                float(target_rpm), float(window_ms),
+            ]
+            if version >= 2 and len(body) >= 30:
+                msg.data.append(float(body[29]))
+            self.get_logger().warn(f"{msg.text} data={list(msg.data)}")
+        else:
+            self.get_logger().warn(
+                (bytes([prefix]) + body[:6]).decode("ascii", errors="replace")
+            )
         self.event_pub.publish(msg)
 
     def handle_device_response(self, prefix: int, body: bytes):
@@ -229,9 +273,10 @@ class SerialCommunication(Node):
             self.get_logger().warn("Unmatched response id={req_id}")
             return
 
+        decoded = payload.decode("utf-8", errors="ignore")
         entry["future"].set_result({
-            "success": True,
-            "response": payload.decode("utf-8", errors="ignore")
+            "success": not decoded.startswith("ERR"),
+            "response": decoded
         })
 
     # ============================================================
