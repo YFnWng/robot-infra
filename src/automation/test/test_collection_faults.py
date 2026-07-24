@@ -7,6 +7,80 @@ from automation.collection.node import CollectionNode, parse_fault_status
 from control_interface.msg import DeviceEvent, ManagerEvent
 
 
+def preflight_feedback(**overrides):
+    now_ns = 2_000_000_000
+    pos = [0.0] * 6
+    enc = [0.0] * 6
+    values = dict(
+        _last_pos=pos,
+        _last_enc={"data": enc, "stamp_ns": now_ns},
+        _pos_history=[(1_400_000_000, pos), (now_ns, pos)],
+        _enc_history=[(1_400_000_000, enc), (now_ns, enc)],
+        _preflight_require_enc=True,
+        _preflight_max_age_s=0.25,
+        _preflight_stability_s=0.5,
+        _preflight_limit_tolerance=0.1,
+        _preflight_position_drift=np.array([0.1, 1.0, 0.1, 0.1, 1.0, 1.0]),
+        _preflight_encoder_drift=100.0,
+        _pos_lower6=np.array([0.0, -180.0, 0.0, 0.0, -180.0, -360.0]),
+        _pos_upper6=np.array([40.0, 180.0, 10.0, 80.0, 180.0, 360.0]),
+        _target_idx=[0, 1, 2],
+    )
+    values.update(overrides)
+    fake = SimpleNamespace(**values)
+    return CollectionNode._feedback_preflight_error(fake, now_ns)
+
+
+def test_feedback_preflight_accepts_fresh_stable_in_range_state():
+    assert preflight_feedback() is None
+
+
+def test_feedback_preflight_rejects_missing_and_stale_frames():
+    assert "missing POS" in preflight_feedback(_last_pos=None)
+    assert "missing ENC" in preflight_feedback(_last_enc=None)
+    assert "stale POS" in preflight_feedback(
+        _pos_history=[(1_000_000_000, [0.0] * 6)])
+
+
+def test_feedback_preflight_rejects_out_of_range_target_position():
+    pos = [-1297.0, 69577.0, 0.0, 0.0, 0.0, 0.0]
+    assert "catheter_lin position" in preflight_feedback(
+        _last_pos=pos,
+        _pos_history=[(1_400_000_000, pos), (2_000_000_000, pos)])
+
+
+def test_feedback_preflight_rejects_position_drift():
+    moving = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert "catheter_lin moved" in preflight_feedback(
+        _last_pos=moving,
+        _pos_history=[(1_400_000_000, [0.0] * 6),
+                      (2_000_000_000, moving)])
+
+
+def test_feedback_preflight_rejects_encoder_drift():
+    moving = [101.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert "catheter_lin encoder moved" in preflight_feedback(
+        _last_enc={"data": moving, "stamp_ns": 2_000_000_000},
+        _enc_history=[(1_400_000_000, [0.0] * 6),
+                      (2_000_000_000, moving)])
+
+
+def test_feedback_preflight_ignores_motion_before_latest_stability_window():
+    old_motion = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    zero = [0.0] * 6
+    assert preflight_feedback(
+        _pos_history=[
+            (1_000_000_000, zero),
+            (1_400_000_000, old_motion),
+            (1_500_000_000, zero),
+            (2_000_000_000, zero)],
+        _enc_history=[
+            (1_000_000_000, zero),
+            (1_400_000_000, [500.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (1_500_000_000, zero),
+            (2_000_000_000, zero)]) is None
+
+
 def test_collection_velocity_bounds_preserve_zero_and_lift_nonzero_speed():
     fake = SimpleNamespace(
         _min_speeds=np.array([2.0, 0.0, 0.0, 0.0, 0.0, 0.0]),

@@ -11,6 +11,8 @@ speed-clamped velocity) for safe bring-up. ``mode:=sinusoidal`` (reusing the SOF
 Safety
 ------
 * Velocities are clamped to ``joint_max_speeds`` per joint.
+* Motion starts only after fresh POS and ENC feedback remains stationary and
+  the target joints are inside the selected catheter limits.
 * Motors are NOT started unless ``start_motor:=true`` (default false) — so the
   node's output can be verified with ``ros2 topic echo`` before touching hardware.
 * On stop / shutdown the node commands zero velocity.
@@ -36,6 +38,7 @@ TARGET_JOINTS = {"catheter": [0, 1, 2], "sheath": [3, 4, 5]}
 ROT_JOINTS = {1, 4}   # rotation joints (deg, wrap-around): catheter_rot, sheath_rot
 DEFAULT_MAX_SPEEDS = [5.0, 30.0, 1.0, 5.0, 30.0, 30.0]
 DEFAULT_MIN_SPEEDS = [0.0] * 6
+DEFAULT_PREFLIGHT_POSITION_DRIFT = [0.1, 1.0, 0.1, 0.1, 1.0, 1.0]
 
 
 def parse_fault_status(response: str) -> dict:
@@ -101,6 +104,15 @@ class CollectionNode(Node):
         self.declare_parameter("limits_file", "")
         self.declare_parameter("catheter", "default")
         self.declare_parameter("expect_enc", True)      # warn if no raw-ENC frames
+        # Feedback qualification before MODE/START or any velocity publication.
+        self.declare_parameter("preflight_feedback_timeout_s", 3.0)
+        self.declare_parameter("preflight_stability_s", 0.5)
+        self.declare_parameter("preflight_max_feedback_age_s", 0.25)
+        self.declare_parameter("preflight_position_limit_tolerance", 0.1)
+        self.declare_parameter(
+            "preflight_position_drift", DEFAULT_PREFLIGHT_POSITION_DRIFT)
+        self.declare_parameter("preflight_encoder_drift_counts", 100.0)
+        self.declare_parameter("preflight_require_enc", True)
         # return-to-start: after the trajectory, servo the target joints back to
         # the pose captured at run_start (proportional velocity, saturated to
         # vel_max, shortest angle for rotation joints).
@@ -122,6 +134,21 @@ class CollectionNode(Node):
         self._shutdown_on_done = bool(self.get_parameter("shutdown_on_done").value)
         self._test_joint = int(self.get_parameter("test_joint").value)
         self._test_velocity = float(self.get_parameter("test_velocity").value)
+        self._preflight_timeout_s = float(
+            self.get_parameter("preflight_feedback_timeout_s").value)
+        self._preflight_stability_s = float(
+            self.get_parameter("preflight_stability_s").value)
+        self._preflight_max_age_s = float(
+            self.get_parameter("preflight_max_feedback_age_s").value)
+        self._preflight_limit_tolerance = float(
+            self.get_parameter("preflight_position_limit_tolerance").value)
+        self._preflight_position_drift = np.asarray(
+            self.get_parameter("preflight_position_drift").value, dtype=float)
+        self._preflight_encoder_drift = float(
+            self.get_parameter("preflight_encoder_drift_counts").value)
+        self._preflight_require_enc = bool(
+            self.get_parameter("preflight_require_enc").value)
+        self._validate_preflight_parameters()
 
         # per-catheter limits (6-joint pos_lower/upper + vel_max) override the
         # joint_lower/upper and joint_max_speeds params if a limits_file is given.
@@ -153,6 +180,8 @@ class CollectionNode(Node):
         self._last_state = None
         self._last_enc = None          # latest raw-ENC frame (start encoder counts)
         self._last_pos = None          # latest reported POS 6-vector (return feedback)
+        self._pos_history = []         # (receipt stamp_ns, length-6 data)
+        self._enc_history = []
         self._enc_seen = False
         self.create_subscription(DeviceStream, "/device/state", self._state_cb, 10)
         self.create_subscription(
@@ -170,6 +199,9 @@ class CollectionNode(Node):
         self._fault_status = None
         self._finish_return_result = None
         self._finish_status_timer = None
+        self._preflight_timer = None
+        self._preflight_deadline_ns = None
+        self._preflight_last_error = "feedback qualification has not started"
         self.should_exit = False
 
         # Enable after a short delay so publishers finish discovery.
@@ -203,9 +235,126 @@ class CollectionNode(Node):
             self._abort_preflight(
                 "firmware reports enabled motors before run", self._fault_status)
             return
-        self._begin_run()
+        now_ns = self.get_clock().now().nanoseconds
+        self._preflight_deadline_ns = int(
+            now_ns + self._preflight_timeout_s * 1e9)
+        self._preflight_timer = self.create_timer(
+            0.05, self._preflight_feedback_tick)
+        self._preflight_feedback_tick()
+
+    def _preflight_feedback_tick(self) -> None:
+        """Wait for a fresh, in-range, stationary POS/ENC window."""
+        if self._done:
+            return
+        now_ns = self.get_clock().now().nanoseconds
+        error = self._feedback_preflight_error(now_ns)
+        if error is None:
+            if self._preflight_timer is not None:
+                self._preflight_timer.cancel()
+            self.get_logger().info(
+                f"feedback preflight passed: {self._preflight_stability_s:.2f}s "
+                "stationary POS/ENC window")
+            self._begin_run()
+            return
+        self._preflight_last_error = error
+        if now_ns >= self._preflight_deadline_ns:
+            self._abort_preflight(
+                f"feedback qualification timed out: {error}", self._fault_status)
+
+    def _feedback_preflight_error(self, now_ns: int) -> str | None:
+        """Return why feedback is not motion-safe yet, otherwise ``None``."""
+        if self._last_pos is None:
+            return "missing POS feedback"
+        if self._preflight_require_enc and self._last_enc is None:
+            return "missing ENC feedback"
+        if len(self._last_pos) != 6:
+            return f"POS feedback has {len(self._last_pos)} values, expected 6"
+        if self._preflight_require_enc and len(self._last_enc["data"]) != 6:
+            return (
+                f"ENC feedback has {len(self._last_enc['data'])} values, expected 6")
+
+        pos = np.asarray(self._last_pos, dtype=float)
+        if not np.all(np.isfinite(pos)):
+            return "POS feedback contains non-finite values"
+        if self._preflight_require_enc:
+            enc = np.asarray(self._last_enc["data"], dtype=float)
+            if not np.all(np.isfinite(enc)):
+                return "ENC feedback contains non-finite values"
+
+        max_age_ns = int(self._preflight_max_age_s * 1e9)
+        pos_age_ns = now_ns - self._pos_history[-1][0] if self._pos_history else None
+        if pos_age_ns is None or pos_age_ns < 0 or pos_age_ns > max_age_ns:
+            age = "unknown" if pos_age_ns is None else f"{pos_age_ns * 1e-9:.3f}s"
+            return f"stale POS feedback ({age})"
+        if self._preflight_require_enc:
+            enc_age_ns = now_ns - self._enc_history[-1][0] if self._enc_history else None
+            if enc_age_ns is None or enc_age_ns < 0 or enc_age_ns > max_age_ns:
+                age = (
+                    "unknown" if enc_age_ns is None
+                    else f"{enc_age_ns * 1e-9:.3f}s")
+                return f"stale ENC feedback ({age})"
+
+        if self._pos_lower6 is not None:
+            for joint in self._target_idx:
+                lower = self._pos_lower6[joint]
+                upper = self._pos_upper6[joint]
+                if (pos[joint] < lower - self._preflight_limit_tolerance
+                        or pos[joint] > upper + self._preflight_limit_tolerance):
+                    return (
+                        f"{JOINTS[joint]} position {pos[joint]:.6g} outside "
+                        f"[{lower:.6g}, {upper:.6g}]")
+
+        stability_ns = int(self._preflight_stability_s * 1e9)
+        pos_window = CollectionNode._recent_stability_window(
+            self._pos_history, stability_ns)
+        if pos_window is None:
+            return "POS stability window is incomplete"
+        pos_samples = np.asarray([data for _, data in pos_window], dtype=float)
+        pos_span = np.ptp(pos_samples, axis=0)
+        for joint in self._target_idx:
+            allowed = self._preflight_position_drift[joint]
+            if pos_span[joint] > allowed:
+                return (
+                    f"{JOINTS[joint]} moved {pos_span[joint]:.6g} during "
+                    f"preflight (allowed {allowed:.6g})")
+
+        if self._preflight_require_enc:
+            enc_window = CollectionNode._recent_stability_window(
+                self._enc_history, stability_ns)
+            if enc_window is None:
+                return "ENC stability window is incomplete"
+            enc_samples = np.asarray(
+                [data for _, data in enc_window], dtype=float)
+            enc_span = np.ptp(enc_samples, axis=0)
+            unstable = np.flatnonzero(
+                enc_span > self._preflight_encoder_drift)
+            if unstable.size:
+                joint = int(unstable[0])
+                return (
+                    f"{JOINTS[joint]} encoder moved {enc_span[joint]:.6g} counts "
+                    f"during preflight (allowed "
+                    f"{self._preflight_encoder_drift:.6g})")
+        return None
+
+    @staticmethod
+    def _recent_stability_window(history, duration_ns: int):
+        """Return the latest fully covered window, including its left sample."""
+        if not history:
+            return None
+        cutoff = history[-1][0] - duration_ns
+        start = None
+        for index, (stamp_ns, _) in enumerate(history):
+            if stamp_ns <= cutoff:
+                start = index
+            else:
+                break
+        if start is None:
+            return None
+        return history[start:]
 
     def _abort_preflight(self, reason: str, status: dict | None = None) -> None:
+        if self._preflight_timer is not None:
+            self._preflight_timer.cancel()
         self._done = True
         self._run_status = "preflight_failed"
         self._marker(
@@ -218,6 +367,8 @@ class CollectionNode(Node):
             self.should_exit = True
 
     def _begin_run(self) -> None:
+        if self._preflight_timer is not None:
+            self._preflight_timer.cancel()
         if self.get_parameter("auto_enable").value:
             self._send_event(ManagerEvent.MODE, text=chr(ManagerEvent.JOINT_VEL))
             self.get_logger().info("requested JOINT_VEL mode")
@@ -491,6 +642,29 @@ class CollectionNode(Node):
         if np.any(self._min_speeds > self._max_speeds):
             raise ValueError("joint_min_speeds cannot exceed joint_max_speeds")
 
+    def _validate_preflight_parameters(self) -> None:
+        """Validate feedback qualification thresholds."""
+        if self._preflight_timeout_s <= 0.0:
+            raise ValueError("preflight_feedback_timeout_s must be positive")
+        if (self._preflight_stability_s <= 0.0
+                or self._preflight_stability_s >= self._preflight_timeout_s):
+            raise ValueError(
+                "preflight_stability_s must be positive and less than timeout")
+        if self._preflight_max_age_s <= 0.0:
+            raise ValueError("preflight_max_feedback_age_s must be positive")
+        if self._preflight_limit_tolerance < 0.0:
+            raise ValueError(
+                "preflight_position_limit_tolerance must be non-negative")
+        if (self._preflight_position_drift.shape != (6,)
+                or not np.all(np.isfinite(self._preflight_position_drift))
+                or np.any(self._preflight_position_drift < 0.0)):
+            raise ValueError(
+                "preflight_position_drift must contain 6 finite non-negative values")
+        if (not np.isfinite(self._preflight_encoder_drift)
+                or self._preflight_encoder_drift < 0.0):
+            raise ValueError(
+                "preflight_encoder_drift_counts must be finite and non-negative")
+
     def _apply_velocity_bounds(self, velocity) -> np.ndarray:
         """Clamp max speed and lift nonzero commands into the reliable band."""
         bounded = np.clip(
@@ -505,17 +679,33 @@ class CollectionNode(Node):
 
     # -- state ----------------------------------------------------------- #
     def _state_cb(self, msg: DeviceStream) -> None:
+        now_ns = self.get_clock().now().nanoseconds
         snap = {
             "predicate": chr(msg.predicate),          # 'P' pos, 'V' vel, 'E' enc
             "data": [float(x) for x in msg.data],
-            "stamp_ns": self.get_clock().now().nanoseconds,
+            "stamp_ns": now_ns,
         }
         self._last_state = snap
         if msg.predicate == DeviceStream.POS:
             self._last_pos = snap["data"]             # feedback for return-to-start
+            self._pos_history.append((now_ns, snap["data"]))
+            self._prune_preflight_history(now_ns)
         elif msg.predicate == DeviceStream.ENC:
             self._enc_seen = True
             self._last_enc = snap                     # raw encoder counts
+            self._enc_history.append((now_ns, snap["data"]))
+            self._prune_preflight_history(now_ns)
+
+    def _prune_preflight_history(self, now_ns: int) -> None:
+        """Retain enough recent feedback for qualification without growing."""
+        keep_ns = int(max(
+            self._preflight_timeout_s + 0.5,
+            self._preflight_stability_s + 0.5) * 1e9)
+        cutoff = now_ns - keep_ns
+        while self._pos_history and self._pos_history[0][0] < cutoff:
+            self._pos_history.pop(0)
+        while self._enc_history and self._enc_history[0][0] < cutoff:
+            self._enc_history.pop(0)
 
     def _device_event_cb(self, msg: DeviceEvent) -> None:
         if msg.predicate != ManagerEvent.STALL or len(msg.data) < 11:
@@ -541,7 +731,12 @@ class CollectionNode(Node):
             fault["driver_stage"] = chr(fault["detail"])
         if fault["transition"] != ManagerEvent.MOTION_CONFIRMED:
             return
-        if self._t0 is None or self._done:
+        if self._t0 is None and not self._done:
+            self._hardware_fault = fault
+            self._abort_preflight(
+                "confirmed device fault during feedback preflight", fault)
+            return
+        if self._done:
             self._hardware_fault = fault
             return
         self._hardware_fault = fault
