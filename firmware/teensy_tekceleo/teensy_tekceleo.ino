@@ -1,5 +1,6 @@
 #include <QuadEncoder.h>
 #include <Encoder.h>
+#include "driver_ack_retry.h"
 #include <cmath>
 #include "stall_detector.h"
 
@@ -141,7 +142,10 @@ elapsedMillis sinceLastPCMsg;
 constexpr uint32_t PC_SILENCE_MS = 10000;
 bool watchdog_engaged = true;
 constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next command to register
-constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 10;
+constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 50;
+constexpr uint8_t MOTOR_ACK_ATTEMPTS = 3;
+constexpr uint16_t MOTOR_ACK_RETRY_DELAY_MS = 10;
+constexpr uint16_t MOTOR_DIRECTION_SETTLE_MS = 5;
 bool pc_connected = false;
 
 void setup() {
@@ -996,9 +1000,19 @@ static bool waitForMotorAck(uint8_t axis) {
 
 static bool writeMotorCommandWithAck(
     uint8_t axis, const char* command, size_t length) {
-  drainMotorResponses(axis);
-  writeMotorCommand(axis, command, length);
-  return waitForMotorAck(axis);
+  return DriverAckRetry::run(
+      MOTOR_ACK_ATTEMPTS,
+      [&]() {
+        drainMotorResponses(axis);
+        writeMotorCommand(axis, command, length);
+        return waitForMotorAck(axis);
+      },
+      [&](uint8_t) {
+        // Discard a response that completed just after the prior timeout, then
+        // give the driver a bounded recovery interval before retransmission.
+        drainMotorResponses(axis);
+        delay(MOTOR_ACK_RETRY_DELAY_MS);
+      });
 }
 
 static inline void stopMotorAxis(uint8_t axis, bool force) {
@@ -1019,6 +1033,9 @@ static bool ensureMotorDirection(uint8_t axis) {
 
   if (changed) {
     stopMotorAxis(axis, true);
+    // The stop command is intentionally unacknowledged. Let the driver finish
+    // processing it before draining its response and issuing direction.
+    delay(MOTOR_DIRECTION_SETTLE_MS);
   }
   if (changed) {
     // Remove acknowledgements for earlier C/O commands so the next complete
