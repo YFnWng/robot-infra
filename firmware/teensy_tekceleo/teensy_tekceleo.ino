@@ -1,6 +1,7 @@
 #include <QuadEncoder.h>
 #include <Encoder.h>
 #include <cmath>
+#include "stall_detector.h"
 
 // Teensy 4.0 pin functionalities
 // Serial RX: 0, 7, 15, 16, 21, 25, 28
@@ -52,6 +53,8 @@ constexpr uint8_t ENC = 'E';
 constexpr uint8_t START = 'I';
 constexpr uint8_t STOP = 'S';
 constexpr uint8_t ZERO = 'Z';
+constexpr uint8_t RESET_FAULT = 'R';
+constexpr uint8_t FAULT_STATUS = 'Q';
 constexpr uint8_t SET_VEL = 'F';
 constexpr uint8_t DEBUG = 'D';
 constexpr uint8_t CONNECT = 'C';
@@ -118,11 +121,18 @@ float currentSheathBendPos = 0.0f; // coupled
 float targetVel[numHWSerials];
 float currentVel[numHWSerials];
 uint16_t targetRPM[numHWSerials];
+uint16_t currentRPM[numHWSerials];
+bool speedValid[numHWSerials] = { false };
 uint8_t targetDir[numHWSerials]; // '0': right-hand, '1': left-hand
 uint8_t currentDir[numHWSerials];
 bool directionValid[numHWSerials] = { false };
 bool motorEnabled[numHWSerials] = { false };
-uint32_t lastDirectionCommandMs[numHWSerials] = { 0 };
+
+// Confirmed faults are latched: the affected physical motor and its coupled
+// partner are stopped and ignore the 100 Hz command stream until RESET_FAULT.
+constexpr bool FAULT_STOP_ENABLED = true;
+StallDetector motionMonitors[numHWSerials];
+uint16_t motionFaultSequence = 0;
 
 // Timing
 constexpr uint8_t controlCycle = 10; // ms
@@ -131,7 +141,6 @@ elapsedMillis sinceLastPCMsg;
 constexpr uint32_t PC_SILENCE_MS = 10000;
 bool watchdog_engaged = true;
 constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next command to register
-constexpr uint32_t DIRECTION_REFRESH_MS = 100;
 constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 10;
 bool pc_connected = false;
 
@@ -147,8 +156,18 @@ void setup() {
   memset(currentPos, 0.0f, sizeof(currentPos));
   memset(previousPos, 0.0f, sizeof(currentPos));
   memset(targetRPM, 0, sizeof(targetRPM));
+  memset(currentRPM, 0, sizeof(currentRPM));
   memset(targetDir, '1', sizeof(targetDir));
   memset(currentDir, '1', sizeof(currentDir));
+
+  // Initialize fault state before any motor-driver I/O. Startup deliberately
+  // does not wait for or classify driver acknowledgements: drivers may still
+  // be powering up (or motor power may intentionally be off), and USB may not
+  // have a host yet. The first runtime motion command reasserts direction and
+  // requires an acknowledgement before enabling each motor.
+  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+    motionMonitors[axis].begin(millis(), EncCounts[axis]);
+  }
 
   // set up motor communications
   for (uint8_t i = 0; i < numHWSerials; i++) {
@@ -160,7 +179,6 @@ void setup() {
     writeMotorCommand(i, "$C0\n", 4);
     writeMotorCommand(i, "$L1\n", 4);
     directionValid[i] = false;
-    ensureMotorDirection(i);
   }
 
   // set up encoders
@@ -187,7 +205,7 @@ void loop() {
     if (sinceLastCycle > controlCycle) {
       sinceLastCycle = 0;
       readEncoders();
-      checkStall();
+      updateMotionMonitors();
       checkLimitSwitches();
       sendMotorCmds();
     }
@@ -196,7 +214,13 @@ void loop() {
     if (sinceLastPCMsg > PC_SILENCE_MS && watchdog_engaged) {
       for (uint8_t i = 0; i < numHWSerials; i++) {
         stopMotorAxis(i, true);
+        targetRPM[i] = 0;
+        targetVel[i] = 0.0f;
+        motionMonitors[i].setCommand(
+            millis(), 0, targetDir[i], 0.0f);
       }
+      newJointVelCmd = false;
+      newJointPosCmd = false;
       watchdog_engaged = false;
     }
 }
@@ -346,13 +370,17 @@ static inline bool hasUUID(uint8_t cmd) {
 //   return false;  // table full → drop or NACK
 // }
 
-void sendAckIfPending() {
+void sendAckIfPending(const char* response = nullptr) {
   if (!pendingAck.valid) return;
 
+  const size_t responseLength = response == nullptr ? 0 : strlen(response);
   Serial.write(&PCStartMarker, 1);
-  Serial.write(1+REQ_ID_LEN);
+  Serial.write(1 + REQ_ID_LEN + responseLength);
   Serial.write(&pendingAck.prefix, 1);
   Serial.write(pendingAck.uuid, REQ_ID_LEN);
+  if (responseLength > 0) {
+    Serial.write(response, responseLength);
+  }
   Serial.write(&PCEndMarker, 1);
 
   pendingAck.valid = false;
@@ -399,11 +427,14 @@ void procPCBytes() {
               newJointVelCmd = false;
               break;
             }
-
-            temp = targetVel[axis]/jointVRate[axis];
-            targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
-            targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
-            if (targetRPM[axis] > maxRPM) { targetRPM[axis] = maxRPM; }
+          }
+          if (newJointVelCmd) {
+            for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+              temp = targetVel[axis]/jointVRate[axis];
+              targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
+              targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
+              if (targetRPM[axis] > maxRPM) { targetRPM[axis] = maxRPM; }
+            }
           }
           if (!newJointVelCmd) {
             // Never leave an older valid command running after rejecting a
@@ -435,13 +466,15 @@ void procPCBytes() {
         }
 
         case SET_VEL: {// 'F', set target velocity for pos control
-          memcpy(targetPos, receivedPCBytes + 1 + REQ_ID_LEN, 24); // float size 4
+          memcpy(targetVel, receivedPCBytes + 1 + REQ_ID_LEN, 24); // float size 4
           targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
           targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
 
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             temp = targetVel[axis]/jointVRate[axis];
             targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
+            if (targetRPM[axis] > maxRPM) { targetRPM[axis] = maxRPM; }
+            targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
           }
           newTargetVelCmd = true;
           newJointVelCmd = false;
@@ -470,10 +503,41 @@ void procPCBytes() {
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             stopMotorAxis(axis, true);
             targetRPM[axis] = 0;
+            targetVel[axis] = 0.0f;
+            motionMonitors[axis].setCommand(
+                millis(), 0, targetDir[axis], 0.0f);
           }
           newJointVelCmd = false;
           newJointPosCmd = false;
           sendAckIfPending();
+          break;
+        }
+
+        case RESET_FAULT: {// 'R', clear a latched fault only while stopped
+          bool safeToReset = true;
+          for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+            if (targetRPM[axis] != 0 || motorEnabled[axis]) {
+              safeToReset = false;
+              break;
+            }
+          }
+          if (!safeToReset) {
+            sendAckIfPending("ERR_NONZERO");
+            break;
+          }
+          for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+            StallDetector::Event event =
+                motionMonitors[axis].clearFault(millis(), EncCounts[axis]);
+            if (event.transition == StallDetector::RESET) {
+              reportMotionEvent(axis, 255, event);
+            }
+          }
+          sendAckIfPending("OK");
+          break;
+        }
+
+        case FAULT_STATUS: {// 'Q', query latched faults and motor state
+          sendFaultStatusAck();
           break;
         }
 
@@ -505,17 +569,16 @@ void procPCBytes() {
           break;
         }
 
-        case CONNECT: { // 'C', confirm PC connection
-          // digitalWrite(LED_BUILTIN, HIGH);
-          if (!pc_connected) {
-            pc_connected = true;
-            digitalWrite(LED_BUILTIN, HIGH);
-            sendAckIfPending();
-            reportLimitStates();
-          } else {
-            pc_connected = false;
-            digitalWrite(LED_BUILTIN, LOW);
-          }
+        case CONNECT: { // 'C', idempotently enable PC telemetry
+          // CONNECT used to toggle telemetry. A client that disconnected
+          // without sending a second CONNECT left the next client able to
+          // accidentally turn telemetry off. Repeated CONNECT frames are now
+          // safe and always (re-)announce the current safety state.
+          pc_connected = true;
+          digitalWrite(LED_BUILTIN, HIGH);
+          sendAckIfPending();
+          reportLimitStates();
+          reportFaultStatusEvents();
           break;
         }
 
@@ -766,52 +829,132 @@ void reportLimitStates() {
   Serial.write(&PCEndMarker, 1);
 }
 
-void checkStall() {
-  static uint8_t stallCount[numHWSerials] = {0};
-  static bool stalled;
+uint8_t coupledAxis(uint8_t axis) {
+  if (axis == 0) return 2;
+  if (axis == 2) return 0;
+  if (axis == 4) return 5;
+  if (axis == 5) return 4;
+  return 255;
+}
 
-  stalled = false;
-  sendingPCBytes[0] = STALL;
+static inline uint8_t* writeU16LE(uint8_t* p, uint16_t value) {
+  *p++ = static_cast<uint8_t>(value & 0xff);
+  *p++ = static_cast<uint8_t>((value >> 8) & 0xff);
+  return p;
+}
 
-  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+static inline uint8_t* writeFloatLE(uint8_t* p, float value) {
+  memcpy(p, &value, sizeof(value));
+  return p + sizeof(value);
+}
 
-    if (std::fabs(currentVel[axis]) < std::fabs(targetVel[axis])/2.5f ||
-        std::fabs(currentVel[axis]) > std::fabs(targetVel[axis])*2.5f) {
-      stallCount[axis] += 1;
-
-      if (stallCount[axis] >= 20) {
-        stalled = true;
-        stopMotorAxis(axis, true);
-
-        if (std::signbit(targetVel[axis])) {
-          sendingPCBytes[axis+1] = TRIGGER_M;
-        } else {
-          sendingPCBytes[axis+1] = TRIGGER_P;
-        }
-        
-        if (axis == 0) { // coupling
-          stopMotorAxis(2, true);
-        } else if (axis == 2) {
-          stopMotorAxis(0, true);
-        } else if (axis == 4) {
-          stopMotorAxis(5, true);
-        } else if (axis == 5) {
-          stopMotorAxis(4, true);
-        }
-      } else {
-        sendingPCBytes[axis+1] = TRIGGER_N;
-      }
-    } else {
-      stallCount[axis] = 0;
-      sendingPCBytes[axis+1] = TRIGGER_N;
-    }
+void reportMotionEvent(uint8_t axis, uint8_t coupled,
+                       const StallDetector::Event& event) {
+  uint8_t* p = sendingPCBytes;
+  *p++ = STALL;
+  for (uint8_t i = 0; i < numHWSerials; i++) {
+    *p++ = TRIGGER_N;
+  }
+  if (axis < numHWSerials &&
+      event.transition != StallDetector::RECOVERED &&
+      event.transition != StallDetector::RESET) {
+    sendingPCBytes[axis + 1] =
+        std::signbit(event.commanded_velocity) ? TRIGGER_M : TRIGGER_P;
   }
 
-  if (stalled) {
-    Serial.write(&PCStartMarker, 1);
-    Serial.write(7);
-    Serial.write(sendingPCBytes, 7);
-    Serial.write(&PCEndMarker, 1);
+  // Structured extension after the six legacy axis-state bytes.
+  *p++ = 2;  // protocol version
+  *p++ = static_cast<uint8_t>(event.transition);
+  *p++ = static_cast<uint8_t>(event.fault);
+  *p++ = axis;
+  *p++ = coupled;
+  p = writeU16LE(p, ++motionFaultSequence);
+  p = writeFloatLE(p, event.commanded_velocity);
+  p = writeFloatLE(p, event.measured_velocity);
+  p = writeFloatLE(p, event.window_displacement);
+  p = writeU16LE(p, event.target_rpm);
+  p = writeU16LE(p, event.window_ms);
+  *p++ = event.detail;
+
+  const uint8_t length = static_cast<uint8_t>(p - sendingPCBytes);
+  Serial.write(&PCStartMarker, 1);
+  Serial.write(length);
+  Serial.write(sendingPCBytes, length);
+  Serial.write(&PCEndMarker, 1);
+}
+
+void sendFaultStatusAck() {
+  uint8_t latchedMask = 0;
+  uint8_t enabledMask = 0;
+  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+    if (motionMonitors[axis].latched()) latchedMask |= (1U << axis);
+    if (motorEnabled[axis]) enabledMask |= (1U << axis);
+  }
+  char response[96];
+  snprintf(response, sizeof(response),
+           "V1,L=%02X,E=%02X,Q=%u,F=%u,%u,%u,%u,%u,%u",
+           latchedMask, enabledMask, motionFaultSequence,
+           static_cast<uint8_t>(motionMonitors[0].fault()),
+           static_cast<uint8_t>(motionMonitors[1].fault()),
+           static_cast<uint8_t>(motionMonitors[2].fault()),
+           static_cast<uint8_t>(motionMonitors[3].fault()),
+           static_cast<uint8_t>(motionMonitors[4].fault()),
+           static_cast<uint8_t>(motionMonitors[5].fault()));
+  sendAckIfPending(response);
+}
+
+void reportFaultStatusEvents() {
+  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+    if (!motionMonitors[axis].latched()) continue;
+    StallDetector::Event event;
+    event.transition = StallDetector::STATUS;
+    event.fault = motionMonitors[axis].fault();
+    event.commanded_velocity = targetVel[axis];
+    event.measured_velocity = currentVel[axis];
+    event.target_rpm = targetRPM[axis];
+    reportMotionEvent(axis, coupledAxis(axis), event);
+  }
+}
+
+void confirmDriverCommunicationFault(uint8_t axis, uint8_t stage) {
+  if (motionMonitors[axis].latched()) return;
+  StallDetector::Event event;
+  event.transition = StallDetector::CONFIRMED;
+  event.fault = StallDetector::DRIVER_COMMUNICATION;
+  event.commanded_velocity = targetVel[axis];
+  event.measured_velocity = currentVel[axis];
+  event.target_rpm = targetRPM[axis];
+  event.detail = stage;
+  motionMonitors[axis].forceLatch(event.fault, millis());
+  stopMotorAxis(axis, true);
+  const uint8_t coupled = coupledAxis(axis);
+  if (coupled < numHWSerials) {
+    stopMotorAxis(coupled, true);
+    motionMonitors[coupled].forceLatch(event.fault, millis());
+  }
+  reportMotionEvent(axis, coupled, event);
+}
+
+void updateMotionMonitors() {
+  const uint32_t now = millis();
+  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+    const float unitsPerCount = EncRes * jointPRate[axis];
+    StallDetector::Event event =
+        motionMonitors[axis].update(now, EncCounts[axis], unitsPerCount);
+    if (event.transition == StallDetector::NO_EVENT) {
+      continue;
+    }
+
+    const uint8_t coupled = coupledAxis(axis);
+    if (event.transition == StallDetector::CONFIRMED &&
+        FAULT_STOP_ENABLED) {
+      stopMotorAxis(axis, true);
+      if (coupled < numHWSerials) {
+        stopMotorAxis(coupled, true);
+        motionMonitors[coupled].forceLatch(event.fault, now);
+      }
+    }
+    reportMotionEvent(axis, coupled, event);
   }
 }
 
@@ -851,46 +994,49 @@ static bool waitForMotorAck(uint8_t axis) {
   return false;
 }
 
+static bool writeMotorCommandWithAck(
+    uint8_t axis, const char* command, size_t length) {
+  drainMotorResponses(axis);
+  writeMotorCommand(axis, command, length);
+  return waitForMotorAck(axis);
+}
+
 static inline void stopMotorAxis(uint8_t axis, bool force) {
   if (force || motorEnabled[axis]) {
     writeMotorCommand(axis, "$O0\n", 4);
   }
   motorEnabled[axis] = false;
+  speedValid[axis] = false;
+  currentRPM[axis] = 0;
   // Reassert direction before this motor is enabled again. This prevents the
   // firmware cache from surviving a stall, watchdog stop, or driver power cycle.
   directionValid[axis] = false;
 }
 
 static bool ensureMotorDirection(uint8_t axis) {
-  const uint32_t now = millis();
   const bool changed = !directionValid[axis] ||
                        targetDir[axis] != currentDir[axis];
-  const bool refresh = directionValid[axis] &&
-                       now - lastDirectionCommandMs[axis] >=
-                           DIRECTION_REFRESH_MS;
 
   if (changed) {
     stopMotorAxis(axis, true);
   }
-  if (changed || refresh) {
+  if (changed) {
     // Remove acknowledgements for earlier C/O commands so the next complete
     // response belongs to this direction command.
-    drainMotorResponses(axis);
     char *p = sendingHWChars[axis];
     *p++ = startMarker;
     *p++ = 'S';
     *p++ = targetDir[axis];
     *p++ = endMarker;
-    writeMotorCommand(axis, sendingHWChars[axis],
-                      p - sendingHWChars[axis]);
-    if (!waitForMotorAck(axis)) {
+    if (!writeMotorCommandWithAck(
+            axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
       directionValid[axis] = false;
       stopMotorAxis(axis, true);
+      confirmDriverCommunicationFault(axis, 'S');
       return false;
     }
     currentDir[axis] = targetDir[axis];
     directionValid[axis] = true;
-    lastDirectionCommandMs[axis] = now;
   }
   return directionValid[axis];
 }
@@ -899,10 +1045,15 @@ void sendMotorCmds() {
   static char *p;
   if (pc_connected && newJointVelCmd) {
     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      if (FAULT_STOP_ENABLED && motionMonitors[axis].latched()) {
+        continue;
+      }
       if (targetRPM[axis] == 0) {
-        // Re-send motor-off for every zero command. A dropped O0 must not leave
-        // a previous non-zero command running.
-        stopMotorAxis(axis, true);
+        // Stop only on the non-zero -> zero transition. Repeated command
+        // heartbeats must not flood every driver with redundant O0 frames.
+        stopMotorAxis(axis, false);
+        motionMonitors[axis].setCommand(
+            millis(), 0, targetDir[axis], 0.0f);
         continue;
       }
 
@@ -910,33 +1061,56 @@ void sendMotorCmds() {
         continue;
       }
 
-      p = sendingHWChars[axis];
-      *p++ = startMarker;
-      *p++ = 'C';
-      p = write_uint16(p, targetRPM[axis]);
-      *p++ = endMarker;
-      writeMotorCommand(axis, sendingHWChars[axis],
-                        p - sendingHWChars[axis]);
-
-      writeMotorCommandNoDelay(axis, "$O1\n", 4);
-      motorEnabled[axis] = true;
-    }
-    newJointVelCmd = false;
-
-  } else if (newJointPosCmd) {
-    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-      if (!ensureMotorDirection(axis)) {
-        continue;
-      }
-
-      if (newTargetVelCmd) {
+      if (!speedValid[axis] || currentRPM[axis] != targetRPM[axis]) {
         p = sendingHWChars[axis];
         *p++ = startMarker;
         *p++ = 'C';
         p = write_uint16(p, targetRPM[axis]);
         *p++ = endMarker;
-        writeMotorCommand(axis, sendingHWChars[axis],
-                          p - sendingHWChars[axis]);
+        if (!writeMotorCommandWithAck(
+                axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
+          confirmDriverCommunicationFault(axis, 'C');
+          continue;
+        }
+        currentRPM[axis] = targetRPM[axis];
+        speedValid[axis] = true;
+      }
+
+      if (!motorEnabled[axis]) {
+        if (!writeMotorCommandWithAck(axis, "$O1\n", 4)) {
+          confirmDriverCommunicationFault(axis, 'O');
+          continue;
+        }
+        motorEnabled[axis] = true;
+      }
+      motionMonitors[axis].setCommand(
+          millis(), targetRPM[axis], targetDir[axis], targetVel[axis]);
+    }
+    newJointVelCmd = false;
+
+  } else if (newJointPosCmd) {
+    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      if (FAULT_STOP_ENABLED && motionMonitors[axis].latched()) {
+        continue;
+      }
+      if (!ensureMotorDirection(axis)) {
+        continue;
+      }
+
+      if (newTargetVelCmd || !speedValid[axis] ||
+          currentRPM[axis] != targetRPM[axis]) {
+        p = sendingHWChars[axis];
+        *p++ = startMarker;
+        *p++ = 'C';
+        p = write_uint16(p, targetRPM[axis]);
+        *p++ = endMarker;
+        if (!writeMotorCommandWithAck(
+                axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
+          confirmDriverCommunicationFault(axis, 'C');
+          continue;
+        }
+        currentRPM[axis] = targetRPM[axis];
+        speedValid[axis] = true;
       }
 
       p = sendingHWChars[axis];
@@ -944,11 +1118,21 @@ void sendMotorCmds() {
       *p++ = 'A';
       p = write_uint16(p, targetDeg[axis]);
       *p++ = endMarker;
-      writeMotorCommand(axis, sendingHWChars[axis],
-                        p - sendingHWChars[axis]);
+      if (!writeMotorCommandWithAck(
+              axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
+        confirmDriverCommunicationFault(axis, 'A');
+        continue;
+      }
 
-      writeMotorCommandNoDelay(axis, "$O1\n", 4);
-      motorEnabled[axis] = true;
+      if (!motorEnabled[axis]) {
+        if (!writeMotorCommandWithAck(axis, "$O1\n", 4)) {
+          confirmDriverCommunicationFault(axis, 'O');
+          continue;
+        }
+        motorEnabled[axis] = true;
+      }
+      motionMonitors[axis].setCommand(
+          millis(), targetRPM[axis], targetDir[axis], targetVel[axis]);
     }
     newJointPosCmd = false;
     newTargetVelCmd = false;
