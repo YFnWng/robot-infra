@@ -19,12 +19,18 @@ uint8 TRIGGER_C           = 98 # "b"
 uint8 TRIGGER_P           = 99 # "c"
 uint8 TRIGGER_N           = 110 # "n"
 
+uint8 POSITION_STATUS     = 71 # position transaction event
+
 uint8 MOTION_SUSPECTED    = 1
 uint8 MOTION_CONFIRMED    = 2
 uint8 MOTION_RECOVERED    = 3
 uint8 MOTION_RESET        = 4
 uint8 MOTION_UNOBSERVABLE = 5
 uint8 MOTION_STATUS        = 6
+
+uint8 POSITION_COMPLETE    = 1
+uint8 POSITION_TIMED_OUT   = 2
+uint8 POSITION_REJECTED    = 3
 
 uint8 FAULT_STALL           = 1
 uint8 FAULT_OVERSPEED       = 2

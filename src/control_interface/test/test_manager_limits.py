@@ -2,7 +2,7 @@ import pytest
 from types import SimpleNamespace
 
 from builtin_interfaces.msg import Time
-from control_interface.msg import DeviceStream
+from control_interface.msg import ControlStream, DeviceStream, ManagerEvent
 from control_interface_py.manager import ControlManager
 
 
@@ -55,6 +55,7 @@ def test_stale_source_commands_zero_velocity(monkeypatch):
     obj.active_source = "slicer"
     obj.last_input_time = {"slicer": 9.0}
     obj.SOURCE_TIMEOUT = 0.2
+    obj.control_mode = ManagerEvent.JOINT_VEL
     obj.control_pub = SimpleNamespace(publish=published.append)
     obj.get_clock = lambda: SimpleNamespace(
         now=lambda: SimpleNamespace(to_msg=lambda: Time()))
@@ -70,12 +71,38 @@ def test_stale_source_commands_zero_velocity(monkeypatch):
     assert warnings
 
 
+def test_stale_position_source_dispatches_stop(monkeypatch):
+    dispatched = []
+    published = []
+    warnings = []
+    obj = object.__new__(ControlManager)
+    obj.active_source = 'autonomy'
+    obj.last_input_time = {'autonomy': 9.0}
+    obj.SOURCE_TIMEOUT = 0.2
+    obj.control_mode = ManagerEvent.JOINT_POS
+    obj.control_pub = SimpleNamespace(publish=published.append)
+    obj._dispatch_device_command = dispatched.append
+    obj.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+    obj.get_logger = lambda: SimpleNamespace(warn=warnings.append)
+    monkeypatch.setattr('control_interface_py.manager.time.time', lambda: 10.0)
+
+    obj._source_watchdog_tick()
+
+    assert obj.active_source is None
+    assert published == []
+    assert len(dispatched) == 1
+    assert dispatched[0].predicate == ManagerEvent.STOP_MOTOR
+    assert warnings
+
+
 def test_fresh_source_is_not_stopped(monkeypatch):
     published = []
     obj = object.__new__(ControlManager)
     obj.active_source = "autonomy"
     obj.last_input_time = {"autonomy": 9.9}
     obj.SOURCE_TIMEOUT = 0.2
+    obj.control_mode = ManagerEvent.JOINT_VEL
     obj.control_pub = SimpleNamespace(publish=published.append)
     monkeypatch.setattr("control_interface_py.manager.time.time", lambda: 10.0)
 
@@ -83,3 +110,35 @@ def test_fresh_source_is_not_stopped(monkeypatch):
 
     assert obj.active_source == "autonomy"
     assert published == []
+
+
+def test_position_speed_magnitudes_are_reliability_clamped():
+    out = manager([20.0] * 6)._clamp_position_speeds(
+        [-0.5, 50.0, 0.0, 3.0, 2.0, 12.0])
+    assert out == [2.0, 10.0, 0.0, 3.0, 2.0, 10.0]
+
+
+def test_position_control_forwards_target_and_speed_atomically(monkeypatch):
+    published = []
+    obj = manager([5.0] * 6)
+    obj.deadman = False
+    obj.estop = False
+    obj.control_mode = ManagerEvent.JOINT_POS
+    obj.active_source = None
+    obj.last_input_time = {}
+    obj._lock_blocks = lambda source: False
+    obj.control_pub = SimpleNamespace(publish=published.append)
+    obj.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+    monkeypatch.setattr('control_interface_py.manager.time.time', lambda: 10.0)
+    msg = ControlStream()
+    msg.header.frame_id = 'autonomy'
+    msg.joint_pos = [-1.0, 20.0, 41.0, 4.0, 5.0, 6.0]
+    msg.joint_vel = [0.5, 20.0, 1.0, 0.0, 0.0, 0.0]
+
+    ControlManager.teleop_callback(obj, msg)
+
+    assert len(published) == 1
+    assert published[0].predicate == DeviceStream.POS
+    assert list(published[0].data[:6]) == [0.0, 20.0, 40.0, 4.0, 5.0, 6.0]
+    assert list(published[0].data[6:]) == [2.0, 10.0, 2.0, 0.0, 0.0, 0.0]

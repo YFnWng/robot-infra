@@ -48,6 +48,9 @@ geometry_msgs/Pose cartesian_target
 # joint velocity commands
 float64[] joint_vel
 # Units defined by robot (rad, m, or normalized)
+# In JOINT_POS mode this field is required and carries six non-negative
+# physical motor-axis speed limits; joint_pos and joint_vel are forwarded as
+# one atomic position transaction.
 
 # Absolute joint targets
 float64[] joint_pos

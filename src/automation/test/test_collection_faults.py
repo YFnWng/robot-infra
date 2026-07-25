@@ -91,6 +91,88 @@ def test_collection_velocity_bounds_preserve_zero_and_lift_nonzero_speed():
     assert out.tolist() == [2.0, 0.0, -1.0, 0.0, 0.0, 0.0]
 
 
+def test_position_return_target_can_select_encoder_zero():
+    fake = SimpleNamespace(
+        _last_pos=[5.0, 20.0, 2.0, 4.0, 5.0, 6.0],
+        _start_pos=[1.0, 2.0, 3.0, 7.0, 8.0, 9.0],
+        _return_to_zero=True,
+        _target_idx=[0, 1, 2],
+        _pos_lower6=np.array([0.0, -180.0, 0.0, 0.0, -180.0, -360.0]),
+        _pos_upper6=np.array([40.0, 180.0, 10.0, 80.0, 180.0, 360.0]),
+    )
+    target = CollectionNode._position_return_target(fake)
+    assert target.tolist() == [0.0, 0.0, 0.0, 4.0, 5.0, 6.0]
+
+
+def test_position_return_requires_stable_per_joint_tolerance():
+    fake = SimpleNamespace(
+        _last_pos=[0.05, 0.2, 0.02, 0.0, 0.0, 0.0],
+        _return_target_pos=np.zeros(6),
+        _target_idx=[0, 1, 2],
+        _return_tolerances=np.array([0.1, 0.5, 0.05, 0.1, 0.5, 0.5]),
+        _return_position_settle_s=0.2,
+        _return_within_since_ns=None,
+    )
+    fake._return_error = lambda joint: CollectionNode._return_error(fake, joint)
+    assert not CollectionNode._position_return_done(fake, 1_000_000_000)
+    assert not CollectionNode._position_return_done(fake, 1_199_999_999)
+    assert CollectionNode._position_return_done(fake, 1_200_000_000)
+    fake._last_pos[2] = 0.06
+    assert not CollectionNode._position_return_done(fake, 1_300_000_000)
+    assert fake._return_within_since_ns is None
+
+
+def test_position_status_event_is_not_treated_as_motor_fault():
+    errors = []
+    fake = SimpleNamespace(
+        _position_status=None,
+        _position_complete_seen=False,
+        get_logger=lambda: SimpleNamespace(error=errors.append),
+    )
+    msg = DeviceEvent()
+    msg.predicate = ManagerEvent.POSITION_STATUS
+    msg.text = 'POSITION_COMPLETE'
+    msg.data = [1.0, float(ManagerEvent.POSITION_COMPLETE), 7.0] + [0.0] * 6
+    CollectionNode._device_event_cb(fake, msg)
+    assert fake._position_complete_seen
+    assert errors == []
+
+
+def test_position_return_stops_velocity_before_mode_switch():
+    events = []
+    clock_value = SimpleNamespace(nanoseconds=1_000_000_000)
+    fake = SimpleNamespace(
+        _last_pos=[5.0, 20.0, 2.0, 0.0, 0.0, 0.0],
+        _start_pos=[0.0] * 6,
+        _target_idx=[0, 1, 2],
+        _return_to_zero=True,
+        _return_control_mode='position',
+        _return_position_speed_factor=0.5,
+        _return_position_mode_delay_s=0.1,
+        _min_speeds=np.array([2.0, 7.0, 1.0, 0.0, 0.0, 0.0]),
+        _max_speeds=np.array([10.0, 40.0, 1.0, 4.0, 25.0, 25.0]),
+        _pos_lower6=np.array([0.0, -180.0, 0.0, 0.0, -180.0, -360.0]),
+        _pos_upper6=np.array([40.0, 180.0, 10.0, 80.0, 180.0, 360.0]),
+        _publish_velocity=lambda velocity: None,
+        _send_event=lambda predicate, text='': events.append((predicate, text)),
+        _marker=lambda *args, **kwargs: None,
+        get_parameter=lambda name: SimpleNamespace(value=True),
+        get_clock=lambda: SimpleNamespace(now=lambda: clock_value),
+        get_logger=lambda: SimpleNamespace(
+            info=lambda message: None, warn=lambda message: None),
+    )
+    fake._position_return_target = lambda: CollectionNode._position_return_target(fake)
+
+    CollectionNode._begin_return(fake)
+
+    assert [predicate for predicate, _ in events] == [
+        ManagerEvent.STOP_MOTOR, ManagerEvent.MODE]
+    assert events[1][1] == chr(ManagerEvent.JOINT_POS)
+    assert fake._return_target_pos[:3].tolist() == [0.0, 0.0, 0.0]
+    assert fake._return_position_speeds[:3].tolist() == [5.0, 20.0, 1.0]
+    assert fake._position_mode_ready_ns == 1_100_000_000
+
+
 def floor_tracker():
     return SimpleNamespace(
         _target_idx=[0, 1, 2],

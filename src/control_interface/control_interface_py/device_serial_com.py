@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import struct
+import math
 import time
 import threading
 import uuid
@@ -16,7 +17,8 @@ from control_interface.msg import DeviceStream, DeviceEvent, ManagerEvent
 from control_interface.srv import DeviceCmd
 
 stream_prefix = [DeviceStream.POS, DeviceStream.VEL, DeviceStream.ENC]
-event_prefix = [ManagerEvent.LIMIT, ManagerEvent.STALL]
+event_prefix = [
+    ManagerEvent.LIMIT, ManagerEvent.STALL, ManagerEvent.POSITION_STATUS]
 response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.MODE, 
                     ManagerEvent.DEBUG, 
@@ -26,6 +28,21 @@ response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.FAULT_STATUS,
                     ManagerEvent.SET_ZERO,
                     ManagerEvent.SET_TARGET_VEL]
+
+
+def encode_device_command(predicate, req_id, cmd='', data=()):
+    if len(req_id) != 16:
+        raise ValueError('device request id must contain 16 bytes')
+    if predicate == ManagerEvent.SET_TARGET_VEL and cmd:
+        raise ValueError('SET_TARGET_VEL does not accept a text payload')
+    values = [float(value) for value in data]
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError('device command data must be finite')
+    packed = struct.pack('<' + 'f' * len(values), *values)
+    payload = bytes([predicate]) + req_id + cmd.encode('utf-8') + packed
+    if len(payload) > 255:
+        raise ValueError('device command payload exceeds one-byte frame length')
+    return payload
 
 # ================================================================================= #
 # message structure: [startMarker][len(prefix+payload)][prefix][payload][endMarker] #
@@ -212,7 +229,22 @@ class SerialCommunication(Node):
         # Legacy LIMIT/STALL payloads contain only the six axis-state bytes.
         # Motion-monitor protocol v1 appends structured diagnostics.
         msg.state = list(body[:6])
-        if (prefix == ManagerEvent.STALL and len(body) >= 29
+        if prefix == ManagerEvent.POSITION_STATUS and len(body) == 27:
+            version, status, mask, *errors = struct.unpack('<BBB6f', body)
+            names = {
+                ManagerEvent.POSITION_COMPLETE: 'POSITION_COMPLETE',
+                ManagerEvent.POSITION_TIMED_OUT: 'POSITION_TIMED_OUT',
+                ManagerEvent.POSITION_REJECTED: 'POSITION_REJECTED',
+            }
+            msg.text = names.get(status, 'POSITION_UNKNOWN')
+            msg.data = [float(version), float(status), float(mask), *errors]
+            if status == ManagerEvent.POSITION_COMPLETE:
+                self.get_logger().info(
+                    f'{msg.text} mask=0x{mask:02X} errors={errors}')
+            else:
+                self.get_logger().warn(
+                    f'{msg.text} mask=0x{mask:02X} errors={errors}')
+        elif (prefix == ManagerEvent.STALL and len(body) >= 29
                 and body[6] in (1, 2)):
             values = struct.unpack_from("<BBBBBHfffHH", body, 6)
             (version, transition, fault, axis, coupled_axis, sequence,
@@ -305,8 +337,13 @@ class SerialCommunication(Node):
             return response
 
         req_id = uuid.uuid4().bytes  # 16 bytes
-        payload = bytes([request.predicate]) + \
-              req_id + request.cmd.encode('utf-8')
+        try:
+            payload = encode_device_command(
+                request.predicate, req_id, request.cmd, request.data)
+        except (TypeError, ValueError, struct.error) as exc:
+            response.success = False
+            response.response = str(exc)
+            return response
 
         # Register the pending request BEFORE sending, so a fast firmware ack
         # can't arrive before we're ready to match it.

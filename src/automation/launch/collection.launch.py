@@ -79,6 +79,16 @@ def launch_setup(context, *_args, **_kwargs):
             "joint_upper": _floats(cfg("joint_upper")),
             "return_to_start": cfg("return_to_start").lower() in ("true", "1", "yes"),
             "shutdown_on_done": True,
+        }, {
+            'return_control_mode': cfg('return_control_mode'),
+            'return_to_zero': cfg('return_to_zero').lower() in ('true', '1', 'yes'),
+            'return_position_speed_factor': float(
+                cfg('return_position_speed_factor')),
+            'return_position_tolerance': _floats(
+                cfg('return_position_tolerance')),
+            'return_position_settle_s': float(
+                cfg('return_position_settle_s')),
+            'return_timeout_s': float(cfg('return_timeout_s')),
         }],
     )
 
@@ -117,6 +127,15 @@ def generate_launch_description():
     default_limits = os.path.join(
         get_package_share_directory("automation"), "config", "catheter_limits.yaml")
     args = [
+        DeclareLaunchArgument('return_control_mode', default_value='position'),
+        DeclareLaunchArgument('return_to_zero', default_value='false'),
+        DeclareLaunchArgument(
+            'return_position_speed_factor', default_value='0.5'),
+        DeclareLaunchArgument(
+            'return_position_tolerance',
+            default_value='0.1,0.5,0.05,0.1,0.5,0.5'),
+        DeclareLaunchArgument('return_position_settle_s', default_value='0.2'),
+        DeclareLaunchArgument('return_timeout_s', default_value='30.0'),
         DeclareLaunchArgument("target", default_value="catheter"),      # catheter|sheath
         DeclareLaunchArgument("mode", default_value="sinusoidal"),      # sinusoidal|constant
         DeclareLaunchArgument("seed", default_value="-1"),

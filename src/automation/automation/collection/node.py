@@ -120,9 +120,9 @@ class CollectionNode(Node):
             "preflight_position_drift", DEFAULT_PREFLIGHT_POSITION_DRIFT)
         self.declare_parameter("preflight_encoder_drift_counts", 100.0)
         self.declare_parameter("preflight_require_enc", True)
-        # return-to-start: after the trajectory, servo the target joints back to
-        # the pose captured at run_start (proportional velocity, saturated to
-        # vel_max, shortest angle for rotation joints).
+        # Return after the trajectory. Position mode is encoder-qualified and
+        # can target either run-start or encoder zero; velocity mode remains a
+        # selectable fallback.
         self.declare_parameter("return_to_start", True)
         self.declare_parameter("return_kp", 1.0)          # gain, 1/s
         self.declare_parameter("return_tol", 0.5)         # mm or deg, per joint
@@ -164,6 +164,29 @@ class CollectionNode(Node):
         self._preflight_require_enc = bool(
             self.get_parameter("preflight_require_enc").value)
         self._validate_preflight_parameters()
+
+        # Position return is the default; the legacy velocity servo remains
+        # selectable for comparison and fallback.
+        self.declare_parameter('return_control_mode', 'position')
+        self.declare_parameter('return_to_zero', False)
+        self.declare_parameter('return_position_speed_factor', 0.5)
+        self.declare_parameter(
+            'return_position_tolerance', [0.1, 0.5, 0.05, 0.1, 0.5, 0.5])
+        self.declare_parameter('return_position_settle_s', 0.2)
+        self.declare_parameter('return_position_mode_delay_s', 0.1)
+        self._return_control_mode = str(
+            self.get_parameter('return_control_mode').value).lower()
+        self._return_to_zero = bool(
+            self.get_parameter('return_to_zero').value)
+        self._return_position_speed_factor = float(
+            self.get_parameter('return_position_speed_factor').value)
+        self._return_tolerances = np.asarray(
+            self.get_parameter('return_position_tolerance').value, dtype=float)
+        self._return_position_settle_s = float(
+            self.get_parameter('return_position_settle_s').value)
+        self._return_position_mode_delay_s = float(
+            self.get_parameter('return_position_mode_delay_s').value)
+        self._validate_position_return_parameters()
 
         # per-catheter limits (6-joint pos_lower/upper + vel_max) override the
         # joint_lower/upper and joint_max_speeds params if a limits_file is given.
@@ -212,6 +235,12 @@ class CollectionNode(Node):
         self._return_status = "not_started"
         self._return_elapsed_s = None
         self._start_pos = None         # pose captured at run_start (return target)
+        self._return_target_pos = None
+        self._return_position_speeds = None
+        self._return_within_since_ns = None
+        self._position_mode_ready_ns = None
+        self._position_complete_seen = False
+        self._position_status = None
         self._run_status = "not_started"
         self._hardware_fault = None
         self._fault_status = None
@@ -437,7 +466,7 @@ class CollectionNode(Node):
         self._publish_velocity(vel)
 
     # -- return to start -------------------------------------------------- #
-    def _begin_return(self) -> None:
+    def _velocity_return_begin_legacy(self) -> None:
         """Trajectory finished: settle at zero, then either servo the target
         joints back to the start pose or finish immediately."""
         for _ in range(5):
@@ -459,14 +488,14 @@ class CollectionNode(Node):
                 self._return_status = "disabled"
             self._finish()
 
-    def _return_error(self, joint: int) -> float:
+    def _velocity_return_error_legacy(self, joint: int) -> float:
         """Signed target-minus-current error for one physical joint."""
         error = self._start_pos[joint] - self._last_pos[joint]
         if joint in ROT_JOINTS:
             error = (error + 180.0) % 360.0 - 180.0
         return float(error)
 
-    def _return_step(self):
+    def _velocity_return_step_legacy(self):
         """Proportional velocity to drive target joints toward the start pose.
         Returns (vel6, done); rotation joints use the shortest signed angle."""
         kp = float(self.get_parameter("return_kp").value)
@@ -481,7 +510,7 @@ class CollectionNode(Node):
                                      -self._max_speeds[j], self._max_speeds[j]))
         return self._apply_velocity_bounds(v), done
 
-    def _return_tick(self) -> None:
+    def _velocity_return_tick_legacy(self) -> None:
         elapsed = (self.get_clock().now() - self._return_t0).nanoseconds * 1e-9
         v, done = self._return_step()
         if done or elapsed > float(self.get_parameter("return_timeout_s").value):
@@ -496,6 +525,149 @@ class CollectionNode(Node):
             return
         self._publish_velocity(v)
 
+    def _position_return_target(self) -> np.ndarray:
+        '''Build a full logical target while leaving non-target joints fixed.'''
+        target = np.asarray(self._last_pos, dtype=float).copy()
+        source = (
+            np.zeros(6) if self._return_to_zero
+            else np.asarray(self._start_pos, dtype=float))
+        target[self._target_idx] = source[self._target_idx]
+        if self._pos_lower6 is not None:
+            target = np.clip(target, self._pos_lower6, self._pos_upper6)
+        return target
+
+    def _begin_return(self) -> None:
+        '''Stop the trajectory and start the selected return controller.'''
+        for _ in range(5):
+            self._publish_velocity(np.zeros(6))
+        enabled = bool(self.get_parameter('return_to_start').value)
+        if not enabled or self._start_pos is None or self._last_pos is None:
+            self._return_status = (
+                'disabled' if not enabled else 'skipped_no_feedback')
+            if enabled:
+                self.get_logger().warn(
+                    'return skipped because POS feedback is unavailable')
+            self._finish()
+            return
+
+        self._return_target_pos = self._position_return_target()
+        self._returning = True
+        self._return_t0 = self.get_clock().now()
+        self._return_status = 'in_progress'
+        self._return_within_since_ns = None
+        self._position_complete_seen = False
+        self._position_status = None
+        target_values = [
+            round(float(self._return_target_pos[j]), 3)
+            for j in self._target_idx]
+        self._marker(
+            'return_start', target_joints=list(self._target_idx),
+            target_pose=target_values,
+            target_kind='zero' if self._return_to_zero else 'start',
+            control_mode=self._return_control_mode)
+        self.get_logger().info(
+            f'returning joints {self._target_idx} to {target_values} '
+            f'with {self._return_control_mode} control')
+
+        if self._return_control_mode == 'position':
+            # Stop the velocity transaction explicitly before changing modes;
+            # cross-topic delivery order is not a safety boundary.
+            self._send_event(ManagerEvent.STOP_MOTOR)
+            self._return_position_speeds = np.zeros(6)
+            speeds = np.maximum(
+                self._min_speeds,
+                self._return_position_speed_factor * self._max_speeds)
+            self._return_position_speeds[self._target_idx] = speeds[
+                self._target_idx]
+            self._send_event(
+                ManagerEvent.MODE, text=chr(ManagerEvent.JOINT_POS))
+            self._position_mode_ready_ns = int(
+                self.get_clock().now().nanoseconds
+                + self._return_position_mode_delay_s * 1e9)
+
+    def _return_error(self, joint: int) -> float:
+        '''Signed target-minus-current error for a return joint.'''
+        error = self._return_target_pos[joint] - self._last_pos[joint]
+        if joint in ROT_JOINTS:
+            error = (error + 180.0) % 360.0 - 180.0
+        return float(error)
+
+    def _return_step(self):
+        '''Legacy proportional velocity return, retained as a fallback.'''
+        kp = float(self.get_parameter('return_kp').value)
+        tolerance = float(self.get_parameter('return_tol').value)
+        velocity = np.zeros(6)
+        done = True
+        for joint in self._target_idx:
+            error = self._return_error(joint)
+            if abs(error) > tolerance:
+                done = False
+                velocity[joint] = float(np.clip(
+                    kp * error,
+                    -self._max_speeds[joint], self._max_speeds[joint]))
+        return self._apply_velocity_bounds(velocity), done
+
+    def _position_return_done(self, now_ns: int) -> bool:
+        if self._last_pos is None:
+            self._return_within_since_ns = None
+            return False
+        within = all(
+            abs(self._return_error(joint)) <= self._return_tolerances[joint]
+            for joint in self._target_idx)
+        if not within:
+            self._return_within_since_ns = None
+            return False
+        if self._return_within_since_ns is None:
+            self._return_within_since_ns = now_ns
+            return False
+        return (
+            now_ns - self._return_within_since_ns
+            >= int(self._return_position_settle_s * 1e9))
+
+    def _complete_return(self, status: str, elapsed: float) -> None:
+        if self._return_control_mode == 'position':
+            self._send_event(ManagerEvent.STOP_MOTOR)
+        else:
+            for _ in range(5):
+                self._publish_velocity(np.zeros(6))
+        self._returning = False
+        self._return_status = status
+        self._return_elapsed_s = float(elapsed)
+        self.get_logger().info(f'return finished with status={status}')
+        self._finish()
+
+    def _return_tick(self) -> None:
+        now = self.get_clock().now()
+        elapsed = (now - self._return_t0).nanoseconds * 1e-9
+        timeout = float(self.get_parameter('return_timeout_s').value)
+        if self._return_control_mode == 'position':
+            if self._position_status in (
+                    ManagerEvent.POSITION_TIMED_OUT,
+                    ManagerEvent.POSITION_REJECTED):
+                status = (
+                    'firmware_timed_out'
+                    if self._position_status == ManagerEvent.POSITION_TIMED_OUT
+                    else 'firmware_rejected')
+                self._complete_return(status, elapsed)
+                return
+            if self._position_return_done(now.nanoseconds):
+                self._complete_return('succeeded', elapsed)
+                return
+            if elapsed > timeout:
+                self._complete_return('timed_out', elapsed)
+                return
+            if now.nanoseconds >= self._position_mode_ready_ns:
+                self._publish_position(
+                    self._return_target_pos, self._return_position_speeds)
+            return
+
+        velocity, done = self._return_step()
+        if done or elapsed > timeout:
+            self._complete_return(
+                'succeeded' if done else 'timed_out', elapsed)
+            return
+        self._publish_velocity(velocity)
+
     def _finish(self) -> None:
         if self._done:
             return
@@ -508,7 +680,8 @@ class CollectionNode(Node):
         for _ in range(5):                       # settle at zero
             self._publish_velocity(np.zeros(6))
         self._finish_return_result = self._return_result()
-        if self._start_motor or self._hardware_fault is not None:
+        if (self._start_motor or self._hardware_fault is not None
+                or self._return_control_mode == 'position'):
             self._send_event(ManagerEvent.STOP_MOTOR)
         if self.get_parameter("auto_enable").value:
             # release the manager's exclusive-control lock and return it to idle
@@ -581,7 +754,10 @@ class CollectionNode(Node):
             "max_abs_error": None,
             "within_tolerance": None,
         }
-        if self._start_pos is None or self._last_pos is None:
+        result['target_kind'] = 'zero' if self._return_to_zero else 'start'
+        result['control_mode'] = self._return_control_mode
+        result['target_position'] = None
+        if self._return_target_pos is None or self._last_pos is None:
             return result
         errors = [self._return_error(j) for j in self._target_idx]
         result.update({
@@ -594,6 +770,15 @@ class CollectionNode(Node):
             "within_tolerance": all(
                 abs(error) <= tolerance for error in errors),
         })
+        result['target_position'] = [
+            float(self._return_target_pos[j]) for j in self._target_idx]
+        if self._return_control_mode == 'position':
+            tolerances = [
+                float(self._return_tolerances[j]) for j in self._target_idx]
+            result['tolerance'] = tolerances
+            result['within_tolerance'] = all(
+                abs(error) <= allowed
+                for error, allowed in zip(errors, tolerances))
         return result
 
     # -- command generation ---------------------------------------------- #
@@ -768,6 +953,28 @@ class CollectionNode(Node):
             raise ValueError(
                 "floor tracking requires 0 <= exit_time_s < enter_time_s")
 
+    def _validate_position_return_parameters(self) -> None:
+        '''Validate the encoder-qualified one-shot position return settings.'''
+        if self._return_control_mode not in ('velocity', 'position'):
+            raise ValueError(
+                'return_control_mode must be velocity or position')
+        if (not np.isfinite(self._return_position_speed_factor)
+                or not 0.0 < self._return_position_speed_factor <= 1.0):
+            raise ValueError(
+                'return_position_speed_factor must be in (0, 1]')
+        if (self._return_tolerances.shape != (6,)
+                or not np.all(np.isfinite(self._return_tolerances))
+                or np.any(self._return_tolerances <= 0.0)):
+            raise ValueError(
+                'return_position_tolerance must contain 6 positive values')
+        if (not np.isfinite(self._return_position_settle_s)
+                or self._return_position_settle_s <= 0.0):
+            raise ValueError('return_position_settle_s must be positive')
+        if (not np.isfinite(self._return_position_mode_delay_s)
+                or self._return_position_mode_delay_s < 0.0):
+            raise ValueError(
+                'return_position_mode_delay_s must be non-negative')
+
     def _validate_preflight_parameters(self) -> None:
         """Validate feedback qualification thresholds."""
         if self._preflight_timeout_s <= 0.0:
@@ -834,6 +1041,15 @@ class CollectionNode(Node):
             self._enc_history.pop(0)
 
     def _device_event_cb(self, msg: DeviceEvent) -> None:
+        if (msg.predicate == ManagerEvent.POSITION_STATUS
+                and len(msg.data) >= 3):
+            self._position_status = int(msg.data[1])
+            self._position_complete_seen = (
+                self._position_status == ManagerEvent.POSITION_COMPLETE)
+            if self._position_status != ManagerEvent.POSITION_COMPLETE:
+                self.get_logger().error(
+                    f'firmware position event: {msg.text} data={list(msg.data)}')
+            return
         if msg.predicate != ManagerEvent.STALL or len(msg.data) < 11:
             return
         data = list(msg.data)
@@ -913,6 +1129,15 @@ class CollectionNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self._source
         msg.joint_vel = [float(x) for x in vel]
+        self._control_pub.publish(msg)
+
+    def _publish_position(self, target, motor_speeds) -> None:
+        '''Publish one atomic absolute target plus physical-axis speed limits.'''
+        msg = ControlStream()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._source
+        msg.joint_pos = [float(value) for value in target]
+        msg.joint_vel = [float(value) for value in motor_speeds]
         self._control_pub.publish(msg)
 
     def _send_event(self, predicate: int, text: str = "") -> None:

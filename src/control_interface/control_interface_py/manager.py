@@ -131,9 +131,19 @@ class ControlManager(Node):
         if self.control_mode == ManagerEvent.JOINT_VEL and msg.joint_vel:
             out.predicate = DeviceStream.VEL
             out.data = self._clamp_command(DeviceStream.VEL, msg.joint_vel)
-        elif self.control_mode == ManagerEvent.JOINT_POS and msg.joint_pos:
+        elif (self.control_mode == ManagerEvent.JOINT_POS
+              and len(msg.joint_pos) == 6 and len(msg.joint_vel) == 6):
+            if not all(math.isfinite(value) for value in (
+                    list(msg.joint_pos) + list(msg.joint_vel))):
+                self.get_logger().warn(
+                    'ignored JOINT_POS command containing non-finite values')
+                return
             out.predicate = DeviceStream.POS
-            out.data = self._clamp_command(DeviceStream.POS, msg.joint_pos)
+            target = self._clamp_command(DeviceStream.POS, msg.joint_pos)
+            speed = self._clamp_position_speeds(msg.joint_vel)
+            out.data = target + speed
+        else:
+            return
 
         self.control_pub.publish(out)
 
@@ -143,6 +153,18 @@ class ControlManager(Node):
             return
         age = time.time() - self.last_input_time[src]
         if age <= self.SOURCE_TIMEOUT:
+            return
+
+        if self.control_mode == ManagerEvent.JOINT_POS:
+            stop = ManagerEvent()
+            stop.header.stamp = self.get_clock().now().to_msg()
+            stop.header.frame_id = src
+            stop.predicate = ManagerEvent.STOP_MOTOR
+            self._dispatch_device_command(stop)
+            self.active_source = None
+            self.get_logger().warn(
+                f'control source {src!r} stale for {age:.3f}s - '
+                'stopped position transaction')
             return
 
         out = DeviceStream()
@@ -319,6 +341,19 @@ class ControlManager(Node):
             for j in range(n):
                 d[j] = max(self._pos_lower[j], min(self._pos_upper[j], d[j]))
         return d
+
+    def _clamp_position_speeds(self, data):
+        '''Clamp physical motor-axis speed magnitudes for a POS transaction.'''
+        values = [abs(float(value)) for value in data]
+        if len(values) != 6:
+            raise ValueError('position speed vector must contain 6 values')
+        if self._vel_max is None:
+            return values
+        for joint in range(6):
+            values[joint] = min(values[joint], self._vel_max[joint])
+            if 0.0 < values[joint] < self._vel_min[joint]:
+                values[joint] = self._vel_min[joint]
+        return values
 
     def device_event_callback(self, msg: DeviceEvent):
         out = ManagerEvent()
