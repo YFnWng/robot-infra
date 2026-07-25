@@ -256,6 +256,26 @@ void test_slow_stall_confirmation_timing_is_unchanged() {
   assert(detector.fault() == StallDetector::STALL);
 }
 
+void test_idle_monitor_tracks_position_profile_without_velocity_faults() {
+  StallDetector detector;
+  uint32_t now = 0;
+  int32_t counts = 0;
+  detector.begin(now, counts);
+
+  // Position mode deliberately leaves the velocity monitor idle because the
+  // driver, rather than Teensy, owns the instantaneous velocity profile.
+  detector.setCommand(now, 0, '1', 0.0f);
+  for (int i = 0; i < 200; ++i) {
+    const float counts_per_second =
+        i < 60 ? 300.0f : (i < 120 ? 0.0f : -150.0f);
+    StallDetector::Transition transition = StallDetector::NO_EVENT;
+    advance(
+        detector, now, counts, counts_per_second, 0.01f, &transition);
+    assert(transition == StallDetector::NO_EVENT);
+    assert(!detector.latched());
+  }
+}
+
 void test_latch_requires_clear() {
   StallDetector detector;
   uint32_t now = 0;
@@ -283,6 +303,7 @@ int main() {
   test_real_overspeed_still_latches();
   test_slow_overspeed_requires_an_additional_window();
   test_slow_stall_confirmation_timing_is_unchanged();
+  test_idle_monitor_tracks_position_profile_without_velocity_faults();
   test_latch_requires_clear();
   return 0;
 }

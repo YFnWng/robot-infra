@@ -4,6 +4,7 @@
 #include "driver_ack_retry.h"
 #include "encoder_integrity_guard.h"
 #include <cmath>
+#include "position_move_tracker.h"
 #include "stall_detector.h"
 
 // Teensy 4.0 pin functionalities
@@ -40,6 +41,7 @@ bool newPCMsg = false;
 bool newJointVelCmd = false;
 bool newJointPosCmd = false;
 bool newTargetVelCmd = false;
+uint8_t positionCorrectionMask = 0;
 
 // Protocals
 constexpr size_t REQ_ID_LEN    = 16;
@@ -64,6 +66,10 @@ constexpr uint8_t CONNECT = 'C';
 constexpr uint8_t CALIBRATION = 'K';
 constexpr uint8_t LIMIT = 'L';
 constexpr uint8_t STALL = 'T';
+constexpr uint8_t POSITION_STATUS = 'G';
+constexpr uint8_t POSITION_COMPLETE = 1;
+constexpr uint8_t POSITION_TIMED_OUT = 2;
+constexpr uint8_t POSITION_REJECTED = 3;
 constexpr uint8_t TRIGGER_P = 'c';
 constexpr uint8_t TRIGGER_C = 'b';
 constexpr uint8_t TRIGGER_M = 'a';
@@ -118,6 +124,8 @@ int limitState[5] = { 0, 0, 0, 0, 0 };
 // long targetHz[numHWSerials];
 float targetPos[numHWSerials];
 uint16_t targetDeg[numHWSerials];
+float requestedPosition[numHWSerials];
+bool requestedPositionValid = false;
 float currentPos[numHWSerials]; // decoupled
 float previousPos[numHWSerials]; // decoupled
 float currentCatheterLMPos = 0.0f; // coupled
@@ -136,6 +144,7 @@ bool motorEnabled[numHWSerials] = { false };
 // partner are stopped and ignore the 100 Hz command stream until RESET_FAULT.
 constexpr bool FAULT_STOP_ENABLED = true;
 StallDetector motionMonitors[numHWSerials];
+PositionMoveTracker positionMoveTracker;
 uint16_t motionFaultSequence = 0;
 bool encoderIntegrityLatched = false;
 uint32_t lastEncoderReadMs = 0;
@@ -151,6 +160,12 @@ constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 50;
 constexpr uint8_t MOTOR_ACK_ATTEMPTS = 3;
 constexpr uint16_t MOTOR_ACK_RETRY_DELAY_MS = 10;
 constexpr uint16_t MOTOR_DIRECTION_SETTLE_MS = 5;
+constexpr uint32_t POSITION_SETTLE_MS = 100;
+constexpr uint32_t POSITION_TIMEOUT_MS = 45000;
+constexpr uint32_t POSITION_RETRY_IDLE_MS = 500;
+constexpr uint8_t POSITION_MAX_CORRECTIONS = 4;
+constexpr float POSITION_MIN_PROGRESS_FRACTION = 0.25f;
+constexpr float POSITION_TOLERANCE_MOTOR_DEG = 3.0f;
 constexpr uint32_t ENCODER_MAX_COUNTS_PER_SECOND =
     static_cast<uint32_t>(maxRPM * 360.0f / (60.0f * EncRes) + 0.5f);
 constexpr uint8_t ENCODER_SPEED_MARGIN_MULTIPLIER = 2;
@@ -220,6 +235,7 @@ void loop() {
     if (sinceLastCycle > controlCycle) {
       sinceLastCycle = 0;
       if (readEncoders()) {
+        updatePositionMove();
         updateMotionMonitors();
       }
       checkLimitSwitches();
@@ -237,6 +253,9 @@ void loop() {
       }
       newJointVelCmd = false;
       newJointPosCmd = false;
+      positionMoveTracker.cancel();
+      positionCorrectionMask = 0;
+      requestedPositionValid = false;
       watchdog_engaged = false;
     }
 }
@@ -417,6 +436,10 @@ void procPCBytes() {
       uint8_t cmd = receivedPCBytes[0];
 
       if (hasUUID(cmd)) {
+        if (PCBytes_len < 1 + REQ_ID_LEN) {
+          pendingAck.valid = false;
+          return;
+        }
         // Capture ACK info immediately
         pendingAck.valid = true;
         pendingAck.prefix = cmd;
@@ -432,7 +455,8 @@ void procPCBytes() {
 
         case VEL: {// 'V'
           // digitalWrite(LED_BUILTIN, HIGH);
-        
+          if (PCBytes_len != 1 + 6 * sizeof(float)) break;
+          cancelPositionMove(true);
           newJointPosCmd = false;
           memcpy(targetVel, receivedPCBytes + 1, 24); // float size 4
           targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
@@ -463,31 +487,70 @@ void procPCBytes() {
         }
 
         case POS: {// 'P'
+          // Atomic position transaction: six absolute logical joint targets
+          // followed by six physical motor-axis speed magnitudes.
+          if (PCBytes_len != 1 + 12 * sizeof(float)) {
+            reportPositionStatus(POSITION_REJECTED, 0);
+            break;
+          }
           newJointVelCmd = false;
           memcpy(targetPos, receivedPCBytes + 1, 24); // float size 4
           targetPos[0] -= targetPos[2]; // decouple lm and bend for catheter
           targetPos[5] += targetPos[4]; // decouple rot and bend for sheath
-          
+          float positionSpeed[numHWSerials];
+          memcpy(positionSpeed, receivedPCBytes + 1 + 24, 24);
+
+          // Repeated absolute targets are heartbeats. Do not stop and rebuild
+          // the driver's relative move on every ROS control cycle.
+          if (requestedPositionValid && positionTargetsMatch(targetPos)) break;
+          cancelPositionMove(true);
+          memcpy(requestedPosition, targetPos, sizeof(requestedPosition));
+          requestedPositionValid = true;
+          newJointPosCmd = true;
+          uint8_t rejectedMask = 0;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            // memcpy(&targetPos[axis], receivedPCBytes + 1 + axis*4, 4); // float size 4
-            newJointPosCmd = isPosCmdValid(axis);
-            if (!newJointPosCmd) { break; }
-
+            if (!std::isfinite(targetPos[axis]) ||
+                !std::isfinite(positionSpeed[axis]) ||
+                !isPosCmdValid(axis) ||
+                (FAULT_STOP_ENABLED && motionMonitors[axis].latched())) {
+              rejectedMask |= static_cast<uint8_t>(1U << axis);
+              continue;
+            }
             temp = (targetPos[axis] - currentPos[axis])/jointPRate[axis];
-
+            if (std::fabs(temp) > static_cast<float>(UINT16_MAX)) {
+              rejectedMask |= static_cast<uint8_t>(1U << axis);
+              continue;
+            }
             targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
             targetDeg[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
+            const float speed = std::fabs(positionSpeed[axis]);
+            targetRPM[axis] = static_cast<uint16_t>(std::roundf(
+                speed / std::fabs(jointVRate[axis])));
+            if (targetRPM[axis] > maxRPM) targetRPM[axis] = maxRPM;
+            targetVel[axis] = std::copysign(speed, targetPos[axis] - currentPos[axis]);
+            if (targetDeg[axis] != 0 && targetRPM[axis] == 0) {
+              rejectedMask |= static_cast<uint8_t>(1U << axis);
+            }
+          }
+          if (rejectedMask != 0) {
+            newJointPosCmd = false;
+            requestedPositionValid = false;
+            reportPositionStatus(POSITION_REJECTED, rejectedMask);
           }
           break;
         }
 
         case SET_VEL: {// 'F', set target velocity for pos control
+          if (PCBytes_len != 1 + REQ_ID_LEN + 6 * sizeof(float)) {
+            const char error[] = {'E', 'R', 'R', 0};
+            sendAckIfPending(error);
+            break;
+          }
           memcpy(targetVel, receivedPCBytes + 1 + REQ_ID_LEN, 24); // float size 4
-          targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
-          targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
 
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            temp = targetVel[axis]/jointVRate[axis];
+            targetVel[axis] = std::fabs(targetVel[axis]);
+            temp = targetVel[axis]/std::fabs(jointVRate[axis]);
             targetRPM[axis] = static_cast<uint16_t>(std::roundf(std::fabs(temp)));
             if (targetRPM[axis] > maxRPM) { targetRPM[axis] = maxRPM; }
             targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
@@ -516,6 +579,9 @@ void procPCBytes() {
         }
 
         case STOP: {// 'S', stop all motors
+          positionMoveTracker.cancel();
+          positionCorrectionMask = 0;
+          requestedPositionValid = false;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             stopMotorAxis(axis, true);
             targetRPM[axis] = 0;
@@ -662,7 +728,7 @@ static inline bool isPosCmdValid(uint8_t axis) {
     }
     case 5: {
       return !((limitState[4] < 0 && targetPos[5] < currentSheathBendPos) || 
-              (limitState[4] > 0 && targetVel[5] > currentSheathBendPos));
+              (limitState[4] > 0 && targetPos[5] > currentSheathBendPos));
     }
     default: { return true;}
   }
@@ -775,6 +841,9 @@ void latchEncoderIntegrityFault(
   newJointVelCmd = false;
   newJointPosCmd = false;
   newTargetVelCmd = false;
+  positionMoveTracker.cancel();
+  positionCorrectionMask = 0;
+  requestedPositionValid = false;
   reportMotionEvent(culprit, 255, event);
 }
 
@@ -948,6 +1017,67 @@ static inline uint8_t* writeFloatLE(uint8_t* p, float value) {
   return p + sizeof(value);
 }
 
+bool positionTargetsMatch(const float* candidate) {
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if (std::fabs(candidate[axis] - requestedPosition[axis]) > 1.0e-6f) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void cancelPositionMove(bool stopAxes) {
+  const uint8_t mask = positionMoveTracker.commandMask();
+  positionMoveTracker.cancel();
+  positionCorrectionMask = 0;
+  requestedPositionValid = false;
+  if (!stopAxes) return;
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((mask & (1U << axis)) == 0) continue;
+    stopMotorAxis(axis, true);
+    targetRPM[axis] = 0;
+    targetVel[axis] = 0.0f;
+    motionMonitors[axis].setCommand(millis(), 0, targetDir[axis], 0.0f);
+  }
+}
+
+void reportPositionStatus(uint8_t status, uint8_t mask) {
+  uint8_t* p = sendingPCBytes;
+  *p++ = POSITION_STATUS;
+  *p++ = 1;
+  *p++ = status;
+  *p++ = mask;
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    p = writeFloatLE(p, targetPos[axis] - currentPos[axis]);
+  }
+  const uint8_t length = static_cast<uint8_t>(p - sendingPCBytes);
+  Serial.write(&PCStartMarker, 1);
+  Serial.write(length);
+  Serial.write(sendingPCBytes, length);
+  Serial.write(&PCEndMarker, 1);
+}
+
+void updatePositionMove() {
+  if (!positionMoveTracker.running()) return;
+  const PositionMoveTracker::Update update = positionMoveTracker.update(
+      millis(), currentPos, POSITION_SETTLE_MS, POSITION_TIMEOUT_MS,
+      POSITION_RETRY_IDLE_MS, POSITION_MAX_CORRECTIONS,
+      POSITION_MIN_PROGRESS_FRACTION);
+  positionCorrectionMask |= update.retry_mask;
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((update.stop_mask & (1U << axis)) == 0) continue;
+    stopMotorAxis(axis, true);
+    targetRPM[axis] = 0;
+    targetVel[axis] = 0.0f;
+    motionMonitors[axis].setCommand(millis(), 0, targetDir[axis], 0.0f);
+  }
+  if (update.status == PositionMoveTracker::COMPLETE) {
+    reportPositionStatus(POSITION_COMPLETE, update.command_mask);
+  } else if (update.status == PositionMoveTracker::TIMED_OUT) {
+    reportPositionStatus(POSITION_TIMED_OUT, update.command_mask);
+  }
+}
+
 void reportMotionEvent(uint8_t axis, uint8_t coupled,
                        const StallDetector::Event& event) {
   uint8_t* p = sendingPCBytes;
@@ -1018,6 +1148,7 @@ void reportFaultStatusEvents() {
 
 void confirmDriverCommunicationFault(uint8_t axis, uint8_t stage) {
   if (motionMonitors[axis].latched()) return;
+  cancelPositionMove(true);
   StallDetector::Event event;
   event.transition = StallDetector::CONFIRMED;
   event.fault = StallDetector::DRIVER_COMMUNICATION;
@@ -1048,6 +1179,7 @@ void updateMotionMonitors() {
     const uint8_t coupled = coupledAxis(axis);
     if (event.transition == StallDetector::CONFIRMED &&
         FAULT_STOP_ENABLED) {
+      cancelPositionMove(true);
       stopMotorAxis(axis, true);
       if (coupled < numHWSerials) {
         stopMotorAxis(coupled, true);
@@ -1260,6 +1392,24 @@ static void setActiveMonitorCommands(uint8_t activeMask) {
   }
 }
 
+static void setPositionMonitorCommands(uint8_t activeMask) {
+  // The driver's position controller owns its velocity profile, including
+  // acceleration, deceleration, and possible stationary intervals near the
+  // endpoint. The requested position speed is only a ceiling, so presenting it
+  // to the constant-velocity fault detector produces false STALL/OVERSPEED
+  // events. Keep the detector idle while still calling update() every control
+  // cycle so its encoder history remains current. PositionMoveTracker provides
+  // encoder-qualified completion and a hard timeout; encoder-integrity,
+  // driver-communication, and limit faults are handled independently.
+  const uint32_t now = millis();
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((activeMask & (1U << axis)) != 0) {
+      motionMonitors[axis].setCommand(
+          now, 0, targetDir[axis], 0.0f);
+    }
+  }
+}
+
 void sendMotorCmds() {
   if (pc_connected && newJointVelCmd) {
     const uint8_t activeMask = velocityActiveMask();
@@ -1324,9 +1474,65 @@ void sendMotorCmds() {
           [&](uint8_t mask) { return coordinatedEnableMask(mask); },
           [&](uint8_t mask) { stopMotorMask(mask, true); });
     }
-    if (success) setActiveMonitorCommands(activeMask);
+    if (success) {
+      setPositionMonitorCommands(activeMask);
+      float tolerance[numHWSerials];
+      for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+        tolerance[axis] =
+            std::fabs(jointPRate[axis]) * POSITION_TOLERANCE_MOTOR_DEG;
+      }
+      positionMoveTracker.begin(
+          millis(), activeMask, targetPos, tolerance, currentPos);
+    } else {
+      requestedPositionValid = false;
+    }
     newJointPosCmd = false;
     newTargetVelCmd = false;
+  } else if (positionCorrectionMask != 0) {
+    const uint8_t correctionMask = positionCorrectionMask;
+    positionCorrectionMask = 0;
+    uint8_t rejectedMask = 0;
+    for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+      if ((correctionMask & (1U << axis)) == 0) continue;
+      const float residual = targetPos[axis] - currentPos[axis];
+      const float motorDegrees = residual / jointPRate[axis];
+      if (!std::isfinite(motorDegrees) ||
+          std::fabs(motorDegrees) > static_cast<float>(UINT16_MAX) ||
+          !isPosCmdValid(axis) || targetRPM[axis] == 0 ||
+          (FAULT_STOP_ENABLED && motionMonitors[axis].latched())) {
+        rejectedMask |= static_cast<uint8_t>(1U << axis);
+        continue;
+      }
+      targetDir[axis] = motorDegrees >= 0.0f ? '1' : '0';
+      targetDeg[axis] = static_cast<uint16_t>(
+          std::roundf(std::fabs(motorDegrees)));
+      targetVel[axis] = std::copysign(std::fabs(targetVel[axis]), residual);
+      if (targetDeg[axis] == 0) {
+        rejectedMask |= static_cast<uint8_t>(1U << axis);
+      }
+    }
+    if (rejectedMask != 0) {
+      cancelPositionMove(true);
+      reportPositionStatus(POSITION_REJECTED, rejectedMask);
+      return;
+    }
+
+    stopMotorMask(correctionMask, true);
+    delay(MOTOR_DIRECTION_SETTLE_MS);
+    const bool success = CoordinatedStart::run(
+        correctionMask, numHWSerials,
+        [&](uint8_t axis) {
+          return configureMotorDirection(axis, true) &&
+                 configureMotorSpeed(axis) &&
+                 configureMotorPosition(axis);
+        },
+        [&](uint8_t mask) { return coordinatedEnableMask(mask); },
+        [&](uint8_t mask) { stopMotorMask(mask, true); });
+    if (success) {
+      setPositionMonitorCommands(correctionMask);
+    } else {
+      cancelPositionMove(true);
+    }
   }
 }
 
