@@ -91,6 +91,96 @@ def test_collection_velocity_bounds_preserve_zero_and_lift_nonzero_speed():
     assert out.tolist() == [2.0, 0.0, -1.0, 0.0, 0.0, 0.0]
 
 
+def floor_tracker():
+    return SimpleNamespace(
+        _target_idx=[0, 1, 2],
+        _min_speeds=np.array([2.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        _max_speeds=np.array([10.0, 40.0, 1.0, 4.0, 25.0, 25.0]),
+        _floor_tracking_kp=2.0,
+        _floor_tracking_enter_time_s=0.10,
+        _floor_tracking_exit_time_s=0.05,
+        _floor_tracking_direction=np.zeros(6, dtype=np.int8),
+    )
+
+
+def track(fake, feedforward, reference, measured):
+    return CollectionNode._floor_aware_velocity(
+        fake, np.asarray(feedforward, dtype=float),
+        np.asarray(reference, dtype=float), np.asarray(measured, dtype=float))
+
+
+def test_floor_tracker_uses_hysteresis_instead_of_integrating_small_velocity():
+    fake = floor_tracker()
+    zero = np.zeros(6)
+
+    # Joint 0 enters at 2 mm/s * 0.10 s = 0.20 mm error.
+    assert track(fake, zero, [0.19, 0, 0, 0, 0, 0], zero)[0] == 0.0
+    assert track(fake, zero, [0.21, 0, 0, 0, 0, 0], zero)[0] == 2.0
+    # It remains on until error drops below the 0.10 mm exit threshold.
+    assert track(fake, zero, [0.15, 0, 0, 0, 0, 0], zero)[0] == 2.0
+    assert track(fake, zero, [0.09, 0, 0, 0, 0, 0], zero)[0] == 0.0
+    assert track(fake, zero, [-0.21, 0, 0, 0, 0, 0], zero)[0] == -2.0
+
+
+def test_floor_tracker_inserts_stop_before_direction_reversal():
+    fake = floor_tracker()
+    zero = np.zeros(6)
+    assert track(fake, zero, [0.21, 0, 0, 0, 0, 0], zero)[0] == 2.0
+    assert track(fake, zero, [-0.21, 0, 0, 0, 0, 0], zero)[0] == 0.0
+    assert track(fake, zero, [-0.21, 0, 0, 0, 0, 0], zero)[0] == -2.0
+
+
+def test_floor_tracker_preserves_reliable_and_unfloored_commands():
+    fake = floor_tracker()
+    out = track(
+        fake,
+        [3.0, 0.25, 0.3, 0, 0, 0],
+        [0.0, 100.0, 0.0, 0, 0, 0],
+        np.zeros(6))
+    assert out[0] == 3.0
+    assert out[1] == 0.25
+    assert out[2] == 0.0
+
+
+def test_floor_tracker_follows_slow_joint2_reference_without_runaway():
+    fake = floor_tracker()
+    dt = 0.01
+    measured = np.zeros(6)
+    positions = []
+    for step in range(1601):
+        t = step * dt
+        if t <= 8.0:
+            target = 0.25 * t
+            feedforward = 0.25
+        else:
+            target = 2.0 - 0.25 * (t - 8.0)
+            feedforward = -0.25
+        reference = np.zeros(6)
+        reference[2] = target
+        velocity = np.zeros(6)
+        velocity[2] = feedforward
+        command = track(fake, velocity, reference, measured)
+        assert command[2] in (-1.0, 0.0, 1.0)
+        measured += command * dt
+        positions.append(measured[2])
+
+    assert max(positions) < 2.15
+    assert abs(measured[2]) < 0.15
+
+
+@pytest.mark.parametrize(
+    "kp,enter,exit_",
+    [(-1.0, 0.1, 0.05), (1.0, 0.0, 0.0), (1.0, 0.1, 0.1)],
+)
+def test_floor_tracker_rejects_invalid_parameters(kp, enter, exit_):
+    fake = SimpleNamespace(
+        _floor_tracking_kp=kp,
+        _floor_tracking_enter_time_s=enter,
+        _floor_tracking_exit_time_s=exit_)
+    with pytest.raises(ValueError):
+        CollectionNode._validate_floor_tracking_parameters(fake)
+
+
 def test_parse_fault_status():
     status = parse_fault_status("V1,L=05,E=00,Q=17,F=2,0,2,0,0,0")
     assert status["latched_mask"] == 0x05

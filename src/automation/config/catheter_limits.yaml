@@ -30,5 +30,5 @@ catheters:
     # catheter_bend is coupled into the linear motor in firmware. Keeping its
     # nonzero speed at 1 mm/s prevents that motor from re-entering the
     # unreliable sub-18-RPM region while bending alone.
-    vel_min:   [2.0,      0.0,  1.0,   0.0,     0.0,    0.0]
+    vel_min:   [2.0,      7.0,  1.0,   0.0,     0.0,    0.0]
     vel_max:   [10.0,    40.0,  1.0,   4.0,    25.0,   25.0]

@@ -234,6 +234,7 @@ class SerialCommunication(Node):
                 4: "FEEDBACK_FAULT",
                 5: "SPEED_UNOBSERVABLE",
                 6: "DRIVER_COMMUNICATION",
+                7: "ENCODER_INTEGRITY",
             }
             msg.text = (
                 f"{transition_names.get(transition, 'MOTION_UNKNOWN')}:"

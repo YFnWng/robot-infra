@@ -85,6 +85,13 @@ class CollectionNode(Node):
         self.declare_parameter("target", "catheter")        # catheter | sheath
         self.declare_parameter("joint_min_speeds", DEFAULT_MIN_SPEEDS)
         self.declare_parameter("joint_max_speeds", DEFAULT_MAX_SPEEDS)
+        # A nonzero reliable-speed floor cannot be applied directly to a smooth
+        # feed-forward velocity without changing the integrated trajectory.
+        # Track the generator position with zero/minimum-speed hysteresis instead.
+        self.declare_parameter("floor_tracking_enabled", True)
+        self.declare_parameter("floor_tracking_kp", 2.0)
+        self.declare_parameter("floor_tracking_enter_time_s", 0.10)
+        self.declare_parameter("floor_tracking_exit_time_s", 0.05)
         self.declare_parameter("auto_enable", True)          # send MODE=JOINT_VEL
         self.declare_parameter("start_motor", False)         # send START_MOTOR
         self.declare_parameter("shutdown_on_done", True)
@@ -130,6 +137,14 @@ class CollectionNode(Node):
             self.get_parameter("joint_min_speeds").value, dtype=float)
         self._max_speeds = np.asarray(
             self.get_parameter("joint_max_speeds").value, dtype=float)
+        self._floor_tracking_enabled = bool(
+            self.get_parameter("floor_tracking_enabled").value)
+        self._floor_tracking_kp = float(
+            self.get_parameter("floor_tracking_kp").value)
+        self._floor_tracking_enter_time_s = float(
+            self.get_parameter("floor_tracking_enter_time_s").value)
+        self._floor_tracking_exit_time_s = float(
+            self.get_parameter("floor_tracking_exit_time_s").value)
         self._start_motor = bool(self.get_parameter("start_motor").value)
         self._shutdown_on_done = bool(self.get_parameter("shutdown_on_done").value)
         self._test_joint = int(self.get_parameter("test_joint").value)
@@ -159,6 +174,7 @@ class CollectionNode(Node):
         if _vel_max6 is not None:
             self._max_speeds = _vel_max6
         self._validate_velocity_bounds()
+        self._validate_floor_tracking_parameters()
 
         if self._target not in TARGET_JOINTS:
             raise ValueError(f"target must be catheter|sheath, got {self._target}")
@@ -166,6 +182,8 @@ class CollectionNode(Node):
 
         self._gen = None
         self._shortest_delta = None
+        self._floor_tracking_direction = np.zeros(6, dtype=np.int8)
+        self._floor_reference_offset = np.zeros(6)
         self._h = 1.0 / self._rate
         if self._mode == "sinusoidal":
             self._build_generator()
@@ -377,8 +395,15 @@ class CollectionNode(Node):
             self.get_logger().warn("START_MOTOR sent — hardware may move")
         self._marker("run_start", mode=self._mode, target=self._target,
                      seed=int(self.get_parameter("seed").value),
+                     floor_tracking={
+                         "enabled": self._floor_tracking_enabled,
+                         "kp": self._floor_tracking_kp,
+                         "enter_time_s": self._floor_tracking_enter_time_s,
+                         "exit_time_s": self._floor_tracking_exit_time_s,
+                     },
                      start_state=self._state_snapshot())
         self._start_pos = list(self._last_pos) if self._last_pos is not None else None
+        self._initialize_floor_tracking()
         self._run_status = "running"
         if self.get_parameter("return_to_start").value and self._start_pos is None:
             self.get_logger().warn("no POS at run_start — return-to-start disabled")
@@ -408,7 +433,7 @@ class CollectionNode(Node):
         if done:
             self._begin_return()
             return
-        vel = self._apply_velocity_bounds(self._velocity(t))
+        vel = self._trajectory_velocity(t)
         self._publish_velocity(vel)
 
     # -- return to start -------------------------------------------------- #
@@ -630,6 +655,95 @@ class CollectionNode(Node):
             raise ValueError(f"unknown mode '{self._mode}'")
         return v
 
+    def _initialize_floor_tracking(self) -> None:
+        """Reset tracking and rebase the generator at the measured start pose."""
+        self._floor_tracking_direction[:] = 0
+        self._floor_reference_offset[:] = 0.0
+        if (self._mode != "sinusoidal" or self._gen is None
+                or self._last_pos is None):
+            return
+        q0 = np.asarray(self._gen.step(0.0), dtype=float)
+        measured = np.asarray(self._last_pos, dtype=float)[self._target_idx]
+        # Feed-forward previously applied generator displacements relative to
+        # the run start. Preserve that behavior to avoid an initial catch-up.
+        self._floor_reference_offset[self._target_idx] = measured - q0
+
+    def _trajectory_reference(self, t: float) -> np.ndarray:
+        """Return the rebased, position-limited six-joint reference."""
+        reference = np.asarray(self._last_pos, dtype=float).copy()
+        generated = np.asarray(self._gen.step(t), dtype=float)
+        reference[self._target_idx] = (
+            generated + self._floor_reference_offset[self._target_idx])
+        if self._pos_lower6 is not None:
+            reference = np.clip(reference, self._pos_lower6, self._pos_upper6)
+        return reference
+
+    def _trajectory_velocity(self, t: float) -> np.ndarray:
+        """Generate a bounded command, using floor-aware tracking when needed."""
+        feedforward = self._velocity(t)
+        if (self._mode != "sinusoidal" or not self._floor_tracking_enabled
+                or not np.any(self._min_speeds[self._target_idx] > 0.0)):
+            return self._apply_velocity_bounds(feedforward)
+        if self._last_pos is None or len(self._last_pos) != 6:
+            # Feedback is required to decide whether a minimum-speed pulse is
+            # needed. Stop floored joints rather than integrating blindly.
+            safe = feedforward.copy()
+            safe[self._min_speeds > 0.0] = 0.0
+            return self._apply_velocity_bounds(safe)
+        measured = np.asarray(self._last_pos, dtype=float)
+        if not np.all(np.isfinite(measured)):
+            safe = feedforward.copy()
+            safe[self._min_speeds > 0.0] = 0.0
+            return self._apply_velocity_bounds(safe)
+        reference = self._trajectory_reference(t)
+        return self._floor_aware_velocity(feedforward, reference, measured)
+
+    def _floor_aware_velocity(
+            self, feedforward, reference, measured) -> np.ndarray:
+        """Realize a smooth position reference using zero or reliable speed.
+
+        Normal feed-forward plus proportional position correction is used in
+        the reliable band. Inside the forbidden band, a Schmitt trigger emits
+        either zero or exactly ``vel_min``. This prevents a small continuous
+        command from accumulating into large unintended travel.
+        """
+        velocity = np.clip(
+            np.asarray(feedforward, dtype=float),
+            -self._max_speeds, self._max_speeds)
+        reference = np.asarray(reference, dtype=float)
+        measured = np.asarray(measured, dtype=float)
+        for joint in self._target_idx:
+            vmin = self._min_speeds[joint]
+            if vmin <= 0.0:
+                continue
+            error = reference[joint] - measured[joint]
+            if joint in ROT_JOINTS:
+                error = (error + 180.0) % 360.0 - 180.0
+            candidate = float(np.clip(
+                velocity[joint] + self._floor_tracking_kp * error,
+                -self._max_speeds[joint], self._max_speeds[joint]))
+
+            if abs(candidate) >= vmin:
+                velocity[joint] = candidate
+                self._floor_tracking_direction[joint] = (
+                    1 if candidate > 0.0 else -1)
+                continue
+
+            enter_error = vmin * self._floor_tracking_enter_time_s
+            exit_error = vmin * self._floor_tracking_exit_time_s
+            direction = int(self._floor_tracking_direction[joint])
+            if direction and direction * error <= exit_error:
+                # Require at least one explicit stop command before a possible
+                # reversal; never jump directly from +vmin to -vmin.
+                self._floor_tracking_direction[joint] = 0
+                velocity[joint] = 0.0
+                continue
+            if direction == 0 and abs(error) >= enter_error:
+                direction = 1 if error > 0.0 else -1
+            self._floor_tracking_direction[joint] = direction
+            velocity[joint] = direction * vmin
+        return velocity
+
     def _validate_velocity_bounds(self) -> None:
         """Validate the six-joint reliable-speed interval."""
         if self._min_speeds.shape != (6,) or self._max_speeds.shape != (6,):
@@ -641,6 +755,18 @@ class CollectionNode(Node):
             raise ValueError("joint velocity bounds require 0 <= min and 0 < max")
         if np.any(self._min_speeds > self._max_speeds):
             raise ValueError("joint_min_speeds cannot exceed joint_max_speeds")
+
+    def _validate_floor_tracking_parameters(self) -> None:
+        """Validate floor-tracker gain and hysteresis timing."""
+        if (not np.isfinite(self._floor_tracking_kp)
+                or self._floor_tracking_kp < 0.0):
+            raise ValueError("floor_tracking_kp must be finite and non-negative")
+        enter = self._floor_tracking_enter_time_s
+        exit_ = self._floor_tracking_exit_time_s
+        if (not np.isfinite(enter) or not np.isfinite(exit_)
+                or enter <= 0.0 or exit_ < 0.0 or exit_ >= enter):
+            raise ValueError(
+                "floor tracking requires 0 <= exit_time_s < enter_time_s")
 
     def _validate_preflight_parameters(self) -> None:
         """Validate feedback qualification thresholds."""
