@@ -23,6 +23,7 @@ class StallDetector {
     FEEDBACK_FAULT = 4,
     SPEED_UNOBSERVABLE = 5,
     DRIVER_COMMUNICATION = 6,
+    ENCODER_INTEGRITY = 7,
   };
 
   enum Transition : uint8_t {
@@ -65,6 +66,8 @@ class StallDetector {
 
   void begin(uint32_t now_ms, int32_t encoder_count) {
     clearHistory();
+    commanded_position_ = 0.0;
+    command_integral_time_ms_ = now_ms;
     addSample(now_ms, encoder_count);
     state_ = IDLE;
     fault_ = FAULT_NONE;
@@ -77,6 +80,7 @@ class StallDetector {
 
   void setCommand(uint32_t now_ms, uint16_t rpm, uint8_t direction,
                   float commanded_velocity) {
+    integrateCommandTo(now_ms);
     const uint16_t previous_rpm = target_rpm_;
     const uint8_t previous_direction = target_direction_;
     target_rpm_ = rpm;
@@ -112,6 +116,7 @@ class StallDetector {
 
   Event update(uint32_t now_ms, int32_t encoder_count,
                float joint_units_per_count) {
+    integrateCommandTo(now_ms);
     addSample(now_ms, encoder_count);
     Event event;
     event.commanded_velocity = commanded_velocity_;
@@ -147,8 +152,13 @@ class StallDetector {
     const float displacement =
         static_cast<float>(delta_counts) * joint_units_per_count;
     const float measured_velocity = displacement / window_s;
+    const double expected_displacement_double =
+        commanded_position_ - old->commanded_position;
+    const float expected_displacement =
+        static_cast<float>(expected_displacement_double);
+    const float expected_velocity = expected_displacement / window_s;
     const float expected_counts =
-        fabsf(commanded_velocity_) * window_s /
+        fabsf(expected_displacement) /
         fmaxf(fabsf(joint_units_per_count), 1.0e-12f);
 
     event.measured_velocity = measured_velocity;
@@ -165,7 +175,9 @@ class StallDetector {
     }
     unobservable_reported_ = false;
 
-    const float abs_command = fabsf(commanded_velocity_);
+    const float abs_expected_velocity = fabsf(expected_velocity);
+    const float overspeed_reference_velocity = fmaxf(
+        abs_expected_velocity, maxAbsCommandWithin(now_ms, age_ms));
     const float abs_measured = fabsf(measured_velocity);
     const uint32_t abs_delta_counts =
         delta_counts < 0 ? static_cast<uint32_t>(-static_cast<int64_t>(delta_counts))
@@ -176,17 +188,19 @@ class StallDetector {
 
     Fault observed = FAULT_NONE;
     if (abs_delta_counts >= config_.minimum_window_counts &&
-        measured_velocity * commanded_velocity_ < 0.0f) {
+        displacement * expected_displacement < 0.0f) {
       observed = WRONG_DIRECTION;
     } else if (abs_delta_counts >
                expected_counts * config_.feedback_jump_fraction +
                    config_.feedback_jump_margin_counts) {
       observed = FEEDBACK_FAULT;
     } else if (abs_measured >
-                   abs_command * config_.overspeed_fraction &&
-               abs_measured - abs_command > count_velocity_margin) {
+                   overspeed_reference_velocity * config_.overspeed_fraction &&
+               abs_measured - overspeed_reference_velocity >
+                   count_velocity_margin) {
       observed = OVERSPEED;
-    } else if (abs_measured < abs_command * config_.stall_fraction) {
+    } else if (abs_measured <
+               abs_expected_velocity * config_.stall_fraction) {
       observed = STALL;
     }
 
@@ -210,8 +224,14 @@ class StallDetector {
       return event;
     }
 
-    const uint16_t confirm_ms =
+    const uint16_t base_confirm_ms =
         slow ? config_.slow_confirm_ms : config_.normal_confirm_ms;
+    // A speed transient can occupy an entire measurement window after an
+    // acceleration or deceleration. Require overspeed to remain present for
+    // one additional complete window; stall and direction faults retain their
+    // existing confirmation latency.
+    const uint32_t confirm_ms = static_cast<uint32_t>(base_confirm_ms) +
+        (observed == OVERSPEED ? requested_window : 0U);
     if (elapsed(now_ms, state_since_ms_) >= confirm_ms) {
       state_ = FAULT_LATCHED;
       event.transition = CONFIRMED;
@@ -246,6 +266,8 @@ class StallDetector {
   struct Sample {
     uint32_t time_ms;
     int32_t encoder_count;
+    double commanded_position;
+    float commanded_velocity;
   };
 
   static uint32_t elapsed(uint32_t now, uint32_t before) {
@@ -260,10 +282,30 @@ class StallDetector {
   void addSample(uint32_t now_ms, int32_t encoder_count) {
     history_[history_head_].time_ms = now_ms;
     history_[history_head_].encoder_count = encoder_count;
+    history_[history_head_].commanded_position = commanded_position_;
+    history_[history_head_].commanded_velocity = commanded_velocity_;
     history_head_ = (history_head_ + 1U) % HISTORY_SIZE;
     if (history_count_ < HISTORY_SIZE) {
       ++history_count_;
     }
+  }
+
+  void integrateCommandTo(uint32_t now_ms) {
+    const uint32_t duration_ms = elapsed(now_ms, command_integral_time_ms_);
+    commanded_position_ += static_cast<double>(commanded_velocity_) *
+                           static_cast<double>(duration_ms) * 0.001;
+    command_integral_time_ms_ = now_ms;
+  }
+
+  float maxAbsCommandWithin(uint32_t now_ms, uint32_t maximum_age_ms) const {
+    float maximum = fabsf(commanded_velocity_);
+    for (uint16_t i = 0; i < history_count_; ++i) {
+      const Sample& sample = history_[i];
+      if (elapsed(now_ms, sample.time_ms) <= maximum_age_ms) {
+        maximum = fmaxf(maximum, fabsf(sample.commanded_velocity));
+      }
+    }
+    return maximum;
   }
 
   const Sample* sampleAtLeast(uint32_t now_ms, uint16_t requested_age_ms) const {
@@ -289,6 +331,8 @@ class StallDetector {
   uint16_t target_rpm_ = 0;
   uint8_t target_direction_ = 0;
   float commanded_velocity_ = 0.0f;
+  double commanded_position_ = 0.0;
+  uint32_t command_integral_time_ms_ = 0;
   uint32_t state_since_ms_ = 0;
   bool unobservable_reported_ = false;
 };

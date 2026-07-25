@@ -1,6 +1,8 @@
 #include <QuadEncoder.h>
 #include <Encoder.h>
+#include "coordinated_start.h"
 #include "driver_ack_retry.h"
+#include "encoder_integrity_guard.h"
 #include <cmath>
 #include "stall_detector.h"
 
@@ -90,7 +92,8 @@ Encoder *SWEncoders[] = {&Enc0, &Enc3};
 
 constexpr float EncRes = 0.045f; // deg
 constexpr uint16_t maxRPM = 250;
-long EncCounts[numHWSerials];
+int32_t EncCounts[numHWSerials];
+int32_t RawEncCounts[numHWSerials];
 // float EncPos[numHWSerials] = { 0.0f };
 // float jointPos[numHWSerials] = { 0.0f };
 // float jointVel[numHWSerials] = { 0.0f };
@@ -98,7 +101,7 @@ long EncCounts[numHWSerials];
 // Joint transmission, joint/motor, positive direction: right-hand or forward
 constexpr float linRate = 67.319841f/20.0f; // mm/rev
 constexpr float rotRate = 0.375f/5.0f; // rev/rev
-constexpr float catheterBendRate = -1.190625f/5.0f; // mm/rev
+constexpr float catheterBendRate = -1.190625f/5.0f; // mm/rev, gives max joint V=1mm/s, ask AV
 constexpr float sheathBendRate = 0.375f/5.0f; // rev/rev
 constexpr float jointPRate[numHWSerials] = { linRate/360.0f, rotRate, catheterBendRate/360.0f, 
                                             linRate/360.0f, rotRate, sheathBendRate }; // mm/deg, deg/deg
@@ -134,6 +137,8 @@ bool motorEnabled[numHWSerials] = { false };
 constexpr bool FAULT_STOP_ENABLED = true;
 StallDetector motionMonitors[numHWSerials];
 uint16_t motionFaultSequence = 0;
+bool encoderIntegrityLatched = false;
+uint32_t lastEncoderReadMs = 0;
 
 // Timing
 constexpr uint8_t controlCycle = 10; // ms
@@ -146,6 +151,10 @@ constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 50;
 constexpr uint8_t MOTOR_ACK_ATTEMPTS = 3;
 constexpr uint16_t MOTOR_ACK_RETRY_DELAY_MS = 10;
 constexpr uint16_t MOTOR_DIRECTION_SETTLE_MS = 5;
+constexpr uint32_t ENCODER_MAX_COUNTS_PER_SECOND =
+    static_cast<uint32_t>(maxRPM * 360.0f / (60.0f * EncRes) + 0.5f);
+constexpr uint8_t ENCODER_SPEED_MARGIN_MULTIPLIER = 2;
+constexpr uint16_t ENCODER_COUNT_MARGIN = 100;
 bool pc_connected = false;
 
 void setup() {
@@ -156,6 +165,7 @@ void setup() {
   memset(HWBytes_len, 0, sizeof(HWBytes_len));
   memset(newHWMsg, 0, sizeof(newHWMsg));
   memset(EncCounts, 0, sizeof(EncCounts));
+  memset(RawEncCounts, 0, sizeof(RawEncCounts));
   memset(targetDeg, 0, sizeof(targetDeg));
   memset(currentPos, 0.0f, sizeof(currentPos));
   memset(previousPos, 0.0f, sizeof(currentPos));
@@ -191,6 +201,7 @@ void setup() {
     // HWEncoders[i]->EncConfig.positionInitialValue = EncCounts[i];
     HWEncoders[i]->init();
   }
+  lastEncoderReadMs = millis();
 
   for (uint8_t i = 0; i < 3; i++) {
     pinMode(LimitSwitch[i], INPUT_PULLUP);
@@ -208,8 +219,9 @@ void loop() {
     // control Cycle 100Hz
     if (sinceLastCycle > controlCycle) {
       sinceLastCycle = 0;
-      readEncoders();
-      updateMotionMonitors();
+      if (readEncoders()) {
+        updateMotionMonitors();
+      }
       checkLimitSwitches();
       sendMotorCmds();
     }
@@ -487,18 +499,18 @@ void procPCBytes() {
         }
 
         case ZERO: {// 'Z', set all encoders to 0
-          for (uint8_t i = 0; i < 4; i++) {
-            HWEncoders[i]->write(0);
-          }
-          for (uint8_t i = 0; i < 2; i++) {
-            SWEncoders[i]->write(0);
-          }
+          const int32_t zeros[numHWSerials] = { 0 };
+          writeEncoderHardwareCounts(zeros);
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             EncCounts[axis] = 0;
+            RawEncCounts[axis] = 0;
             currentPos[axis] = 0.0f;
+            previousPos[axis] = 0.0f;
+            currentVel[axis] = 0.0f;
           }
           currentCatheterLMPos = 0.0f;
           currentSheathBendPos = 0.0f;
+          lastEncoderReadMs = millis();
           sendAckIfPending();
           break;
         }
@@ -529,6 +541,15 @@ void procPCBytes() {
             sendAckIfPending("ERR_NONZERO");
             break;
           }
+          const bool restoredEncoderReference = encoderIntegrityLatched;
+          if (restoredEncoderReference) {
+            // The invalid raw frame was never accepted. Restore every hardware
+            // counter to the retained atomic frame before allowing new data.
+            writeEncoderHardwareCounts(EncCounts);
+            memcpy(RawEncCounts, EncCounts, sizeof(EncCounts));
+            lastEncoderReadMs = millis();
+            encoderIntegrityLatched = false;
+          }
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             StallDetector::Event event =
                 motionMonitors[axis].clearFault(millis(), EncCounts[axis]);
@@ -536,7 +557,8 @@ void procPCBytes() {
               reportMotionEvent(axis, 255, event);
             }
           }
-          sendAckIfPending("OK");
+          sendAckIfPending(
+              restoredEncoderReference ? "OK_ENCODER_RESTORED" : "OK");
           break;
         }
 
@@ -676,24 +698,25 @@ void procHWBytes() {
   // }
 }
 
-void readEncoders() {
-  memcpy(previousPos, currentPos, sizeof(currentPos));
-  EncCounts[0] = Enc0.read();
-  EncCounts[1] = Enc1.read();
-  EncCounts[2] = Enc2.read();
-  EncCounts[3] = Enc3.read();
-  EncCounts[4] = Enc4.read();
-  EncCounts[5] = Enc5.read();
-  for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-    // EncPos[axis] = EncCounts[axis]*EncRes;
-    currentPos[axis] = EncCounts[axis]*EncRes*jointPRate[axis];
-    currentVel[axis] = (currentPos[axis] - previousPos[axis])/controlCycle*1000.0f;
-  }
-  // coupled lm and bend for catheter
-  currentCatheterLMPos = currentPos[0] + currentPos[2];
-  // coupled rot and bend for sheath
-  currentSheathBendPos = currentPos[5] - currentPos[4];
+void writeEncoderHardwareCounts(const int32_t counts[numHWSerials]) {
+  Enc0.write(counts[0]);
+  Enc1.write(static_cast<uint32_t>(counts[1]));
+  Enc2.write(static_cast<uint32_t>(counts[2]));
+  Enc3.write(counts[3]);
+  Enc4.write(static_cast<uint32_t>(counts[4]));
+  Enc5.write(static_cast<uint32_t>(counts[5]));
+}
 
+void readRawEncoderCounts(int32_t counts[numHWSerials]) {
+  counts[0] = Enc0.read();
+  counts[1] = Enc1.read();
+  counts[2] = Enc2.read();
+  counts[3] = Enc3.read();
+  counts[4] = Enc4.read();
+  counts[5] = Enc5.read();
+}
+
+void sendEncoderFeedback() {
   if (pc_connected && Serial.availableForWrite() >= 56 && Serial.available() == 0) {
     // POS frame: physical joint positions (coupling + transmission applied)
     sendingPCBytes[0] = PCStartMarker;
@@ -717,6 +740,79 @@ void readEncoders() {
     sendingPCBytes[27] = PCEndMarker;
     Serial.write(sendingPCBytes, 28);
   }
+}
+
+void latchEncoderIntegrityFault(
+    const EncoderIntegrityGuard::Result& result, uint32_t elapsed_ms) {
+  if (encoderIntegrityLatched) return;
+  encoderIntegrityLatched = true;
+
+  const uint8_t culprit = result.first_invalid_axis;
+  StallDetector::Event event;
+  event.transition = StallDetector::CONFIRMED;
+  event.fault = StallDetector::ENCODER_INTEGRITY;
+  if (culprit < numHWSerials) {
+    event.commanded_velocity = targetVel[culprit];
+    event.target_rpm = targetRPM[culprit];
+    event.window_displacement =
+        static_cast<float>(result.first_invalid_delta) * EncRes *
+        jointPRate[culprit];
+    if (elapsed_ms > 0) {
+      event.measured_velocity =
+          event.window_displacement / (static_cast<float>(elapsed_ms) * 0.001f);
+    }
+  }
+  event.window_ms = static_cast<uint16_t>(
+      elapsed_ms > UINT16_MAX ? UINT16_MAX : elapsed_ms);
+  event.detail = result.invalid_mask;
+
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    stopMotorAxis(axis, true);
+    targetRPM[axis] = 0;
+    targetVel[axis] = 0.0f;
+    motionMonitors[axis].forceLatch(event.fault, millis());
+  }
+  newJointVelCmd = false;
+  newJointPosCmd = false;
+  newTargetVelCmd = false;
+  reportMotionEvent(culprit, 255, event);
+}
+
+bool readEncoders() {
+  readRawEncoderCounts(RawEncCounts);
+  const uint32_t now = millis();
+  const uint32_t elapsed_ms = now - lastEncoderReadMs;
+
+  if (!encoderIntegrityLatched) {
+    const EncoderIntegrityGuard::Result result =
+        EncoderIntegrityGuard::validate(
+            RawEncCounts, EncCounts, elapsed_ms,
+            ENCODER_MAX_COUNTS_PER_SECOND,
+            ENCODER_SPEED_MARGIN_MULTIPLIER, ENCODER_COUNT_MARGIN);
+    if (!result.valid) {
+      latchEncoderIntegrityFault(result, elapsed_ms);
+      sendEncoderFeedback();
+      return false;
+    }
+
+    memcpy(previousPos, currentPos, sizeof(currentPos));
+    memcpy(EncCounts, RawEncCounts, sizeof(EncCounts));
+    const float elapsed_s =
+        static_cast<float>(elapsed_ms > 0 ? elapsed_ms : 1U) * 0.001f;
+    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
+      currentPos[axis] = EncCounts[axis] * EncRes * jointPRate[axis];
+      currentVel[axis] = (currentPos[axis] - previousPos[axis]) / elapsed_s;
+    }
+    currentCatheterLMPos = currentPos[0] + currentPos[2];
+    currentSheathBendPos = currentPos[5] - currentPos[4];
+    lastEncoderReadMs = now;
+  }
+
+  // While latched, continue publishing the retained last-valid frame. The raw
+  // hardware values are not allowed to alter position until RESET_FAULT
+  // restores the counters to that retained frame.
+  sendEncoderFeedback();
+  return !encoderIntegrityLatched;
 }
 
 void checkLimitSwitches() {
@@ -1027,11 +1123,11 @@ static inline void stopMotorAxis(uint8_t axis, bool force) {
   directionValid[axis] = false;
 }
 
-static bool ensureMotorDirection(uint8_t axis) {
+static bool configureMotorDirection(uint8_t axis, bool alreadyStopped) {
   const bool changed = !directionValid[axis] ||
                        targetDir[axis] != currentDir[axis];
 
-  if (changed) {
+  if (changed && !alreadyStopped) {
     stopMotorAxis(axis, true);
     // The stop command is intentionally unacknowledged. Let the driver finish
     // processing it before draining its response and issuing direction.
@@ -1058,99 +1154,177 @@ static bool ensureMotorDirection(uint8_t axis) {
   return directionValid[axis];
 }
 
-void sendMotorCmds() {
-  static char *p;
-  if (pc_connected && newJointVelCmd) {
-    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-      if (FAULT_STOP_ENABLED && motionMonitors[axis].latched()) {
-        continue;
-      }
-      if (targetRPM[axis] == 0) {
-        // Stop only on the non-zero -> zero transition. Repeated command
-        // heartbeats must not flood every driver with redundant O0 frames.
-        stopMotorAxis(axis, false);
-        motionMonitors[axis].setCommand(
-            millis(), 0, targetDir[axis], 0.0f);
-        continue;
-      }
+static bool configureMotorSpeed(uint8_t axis) {
+  if (speedValid[axis] && currentRPM[axis] == targetRPM[axis]) {
+    return true;
+  }
+  char *p = sendingHWChars[axis];
+  *p++ = startMarker;
+  *p++ = 'C';
+  p = write_uint16(p, targetRPM[axis]);
+  *p++ = endMarker;
+  if (!writeMotorCommandWithAck(
+          axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
+    confirmDriverCommunicationFault(axis, 'C');
+    return false;
+  }
+  currentRPM[axis] = targetRPM[axis];
+  speedValid[axis] = true;
+  return true;
+}
 
-      if (!ensureMotorDirection(axis)) {
-        continue;
-      }
+static bool configureMotorPosition(uint8_t axis) {
+  char *p = sendingHWChars[axis];
+  *p++ = startMarker;
+  *p++ = 'A';
+  p = write_uint16(p, targetDeg[axis]);
+  *p++ = endMarker;
+  if (!writeMotorCommandWithAck(
+          axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
+    confirmDriverCommunicationFault(axis, 'A');
+    return false;
+  }
+  return true;
+}
 
-      if (!speedValid[axis] || currentRPM[axis] != targetRPM[axis]) {
-        p = sendingHWChars[axis];
-        *p++ = startMarker;
-        *p++ = 'C';
-        p = write_uint16(p, targetRPM[axis]);
-        *p++ = endMarker;
-        if (!writeMotorCommandWithAck(
-                axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
-          confirmDriverCommunicationFault(axis, 'C');
-          continue;
-        }
-        currentRPM[axis] = targetRPM[axis];
-        speedValid[axis] = true;
-      }
-
-      if (!motorEnabled[axis]) {
-        if (!writeMotorCommandWithAck(axis, "$O1\n", 4)) {
-          confirmDriverCommunicationFault(axis, 'O');
-          continue;
-        }
-        motorEnabled[axis] = true;
-      }
-      motionMonitors[axis].setCommand(
-          millis(), targetRPM[axis], targetDir[axis], targetVel[axis]);
+static void stopMotorMask(uint8_t mask, bool force) {
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((mask & (1U << axis)) != 0) {
+      stopMotorAxis(axis, force);
     }
+  }
+}
+
+static uint8_t velocityActiveMask() {
+  uint8_t mask = 0;
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if (targetRPM[axis] != 0 &&
+        !(FAULT_STOP_ENABLED && motionMonitors[axis].latched())) {
+      mask |= static_cast<uint8_t>(1U << axis);
+    }
+  }
+  return mask;
+}
+
+static bool coordinatedEnableMask(uint8_t mask) {
+  // Clear stale responses first, then place every enable command on its UART
+  // before waiting for acknowledgements. Healthy axes therefore start within
+  // the short six-command transmit burst rather than one full ACK transaction
+  // apart.
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((mask & (1U << axis)) != 0) {
+      drainMotorResponses(axis);
+    }
+  }
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((mask & (1U << axis)) != 0) {
+      writeMotorCommandNoDelay(axis, "$O1\n", 4);
+    }
+  }
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((mask & (1U << axis)) == 0) {
+      continue;
+    }
+    if (!waitForMotorAck(axis)) {
+      // Do not retry an enable while its peers may already be moving. The
+      // coordinated transaction rolls the full set back to disabled instead.
+      confirmDriverCommunicationFault(axis, 'O');
+      return false;
+    }
+  }
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((mask & (1U << axis)) != 0) {
+      motorEnabled[axis] = true;
+    }
+  }
+  return true;
+}
+
+static void setStoppedMonitorCommands(uint8_t activeMask) {
+  const uint32_t now = millis();
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((activeMask & (1U << axis)) == 0) {
+      stopMotorAxis(axis, false);
+      motionMonitors[axis].setCommand(now, 0, targetDir[axis], 0.0f);
+    }
+  }
+}
+
+static void setActiveMonitorCommands(uint8_t activeMask) {
+  const uint32_t now = millis();
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if ((activeMask & (1U << axis)) != 0) {
+      motionMonitors[axis].setCommand(
+          now, targetRPM[axis], targetDir[axis], targetVel[axis]);
+    }
+  }
+}
+
+void sendMotorCmds() {
+  if (pc_connected && newJointVelCmd) {
+    const uint8_t activeMask = velocityActiveMask();
+    setStoppedMonitorCommands(activeMask);
+
+    bool coordinatedStartRequired = false;
+    for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+      if ((activeMask & (1U << axis)) == 0) continue;
+      if (!motorEnabled[axis] || !directionValid[axis] ||
+          targetDir[axis] != currentDir[axis]) {
+        coordinatedStartRequired = true;
+        break;
+      }
+    }
+
+    bool success = true;
+    if (coordinatedStartRequired && activeMask != 0) {
+      stopMotorMask(activeMask, true);
+      delay(MOTOR_DIRECTION_SETTLE_MS);
+      success = CoordinatedStart::run(
+          activeMask, numHWSerials,
+          [&](uint8_t axis) {
+            return configureMotorDirection(axis, true) &&
+                   configureMotorSpeed(axis);
+          },
+          [&](uint8_t mask) { return coordinatedEnableMask(mask); },
+          [&](uint8_t mask) { stopMotorMask(mask, true); });
+    } else {
+      // Same-direction live updates need only refresh changed speeds.
+      for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+        if ((activeMask & (1U << axis)) != 0 &&
+            !configureMotorSpeed(axis)) {
+          success = false;
+          stopMotorMask(activeMask, true);
+          break;
+        }
+      }
+    }
+    if (success) setActiveMonitorCommands(activeMask);
     newJointVelCmd = false;
 
   } else if (newJointPosCmd) {
-    for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-      if (FAULT_STOP_ENABLED && motionMonitors[axis].latched()) {
-        continue;
+    uint8_t activeMask = 0;
+    for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+      if (targetDeg[axis] != 0 && targetRPM[axis] != 0 &&
+          !(FAULT_STOP_ENABLED && motionMonitors[axis].latched())) {
+        activeMask |= static_cast<uint8_t>(1U << axis);
       }
-      if (!ensureMotorDirection(axis)) {
-        continue;
-      }
-
-      if (newTargetVelCmd || !speedValid[axis] ||
-          currentRPM[axis] != targetRPM[axis]) {
-        p = sendingHWChars[axis];
-        *p++ = startMarker;
-        *p++ = 'C';
-        p = write_uint16(p, targetRPM[axis]);
-        *p++ = endMarker;
-        if (!writeMotorCommandWithAck(
-                axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
-          confirmDriverCommunicationFault(axis, 'C');
-          continue;
-        }
-        currentRPM[axis] = targetRPM[axis];
-        speedValid[axis] = true;
-      }
-
-      p = sendingHWChars[axis];
-      *p++ = startMarker;
-      *p++ = 'A';
-      p = write_uint16(p, targetDeg[axis]);
-      *p++ = endMarker;
-      if (!writeMotorCommandWithAck(
-              axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
-        confirmDriverCommunicationFault(axis, 'A');
-        continue;
-      }
-
-      if (!motorEnabled[axis]) {
-        if (!writeMotorCommandWithAck(axis, "$O1\n", 4)) {
-          confirmDriverCommunicationFault(axis, 'O');
-          continue;
-        }
-        motorEnabled[axis] = true;
-      }
-      motionMonitors[axis].setCommand(
-          millis(), targetRPM[axis], targetDir[axis], targetVel[axis]);
     }
+    setStoppedMonitorCommands(activeMask);
+    bool success = true;
+    if (activeMask != 0) {
+      stopMotorMask(activeMask, true);
+      delay(MOTOR_DIRECTION_SETTLE_MS);
+      success = CoordinatedStart::run(
+          activeMask, numHWSerials,
+          [&](uint8_t axis) {
+            return configureMotorDirection(axis, true) &&
+                   configureMotorSpeed(axis) &&
+                   configureMotorPosition(axis);
+          },
+          [&](uint8_t mask) { return coordinatedEnableMask(mask); },
+          [&](uint8_t mask) { stopMotorMask(mask, true); });
+    }
+    if (success) setActiveMonitorCommands(activeMask);
     newJointPosCmd = false;
     newTargetVelCmd = false;
   }
