@@ -27,6 +27,8 @@ from control_interface.srv import DeviceCmd
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import (
+    DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy)
 from std_msgs.msg import String
 
 # Joint order matches teleop/config/params.yaml
@@ -39,6 +41,22 @@ ROT_JOINTS = {1, 4}   # rotation joints (deg, wrap-around): catheter_rot, sheath
 DEFAULT_MAX_SPEEDS = [5.0, 30.0, 1.0, 5.0, 30.0, 30.0]
 DEFAULT_MIN_SPEEDS = [0.0] * 6
 DEFAULT_PREFLIGHT_POSITION_DRIFT = [0.1, 1.0, 0.1, 0.1, 1.0, 1.0]
+
+
+def collection_marker_qos() -> QoSProfile:
+    """Retain complete run markers for late-discovering recorders.
+
+    rosbag2 requests transient-local durability for this event topic. A volatile
+    publisher is incompatible with that request and can lose ``run_start`` while
+    DDS discovery is still settling. Retaining all markers from one run also
+    lets a recorder reconnect before the node exits without losing chronology.
+    """
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=10,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
 
 
 def parse_fault_status(response: str) -> dict:
@@ -213,7 +231,8 @@ class CollectionNode(Node):
 
         self._control_pub = self.create_publisher(ControlStream, "/teleop/control", 10)
         self._event_pub = self.create_publisher(ManagerEvent, "/teleop/event", 10)
-        self._marker_pub = self.create_publisher(String, "/collection/events", 10)
+        self._marker_pub = self.create_publisher(
+            String, "/collection/events", collection_marker_qos())
         self._device_client = self.create_client(DeviceCmd, "/device/command")
 
         # Latest device state (firmware reports predicate 'P'/'V'/'E' + 6 values),

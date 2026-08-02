@@ -3,8 +3,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from automation.collection.node import CollectionNode, parse_fault_status
+from automation.collection.node import (
+    CollectionNode, collection_marker_qos, parse_fault_status)
 from control_interface.msg import DeviceEvent, ManagerEvent
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+
+
+def test_collection_marker_qos_retains_run_start_for_rosbag_discovery():
+    qos = collection_marker_qos()
+    assert qos.history == HistoryPolicy.KEEP_LAST
+    assert qos.depth == 10
+    assert qos.reliability == ReliabilityPolicy.RELIABLE
+    assert qos.durability == DurabilityPolicy.TRANSIENT_LOCAL
 
 
 def preflight_feedback(**overrides):
