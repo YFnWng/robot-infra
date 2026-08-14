@@ -65,6 +65,7 @@ constexpr uint8_t RESET_FAULT = 'R';
 constexpr uint8_t FAULT_STATUS = 'Q';
 constexpr uint8_t SET_VEL = 'F';
 constexpr uint8_t DEBUG = 'D';
+constexpr uint8_t DRIVER_DIAGNOSTIC = 'H';
 constexpr uint8_t CONNECT = 'C';
 constexpr uint8_t CALIBRATION = 'K';
 constexpr uint8_t LIMIT = 'L';
@@ -163,6 +164,7 @@ constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next c
 constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 50;
 constexpr uint8_t MOTOR_ACK_ATTEMPTS = 3;
 constexpr uint16_t MOTOR_ACK_RETRY_DELAY_MS = 10;
+constexpr uint16_t MOTOR_UART_RECOVERY_MS = 20;
 constexpr uint16_t MOTOR_DIRECTION_SETTLE_MS = 5;
 constexpr uint32_t POSITION_SETTLE_MS = 100;
 constexpr uint32_t POSITION_TIMEOUT_MS = 45000;
@@ -175,6 +177,8 @@ constexpr uint32_t ENCODER_MAX_COUNTS_PER_SECOND =
 constexpr uint8_t ENCODER_SPEED_MARGIN_MULTIPLIER = 2;
 constexpr uint16_t ENCODER_COUNT_MARGIN = 100;
 bool pc_connected = false;
+
+void handleDriverDiagnosticCommand();
 
 void setup() {
   // put your setup code here, to run once:
@@ -633,6 +637,11 @@ void procPCBytes() {
 
         case FAULT_STATUS: {// 'Q', query latched faults and motor state
           sendFaultStatusAck();
+          break;
+        }
+
+        case DRIVER_DIAGNOSTIC: {// 'H', disabled-state per-axis UART probe
+          handleDriverDiagnosticCommand();
           break;
         }
 
@@ -1236,6 +1245,23 @@ static inline void drainMotorResponses(uint8_t axis) {
   newHWMsg[axis] = false;
 }
 
+static void recoverMotorUart(uint8_t axis) {
+  // Reset only the affected Teensy UART, then send a blank frame terminator to
+  // discard a possible partial command in the driver parser. No motor-enable
+  // command is sent here.
+  HWSerials[axis]->end();
+  delay(2);
+  HWSerials[axis]->begin(115200);
+  delay(MOTOR_UART_RECOVERY_MS);
+  HWSerials[axis]->write(&endMarker, 1);
+  HWSerials[axis]->flush();
+  delayMicroseconds(DRIVER_DELAY_us);
+  drainMotorResponses(axis);
+  controlModeValid[axis] = false;
+  directionValid[axis] = false;
+  speedValid[axis] = false;
+}
+
 static DriverAck::Result waitForMotorAck(uint8_t axis) {
   DriverAck::Result result;
   const uint32_t start = millis();
@@ -1290,7 +1316,12 @@ static bool writeMotorCommandWithAck(
         // Discard a response that completed just after the prior timeout, then
         // give the driver a bounded recovery interval before retransmission.
         drainMotorResponses(axis);
-        delay(MOTOR_ACK_RETRY_DELAY_MS);
+        if (current.failure == DriverAck::TIMEOUT ||
+            current.failure == DriverAck::PARTIAL_FRAME) {
+          recoverMotorUart(axis);
+        } else {
+          delay(MOTOR_ACK_RETRY_DELAY_MS);
+        }
       },
       &attempts);
   best.success = success;
@@ -1321,7 +1352,7 @@ static bool initializeMotorDriver(uint8_t axis) {
   // responses are retained on failure.
   DriverAck::Result acknowledgement;
   if (!writeMotorCommandWithAck(axis, "$O0\n", 4, &acknowledgement)) {
-    confirmDriverCommunicationFault(axis, 'O', &acknowledgement);
+    confirmDriverCommunicationFault(axis, '0', &acknowledgement);
     return false;
   }
   motorEnabled[axis] = false;
@@ -1450,7 +1481,7 @@ static bool coordinatedEnableMask(uint8_t mask) {
     if (!acknowledgement.success) {
       // Do not retry an enable while its peers may already be moving. The
       // coordinated transaction rolls the full set back to disabled instead.
-      confirmDriverCommunicationFault(axis, 'O', &acknowledgement);
+      confirmDriverCommunicationFault(axis, '1', &acknowledgement);
       return false;
     }
   }
@@ -1460,6 +1491,64 @@ static bool coordinatedEnableMask(uint8_t mask) {
     }
   }
   return true;
+}
+
+static void sendDriverDiagnosticResult(
+    uint8_t axis, char stage, const DriverAck::Result& result) {
+  char response[128];
+  int used = snprintf(
+      response, sizeof(response),
+      "%s,V1,A=%u,S=%c,F=%u,N=%u,R=",
+      result.success ? "OK_DRIVER_UART" : "ERR_DRIVER_UART",
+      axis, stage, static_cast<uint8_t>(result.failure), result.attempts);
+  if (used < 0) {
+    sendAckIfPending("ERR_FORMAT");
+    return;
+  }
+  size_t offset = static_cast<size_t>(used);
+  for (uint8_t index = 0;
+       index < result.response_length &&
+       offset + 2 < sizeof(response);
+       ++index) {
+    used = snprintf(response + offset, sizeof(response) - offset,
+                    "%02X", result.response[index]);
+    if (used <= 0) break;
+    offset += static_cast<size_t>(used);
+  }
+  response[sizeof(response) - 1] = 0;
+  sendAckIfPending(response);
+}
+
+void handleDriverDiagnosticCommand() {
+  constexpr size_t kExpectedLength = 1 + REQ_ID_LEN + 1;
+  if (PCBytes_len != kExpectedLength) {
+    sendAckIfPending("ERR_AXIS_REQUIRED");
+    return;
+  }
+  const uint8_t axisByte = receivedPCBytes[1 + REQ_ID_LEN];
+  if (axisByte < '0' || axisByte >= '0' + numHWSerials) {
+    sendAckIfPending("ERR_AXIS_RANGE");
+    return;
+  }
+  const uint8_t axis = axisByte - '0';
+
+  // The probe is deliberately motion-safe: force the selected driver disabled,
+  // verify O0 and closed-loop mode, and leave it disabled.
+  stopMotorAxis(axis, true);
+  delay(MOTOR_DIRECTION_SETTLE_MS);
+  DriverAck::Result acknowledgement;
+  if (!writeMotorCommandWithAck(
+          axis, "$O0\n", 4, &acknowledgement)) {
+    sendDriverDiagnosticResult(axis, '0', acknowledgement);
+    return;
+  }
+  if (!writeMotorCommandWithAck(
+          axis, "$L1\n", 4, &acknowledgement)) {
+    sendDriverDiagnosticResult(axis, 'L', acknowledgement);
+    return;
+  }
+  controlModeValid[axis] = true;
+  sendDriverDiagnosticResult(axis, 'K', acknowledgement);
 }
 
 static void setStoppedMonitorCommands(uint8_t activeMask) {

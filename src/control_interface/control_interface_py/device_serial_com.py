@@ -21,7 +21,8 @@ event_prefix = [
     ManagerEvent.LIMIT, ManagerEvent.STALL, ManagerEvent.POSITION_STATUS]
 response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.MODE, 
-                    ManagerEvent.DEBUG, 
+                    ManagerEvent.DEBUG,
+                    ord('H'),  # DRIVER_DIAGNOSTIC; keeps mixed-build overlays safe
                     ManagerEvent.START_MOTOR,
                     ManagerEvent.STOP_MOTOR,
                     ManagerEvent.RESET_FAULT,
