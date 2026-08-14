@@ -1088,8 +1088,32 @@ class CollectionNode(Node):
             "detail": int(data[11]) if len(data) > 11 else 0,
             "stamp_ns": self.get_clock().now().nanoseconds,
         }
-        if fault["detail"]:
+        if (fault["fault_type"] == ManagerEvent.FAULT_DRIVER_COMMUNICATION
+                and fault["detail"]):
             fault["driver_stage"] = chr(fault["detail"])
+        if fault["protocol_version"] >= 3 and len(data) >= 15:
+            failure_names = {
+                0: "none",
+                1: "timeout",
+                2: "partial_frame",
+                3: "response_overflow",
+                4: "explicit_rejection",
+                5: "malformed_response",
+            }
+            failure = int(data[12])
+            response_length = min(int(data[14]), 8, max(0, len(data) - 15))
+            response = bytes(
+                int(value) & 0xff
+                for value in data[15:15 + response_length])
+            fault.update({
+                "driver_ack_failure": failure_names.get(
+                    failure, f"unknown_{failure}"),
+                "driver_ack_attempts": int(data[13]),
+                "driver_response_hex": response.hex(" "),
+                "driver_response_ascii": "".join(
+                    chr(value) if 32 <= value < 127 else "."
+                    for value in response),
+            })
         if fault["transition"] != ManagerEvent.MOTION_CONFIRMED:
             return
         if self._t0 is None and not self._done:

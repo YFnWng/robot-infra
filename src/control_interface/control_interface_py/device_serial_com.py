@@ -245,7 +245,7 @@ class SerialCommunication(Node):
                 self.get_logger().warn(
                     f'{msg.text} mask=0x{mask:02X} errors={errors}')
         elif (prefix == ManagerEvent.STALL and len(body) >= 29
-                and body[6] in (1, 2)):
+                and body[6] in (1, 2, 3)):
             values = struct.unpack_from("<BBBBBHfffHH", body, 6)
             (version, transition, fault, axis, coupled_axis, sequence,
              commanded_velocity, measured_velocity, displacement,
@@ -281,6 +281,16 @@ class SerialCommunication(Node):
             ]
             if version >= 2 and len(body) >= 30:
                 msg.data.append(float(body[29]))
+            if version >= 3 and len(body) >= 33:
+                ack_failure = body[30]
+                ack_attempts = body[31]
+                response_length = min(body[32], 8, len(body) - 33)
+                msg.data.extend([
+                    float(ack_failure), float(ack_attempts),
+                    float(response_length),
+                    *[float(value) for value in
+                      body[33:33 + response_length]],
+                ])
             self.get_logger().warn(f"{msg.text} data={list(msg.data)}")
         else:
             self.get_logger().warn(

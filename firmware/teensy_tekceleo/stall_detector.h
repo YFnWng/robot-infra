@@ -59,6 +59,10 @@ class StallDetector {
     uint16_t target_rpm = 0;
     uint16_t window_ms = 0;
     uint8_t detail = 0;
+    uint8_t driver_ack_failure = 0;
+    uint8_t driver_ack_attempts = 0;
+    uint8_t driver_response_length = 0;
+    uint8_t driver_response[8] = {0};
   };
 
   StallDetector() : config_() {}

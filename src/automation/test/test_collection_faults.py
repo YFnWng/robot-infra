@@ -314,6 +314,36 @@ def test_confirmed_fault_finishes_active_run():
     assert fake._hardware_fault["driver_stage"] == "O"
 
 
+def test_protocol_v3_driver_diagnostics_are_decoded():
+    finished = []
+    fake = SimpleNamespace(
+        _t0=object(), _done=False, _returning=False,
+        _return_status="not_started", _hardware_fault=None,
+        _run_status="running",
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=456)),
+        get_logger=lambda: SimpleNamespace(error=lambda message: None),
+        _finish=lambda: finished.append(True),
+    )
+    msg = DeviceEvent()
+    msg.predicate = ManagerEvent.STALL
+    msg.text = "MOTION_CONFIRMED:DRIVER_COMMUNICATION"
+    msg.data = [float(value) for value in [
+        3, ManagerEvent.MOTION_CONFIRMED,
+        ManagerEvent.FAULT_DRIVER_COMMUNICATION,
+        4, 5, 1, 25.0, 0.0, 0.0, 56, 0, ord("S"),
+        4, 3, 4, ord("!"), ord("E"), ord("R"), ord("R")]]
+
+    CollectionNode._device_event_cb(fake, msg)
+
+    assert finished == [True]
+    assert fake._hardware_fault["driver_stage"] == "S"
+    assert fake._hardware_fault["driver_ack_failure"] == "explicit_rejection"
+    assert fake._hardware_fault["driver_ack_attempts"] == 3
+    assert fake._hardware_fault["driver_response_hex"] == "21 45 52 52"
+    assert fake._hardware_fault["driver_response_ascii"] == "!ERR"
+
+
 def test_run_end_records_final_fault_status_separately_from_preflight():
     markers = []
     preflight = {"latched_mask": 0, "enabled_mask": 0}

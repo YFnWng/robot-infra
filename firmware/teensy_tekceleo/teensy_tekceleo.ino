@@ -1,6 +1,7 @@
 #include <QuadEncoder.h>
 #include <Encoder.h>
 #include "coordinated_start.h"
+#include "driver_ack.h"
 #include "driver_ack_retry.h"
 #include "encoder_integrity_guard.h"
 #include <cmath>
@@ -37,6 +38,8 @@ uint8_t sendingPCBytes[BUFFER_LEN];
 char sendingHWChars[numHWSerials][BUFFER_LEN];
 // size_t numsendingHWChars[numHWSerials];
 bool newHWMsg[numHWSerials];
+bool hwRecvInProgress[numHWSerials] = {false};
+uint8_t hwRecvIndex[numHWSerials] = {0};
 bool newPCMsg = false;
 bool newJointVelCmd = false;
 bool newJointPosCmd = false;
@@ -139,6 +142,7 @@ uint8_t targetDir[numHWSerials]; // '0': right-hand, '1': left-hand
 uint8_t currentDir[numHWSerials];
 bool directionValid[numHWSerials] = { false };
 bool motorEnabled[numHWSerials] = { false };
+bool controlModeValid[numHWSerials] = { false };
 
 // Confirmed faults are latched: the affected physical motor and its coupled
 // partner are stopped and ignore the 100 Hz command stream until RESET_FAULT.
@@ -203,10 +207,11 @@ void setup() {
     // HWSerials[i]->transmitterEnable(TE[i]);
     HWSerials[i]->begin(115200);
 
-    // Always establish a known disabled state before configuring a driver.
+    // Best-effort safe state only. Drivers may not be powered yet, so runtime
+    // motion performs an acknowledged O0/L1 initialization transaction before
+    // direction, speed, or enable commands are accepted.
     stopMotorAxis(i, true);
-    writeMotorCommand(i, "$C0\n", 4);
-    writeMotorCommand(i, "$L1\n", 4);
+    controlModeValid[i] = false;
     directionValid[i] = false;
   }
 
@@ -261,8 +266,6 @@ void loop() {
 }
 
 void recvHWSerials() {
-    static bool recvInProgress[numHWSerials] = {false};
-    static uint8_t ndx[numHWSerials] = {0};
     uint8_t rb;
 
     for (uint8_t i = 0; i < numHWSerials; i++){
@@ -272,27 +275,27 @@ void recvHWSerials() {
       while (HWSerials[i]->available() > 0) {
           rb = HWSerials[i]->read();
 
-          if (recvInProgress[i] == true) {
+          if (hwRecvInProgress[i] == true) {
               if (rb != endMarker) {
-                  receivedHWBytes[i][ndx[i]] = rb;
-                  ndx[i]++;
-                  if (ndx[i] >= BUFFER_LEN) {
-                      ndx[i] = BUFFER_LEN - 1;
+                  receivedHWBytes[i][hwRecvIndex[i]] = rb;
+                  hwRecvIndex[i]++;
+                  if (hwRecvIndex[i] >= BUFFER_LEN) {
+                      hwRecvIndex[i] = BUFFER_LEN - 1;
                   }
               }
               else {
                   // receivedHWBytes[i][ndx[i]] = '\0'; // terminate the string
-                  HWBytes_len[i] = ndx[i];
-                  recvInProgress[i] = false;
-                  ndx[i] = 0;
+                  HWBytes_len[i] = hwRecvIndex[i];
+                  hwRecvInProgress[i] = false;
+                  hwRecvIndex[i] = 0;
                   newHWMsg[i] = true;
               }
           }
 
           else if (rb == respMarker) {
-              recvInProgress[i] = true;
+              hwRecvInProgress[i] = true;
               receivedHWBytes[i][0] = rb; // including start marker for hardware serial
-              ndx[i]++;
+              hwRecvIndex[i] = 1;
           }
       }
     }
@@ -1093,7 +1096,7 @@ void reportMotionEvent(uint8_t axis, uint8_t coupled,
   }
 
   // Structured extension after the six legacy axis-state bytes.
-  *p++ = 2;  // protocol version
+  *p++ = 3;  // protocol version
   *p++ = static_cast<uint8_t>(event.transition);
   *p++ = static_cast<uint8_t>(event.fault);
   *p++ = axis;
@@ -1105,6 +1108,16 @@ void reportMotionEvent(uint8_t axis, uint8_t coupled,
   p = writeU16LE(p, event.target_rpm);
   p = writeU16LE(p, event.window_ms);
   *p++ = event.detail;
+  *p++ = event.driver_ack_failure;
+  *p++ = event.driver_ack_attempts;
+  const uint8_t responseLength =
+      event.driver_response_length > DriverAck::MAX_RESPONSE_BYTES
+          ? DriverAck::MAX_RESPONSE_BYTES
+          : event.driver_response_length;
+  *p++ = responseLength;
+  for (uint8_t index = 0; index < responseLength; ++index) {
+    *p++ = event.driver_response[index];
+  }
 
   const uint8_t length = static_cast<uint8_t>(p - sendingPCBytes);
   Serial.write(&PCStartMarker, 1);
@@ -1146,7 +1159,9 @@ void reportFaultStatusEvents() {
   }
 }
 
-void confirmDriverCommunicationFault(uint8_t axis, uint8_t stage) {
+void confirmDriverCommunicationFault(
+    uint8_t axis, uint8_t stage,
+    const DriverAck::Result* diagnostics) {
   if (motionMonitors[axis].latched()) return;
   cancelPositionMove(true);
   StallDetector::Event event;
@@ -1156,6 +1171,14 @@ void confirmDriverCommunicationFault(uint8_t axis, uint8_t stage) {
   event.measured_velocity = currentVel[axis];
   event.target_rpm = targetRPM[axis];
   event.detail = stage;
+  if (diagnostics != nullptr) {
+    event.driver_ack_failure = static_cast<uint8_t>(diagnostics->failure);
+    event.driver_ack_attempts = diagnostics->attempts;
+    event.driver_response_length = diagnostics->response_length;
+    memcpy(event.driver_response, diagnostics->response,
+           DriverAck::MAX_RESPONSE_BYTES);
+  }
+  controlModeValid[axis] = false;
   motionMonitors[axis].forceLatch(event.fault, millis());
   stopMotorAxis(axis, true);
   const uint8_t coupled = coupledAxis(axis);
@@ -1207,40 +1230,75 @@ static inline void drainMotorResponses(uint8_t axis) {
   while (HWSerials[axis]->available() > 0) {
     HWSerials[axis]->read();
   }
+  hwRecvInProgress[axis] = false;
+  hwRecvIndex[axis] = 0;
+  HWBytes_len[axis] = 0;
   newHWMsg[axis] = false;
 }
 
-static bool waitForMotorAck(uint8_t axis) {
+static DriverAck::Result waitForMotorAck(uint8_t axis) {
+  DriverAck::Result result;
   const uint32_t start = millis();
   bool inFrame = false;
+  bool overflow = false;
   while (millis() - start < MOTOR_ACK_TIMEOUT_MS) {
     while (HWSerials[axis]->available() > 0) {
       const uint8_t value = HWSerials[axis]->read();
       if (!inFrame) {
-        inFrame = value == respMarker;
+        if (value == respMarker) {
+          inFrame = true;
+          result.response[0] = value;
+          result.response_length = 1;
+        }
       } else if (value == endMarker) {
-        return true;
+        result.failure = overflow
+            ? DriverAck::RESPONSE_OVERFLOW
+            : DriverAck::classify(
+                  result.response, result.response_length);
+        result.success = result.failure == DriverAck::NONE;
+        return result;
+      } else if (result.response_length < DriverAck::MAX_RESPONSE_BYTES) {
+        result.response[result.response_length++] = value;
+      } else {
+        overflow = true;
       }
     }
   }
-  return false;
+  result.failure = inFrame ? DriverAck::PARTIAL_FRAME : DriverAck::TIMEOUT;
+  return result;
 }
 
 static bool writeMotorCommandWithAck(
-    uint8_t axis, const char* command, size_t length) {
-  return DriverAckRetry::run(
+    uint8_t axis, const char* command, size_t length,
+    DriverAck::Result* diagnostics) {
+  DriverAck::Result best;
+  DriverAck::Result current;
+  uint8_t attempts = 0;
+  const bool success = DriverAckRetry::run(
       MOTOR_ACK_ATTEMPTS,
       [&]() {
         drainMotorResponses(axis);
         writeMotorCommand(axis, command, length);
-        return waitForMotorAck(axis);
+        current = waitForMotorAck(axis);
+        if (current.success || current.response_length > 0 ||
+            best.response_length == 0) {
+          best = current;
+        }
+        return current.success;
       },
       [&](uint8_t) {
         // Discard a response that completed just after the prior timeout, then
         // give the driver a bounded recovery interval before retransmission.
         drainMotorResponses(axis);
         delay(MOTOR_ACK_RETRY_DELAY_MS);
-      });
+      },
+      &attempts);
+  best.success = success;
+  best.attempts = attempts;
+  if (diagnostics != nullptr) {
+    *diagnostics = best;
+  }
+  return success;
 }
 
 static inline void stopMotorAxis(uint8_t axis, bool force) {
@@ -1253,6 +1311,30 @@ static inline void stopMotorAxis(uint8_t axis, bool force) {
   // Reassert direction before this motor is enabled again. This prevents the
   // firmware cache from surviving a stall, watchdog stop, or driver power cycle.
   directionValid[axis] = false;
+}
+
+static bool initializeMotorDriver(uint8_t axis) {
+  // Re-establish a known disabled, closed-loop state at every coordinated
+  // disabled-to-enabled start. A driver can lose its mode when motor power is
+  // cycled without resetting the Teensy, so the cached state alone is not
+  // sufficient. Unlike setup(), both commands are acknowledged and their
+  // responses are retained on failure.
+  DriverAck::Result acknowledgement;
+  if (!writeMotorCommandWithAck(axis, "$O0\n", 4, &acknowledgement)) {
+    confirmDriverCommunicationFault(axis, 'O', &acknowledgement);
+    return false;
+  }
+  motorEnabled[axis] = false;
+  speedValid[axis] = false;
+  currentRPM[axis] = 0;
+  directionValid[axis] = false;
+
+  if (!writeMotorCommandWithAck(axis, "$L1\n", 4, &acknowledgement)) {
+    confirmDriverCommunicationFault(axis, 'L', &acknowledgement);
+    return false;
+  }
+  controlModeValid[axis] = true;
+  return true;
 }
 
 static bool configureMotorDirection(uint8_t axis, bool alreadyStopped) {
@@ -1273,11 +1355,13 @@ static bool configureMotorDirection(uint8_t axis, bool alreadyStopped) {
     *p++ = 'S';
     *p++ = targetDir[axis];
     *p++ = endMarker;
+    DriverAck::Result acknowledgement;
     if (!writeMotorCommandWithAck(
-            axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
+            axis, sendingHWChars[axis], p - sendingHWChars[axis],
+            &acknowledgement)) {
       directionValid[axis] = false;
       stopMotorAxis(axis, true);
-      confirmDriverCommunicationFault(axis, 'S');
+      confirmDriverCommunicationFault(axis, 'S', &acknowledgement);
       return false;
     }
     currentDir[axis] = targetDir[axis];
@@ -1295,9 +1379,11 @@ static bool configureMotorSpeed(uint8_t axis) {
   *p++ = 'C';
   p = write_uint16(p, targetRPM[axis]);
   *p++ = endMarker;
+  DriverAck::Result acknowledgement;
   if (!writeMotorCommandWithAck(
-          axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
-    confirmDriverCommunicationFault(axis, 'C');
+          axis, sendingHWChars[axis], p - sendingHWChars[axis],
+          &acknowledgement)) {
+    confirmDriverCommunicationFault(axis, 'C', &acknowledgement);
     return false;
   }
   currentRPM[axis] = targetRPM[axis];
@@ -1311,9 +1397,11 @@ static bool configureMotorPosition(uint8_t axis) {
   *p++ = 'A';
   p = write_uint16(p, targetDeg[axis]);
   *p++ = endMarker;
+  DriverAck::Result acknowledgement;
   if (!writeMotorCommandWithAck(
-          axis, sendingHWChars[axis], p - sendingHWChars[axis])) {
-    confirmDriverCommunicationFault(axis, 'A');
+          axis, sendingHWChars[axis], p - sendingHWChars[axis],
+          &acknowledgement)) {
+    confirmDriverCommunicationFault(axis, 'A', &acknowledgement);
     return false;
   }
   return true;
@@ -1357,10 +1445,12 @@ static bool coordinatedEnableMask(uint8_t mask) {
     if ((mask & (1U << axis)) == 0) {
       continue;
     }
-    if (!waitForMotorAck(axis)) {
+    DriverAck::Result acknowledgement = waitForMotorAck(axis);
+    acknowledgement.attempts = 1;
+    if (!acknowledgement.success) {
       // Do not retry an enable while its peers may already be moving. The
       // coordinated transaction rolls the full set back to disabled instead.
-      confirmDriverCommunicationFault(axis, 'O');
+      confirmDriverCommunicationFault(axis, 'O', &acknowledgement);
       return false;
     }
   }
@@ -1418,7 +1508,8 @@ void sendMotorCmds() {
     bool coordinatedStartRequired = false;
     for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
       if ((activeMask & (1U << axis)) == 0) continue;
-      if (!motorEnabled[axis] || !directionValid[axis] ||
+      if (!motorEnabled[axis] || !controlModeValid[axis] ||
+          !directionValid[axis] ||
           targetDir[axis] != currentDir[axis]) {
         coordinatedStartRequired = true;
         break;
@@ -1432,7 +1523,8 @@ void sendMotorCmds() {
       success = CoordinatedStart::run(
           activeMask, numHWSerials,
           [&](uint8_t axis) {
-            return configureMotorDirection(axis, true) &&
+            return initializeMotorDriver(axis) &&
+                   configureMotorDirection(axis, true) &&
                    configureMotorSpeed(axis);
           },
           [&](uint8_t mask) { return coordinatedEnableMask(mask); },
@@ -1467,7 +1559,8 @@ void sendMotorCmds() {
       success = CoordinatedStart::run(
           activeMask, numHWSerials,
           [&](uint8_t axis) {
-            return configureMotorDirection(axis, true) &&
+            return initializeMotorDriver(axis) &&
+                   configureMotorDirection(axis, true) &&
                    configureMotorSpeed(axis) &&
                    configureMotorPosition(axis);
           },
@@ -1522,7 +1615,8 @@ void sendMotorCmds() {
     const bool success = CoordinatedStart::run(
         correctionMask, numHWSerials,
         [&](uint8_t axis) {
-          return configureMotorDirection(axis, true) &&
+          return initializeMotorDriver(axis) &&
+                 configureMotorDirection(axis, true) &&
                  configureMotorSpeed(axis) &&
                  configureMotorPosition(axis);
         },
