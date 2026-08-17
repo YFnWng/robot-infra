@@ -8,6 +8,63 @@ Currently under construction.
 
 Tested on Windows 11 + WSL2, Ubuntu 22.04 + ROS2 Humble
 
+## Hardened catheter teleoperation
+
+The production path is fail-closed:
+
+- the manager requires the `imricor_test` limits file, fresh POS and ENC
+  feedback, a bidirectionally qualified serial link, and explicit driver-power
+  qualification before accepting motion;
+- serial disconnect, stale feedback, a stale command source, or a confirmed
+  firmware fault commands zero/stop and returns the manager to mode `NONE`;
+- reconnecting always revokes driver-power qualification;
+- the Slicer key state is a heartbeat. Loss of that heartbeat first publishes
+  zero locally, then the independent manager watchdog disables the mode;
+- legacy `START_MOTOR`, raw Slicer fault reset, and production debug commands
+  are rejected. `SET_ZERO` is accepted only in mode `NONE` after a stationary
+  feedback window.
+
+Build and source the workspace normally, then start the control stack:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/robot-infra/install/setup.bash
+ros2 launch control_interface launch.py \
+  catheter:=imricor_test \
+  serial_port:=/dev/ttyACM0
+```
+
+The supported hardware startup order is:
+
+1. Motor-driver power off.
+2. Power/connect the Teensy and start the control stack.
+3. Open the serial link from Slicer (or call predicate `67`).
+4. Power on the motor drivers while the robot is stationary.
+5. Press **Qualify Driver Power** in Slicer. This waits for stable POS/ENC,
+   stops and verifies disabled motors, clears only encoder-integrity startup
+   latches, and rechecks firmware status.
+6. Enable a motion mode only after Slicer reports `MANAGER_READY`.
+
+Terminal equivalents for steps 3 and 5 are:
+
+```bash
+ros2 service call /device/command control_interface/srv/DeviceCmd \
+  "{predicate: 67, cmd: '/dev/ttyACM0', data: []}"
+
+ros2 service call /manager/qualify_driver_power std_srvs/srv/Trigger "{}"
+```
+
+The retained safety topic is:
+
+```bash
+ros2 topic echo /manager/safety_status control_interface/msg/ManagerEvent \
+  --qos-durability transient_local \
+  --qos-reliability reliable
+```
+
+Only `MANAGER_READY` permits motion. Do not bypass an inhibited state by
+calling the low-level device service unless performing deliberate diagnostics.
+
 ## Live catheter shape estimation
 
 Use a Python 3.10 virtual environment that can also see the ROS 2 Humble

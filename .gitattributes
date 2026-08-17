@@ -1,0 +1,6 @@
+* text=auto
+
+# ROS Python entry points are executed directly on Linux/WSL.  A CRLF on the
+# shebang makes /usr/bin/env search for a program literally named "python3\r".
+*.py text eol=lf
+*.sh text eol=lf

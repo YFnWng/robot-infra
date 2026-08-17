@@ -9,7 +9,10 @@ from typing import Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
+from std_msgs.msg import String
 
 import serial
 
@@ -58,14 +61,48 @@ class SerialCommunication(Node):
         self.startMarker = b'<'
         self.endMarker = b'>'
         self.timeout_sec = 1.0
+        self.declare_parameter('serial_port', '/dev/ttyACM0')
+        self.declare_parameter('baudrate', 115200)
+        self.declare_parameter('serial_timeout_s', 0.1)
+        self.declare_parameter('connect_retries', 20)
+        self.declare_parameter('serial_settle_s', 0.3)
+        self.declare_parameter('handshake_wait_s', 1.0)
+        self.configured_port = str(self.get_parameter('serial_port').value)
+        self.baudrate = int(self.get_parameter('baudrate').value)
+        self.serial_timeout_s = float(
+            self.get_parameter('serial_timeout_s').value)
+        self.connect_retries = int(
+            self.get_parameter('connect_retries').value)
+        self.serial_settle_s = float(
+            self.get_parameter('serial_settle_s').value)
+        self.handshake_wait_s = float(
+            self.get_parameter('handshake_wait_s').value)
+        if (self.serial_timeout_s <= 0.0 or self.connect_retries <= 0
+                or self.serial_settle_s < 0.0 or self.handshake_wait_s < 0.0):
+            raise ValueError(
+                'serial timeout/retries must be positive and connection '
+                'delays must be non-negative')
 
         # ---- Serial ----
         self.serial_port: Optional[serial.Serial] = None
         self.is_connected = False
+        self.io_lock = threading.RLock()
+        self.connection_lock = threading.RLock()
+        self.rx_ready = threading.Event()
+        self.stop_event = threading.Event()
+        self.last_rx_time = None
+        self.rx_errors = {}
+        self._last_transport_status = None
+
+        # Services may wait for firmware responses. Keep them out of the same
+        # mutually-exclusive callback group as velocity traffic and watchdogs.
+        self.control_group = ReentrantCallbackGroup()
+        self.service_group = ReentrantCallbackGroup()
 
         # ---- ROS interfaces ----
         self.control_sub = self.create_subscription(
-            DeviceStream, '/manager/control', self.on_manager_control, 10
+            DeviceStream, '/manager/control', self.on_manager_control, 10,
+            callback_group=self.control_group,
         )
 
         self.state_pub = self.create_publisher(
@@ -76,8 +113,15 @@ class SerialCommunication(Node):
             DeviceEvent, '/device/event', 10
         )
 
+        transport_qos = QoSProfile(depth=1)
+        transport_qos.reliability = ReliabilityPolicy.RELIABLE
+        transport_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.transport_status_pub = self.create_publisher(
+            String, '/device/transport_status', transport_qos)
+
         self.cmd_srv = self.create_service(
-            DeviceCmd, '/device/command', self.handle_device_command
+            DeviceCmd, '/device/command', self.handle_device_command,
+            callback_group=self.service_group,
         )
 
         # ---- Pending service requests ----
@@ -90,101 +134,185 @@ class SerialCommunication(Node):
 
         # ---- Timeout watchdog ----
         self.create_timer(0.01, self.check_timeouts)
+        self._set_transport_status('SERIAL_DISCONNECTED')
 
 
     # ============================================================
     # Serial connection
     # ============================================================
 
-    def connect(self, port: str='/dev/ttyACM0', baudrate: int = 115200, timeout: float = 1.0):
-        """Connect to the specified serial port"""
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-            self.get_logger().info(f"Serial disconnected: {port}")
-            self.is_connected = False
-            return
-        
-        for i in range(20):
-            try:
-                self.serial_port = serial.Serial(port, baudrate, timeout=1)
-                self.is_connected = self.serial_port.is_open
-                self.get_logger().info(f"Serial connected: {port}")
-                return
-            except serial.SerialException as e:
-                self.get_logger().warn(f"Attempt {i+1}: cannot open {port}, {e}, retrying...")
+    def connect(self, port=None):
+        """Idempotently open a configured serial port."""
+        target = port or self.configured_port
+        with self.connection_lock:
+            with self.io_lock:
+                current = self.serial_port
+                if current and current.is_open and current.port == target:
+                    self.is_connected = True
+                    return True
+                if current and current.is_open:
+                    current.close()
+                self.serial_port = None
                 self.is_connected = False
-                time.sleep(0.1)
-        self.get_logger().error(f"Failed to open serial port {port}")
 
-    def close(self):
-        """Close the serial port connection"""
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-            self.is_connected = False
-            self.get_logger().info(f"Serial port {self.serial_port.name} closed.")
+            self.rx_ready.clear()
+            self.last_rx_time = None
+            for attempt in range(1, self.connect_retries + 1):
+                try:
+                    candidate = serial.Serial(
+                        target, self.baudrate,
+                        timeout=self.serial_timeout_s)
+                    with self.io_lock:
+                        self.serial_port = candidate
+                        self.is_connected = candidate.is_open
+                    self.get_logger().info(f"Serial connected: {target}")
+                    self._set_transport_status(f'SERIAL_OPEN:{target}')
+                    return self.is_connected
+                except serial.SerialException as exc:
+                    self.get_logger().warn(
+                        f"Attempt {attempt}: cannot open {target}: {exc}")
+                    time.sleep(0.1)
+
+            self._set_transport_status(f'SERIAL_OPEN_FAILED:{target}')
+            self.get_logger().error(f"Failed to open serial port {target}")
+            return False
+
+    def close(self, reason='requested'):
+        """Idempotently close the port and fail outstanding transactions."""
+        with self.connection_lock:
+            with self.io_lock:
+                port = self.serial_port
+                self.serial_port = None
+                self.is_connected = False
+                self.rx_ready.clear()
+                if port and port.is_open:
+                    try:
+                        port.close()
+                    except (serial.SerialException, OSError):
+                        pass
+        self._fail_pending(f'Serial disconnected: {reason}')
+        self._set_transport_status(f'SERIAL_DISCONNECTED:{reason}')
+        if port:
+            self.get_logger().info(
+                f"Serial port {getattr(port, 'name', '')} closed: {reason}")
     
     # ============================================================
     # TX
     # ============================================================
 
-    def send_bytes(self, payload: bytes) -> Optional[bytes]:
-        """Send a command to the motor controller"""
-        if not self.serial_port or not self.serial_port.is_open:
-            self.get_logger().error("Serial port is not open.")
-            return
-
+    def send_bytes(self, payload: bytes) -> bool:
+        """Atomically write one framed message and report delivery to pyserial."""
+        if not payload or len(payload) > 255:
+            self.get_logger().error('Refusing invalid serial payload length')
+            return False
+        frame = (self.startMarker + bytes([len(payload)]) + payload
+                 + self.endMarker)
         try:
-            self.serial_port.write(
-                self.startMarker + bytes([len(payload)]) + payload + self.endMarker
-                )
-            # self.get_logger().info(f"sending bytes: {payload}")
-        except serial.SerialException as e:
-            self.get_logger().error(f"Serial TX error: {e}")
+            with self.io_lock:
+                port = self.serial_port
+                if not port or not port.is_open:
+                    self.get_logger().error("Serial port is not open.")
+                    return False
+                written = port.write(frame)
+            if written != len(frame):
+                raise serial.SerialTimeoutException(
+                    f'partial serial write: {written}/{len(frame)} bytes')
+            return True
+        except (serial.SerialException, OSError) as exc:
+            self.get_logger().error(f"Serial TX error: {exc}")
+            self.close(reason=f'TX_ERROR:{exc}')
+            return False
         
     def on_manager_control(self, msg: DeviceStream):
+        expected = {DeviceStream.VEL: 6, DeviceStream.POS: 12}
+        if msg.predicate not in expected or len(msg.data) != expected[msg.predicate]:
+            self.get_logger().error(
+                f'Invalid manager control frame predicate={msg.predicate} '
+                f'length={len(msg.data)}')
+            return
+        if not all(math.isfinite(value) for value in msg.data):
+            self.get_logger().error('Invalid non-finite manager control frame')
+            return
         prefix = bytes([msg.predicate])
-        data = struct.pack("<" + "f" * len(msg.data), 
-                           *[float(x) for x in msg.data]) # convert to float32
+        data = struct.pack("<" + "f" * len(msg.data),
+                           *[float(x) for x in msg.data])
         self.send_bytes(prefix + data)
 
     # ============================================================
     # RX LOOP
     # ============================================================
 
+    def _set_transport_status(self, status):
+        if status == self._last_transport_status:
+            return
+        self._last_transport_status = status
+        msg = String()
+        msg.data = status
+        self.transport_status_pub.publish(msg)
+
+    def _record_rx_error(self, kind):
+        count = self.rx_errors.get(kind, 0) + 1
+        self.rx_errors[kind] = count
+        if count == 1 or count % 100 == 0:
+            self.get_logger().warn(f'Serial RX {kind}; count={count}')
+
+    def _fail_pending(self, reason):
+        with self.pending_lock:
+            entries = list(self.pending.values())
+            self.pending.clear()
+        for entry in entries:
+            future = entry['future']
+            if not future.done():
+                future.set_result({'success': False, 'response': reason})
+
+    def _mark_rx_ready(self, prefix):
+        # Fault/limit events can be emitted autonomously before the firmware has
+        # processed CONNECT. They prove only Teensy -> host communication. POS
+        # or ENC telemetry is gated by firmware pc_connected and therefore
+        # proves that the host -> Teensy CONNECT frame was processed as well.
+        if prefix not in stream_prefix:
+            return
+        self.last_rx_time = time.monotonic()
+        if not self.rx_ready.is_set():
+            self.rx_ready.set()
+            port = self.serial_port
+            name = getattr(port, 'port', self.configured_port)
+            self._set_transport_status(f'SERIAL_READY:{name}')
+
     def rx_loop(self):
-        while rclpy.ok():
-            if not self.serial_port or not self.serial_port.is_open:
+        while rclpy.ok() and not self.stop_event.is_set():
+            port = self.serial_port
+            if not port or not port.is_open:
                 time.sleep(0.1)
                 continue
-            # if not self.is_connected:
-            #     # Try reconnecting automatically
-            #     try:
-            #         self.connect('/dev/ttyACM0')
-            #     except Exception:
-            #         time.sleep(0.1)
-            #         continue
 
             try:
-                 # --- 1. Wait for start marker ---
-                b = self.serial_port.read(1)
+                # --- 1. Wait for start marker ---
+                b = port.read(1)
                 if not b or b != self.startMarker:
                     continue
 
                 # --- 2. Read payload length ---
-                length_bytes = self.serial_port.read(1)
+                length_bytes = port.read(1)
                 if len(length_bytes) != 1:
+                    self._record_rx_error('MISSING_LENGTH')
                     continue
 
                 length = length_bytes[0]
+                if length == 0:
+                    self._record_rx_error('ZERO_LENGTH')
+                    continue
 
                 # --- 3. Read payload (prefix + data) ---
-                payload = self.serial_port.read(length)
+                payload = port.read(length)
                 if len(payload) != length:
+                    self._record_rx_error('TRUNCATED_PAYLOAD')
                     continue
 
                 # --- 4. Validate end marker ---
-                end = self.serial_port.read(1)
+                end = port.read(1)
                 if end != self.endMarker:
+                    self._record_rx_error('BAD_END_MARKER')
                     continue
 
                 # --- 5. Dispatch ---
@@ -197,15 +325,15 @@ class SerialCommunication(Node):
                 elif prefix in response_prefix:
                     self.handle_device_response(prefix, payload[1:])
                 else:
-                    pass
-                    # self.get_logger().warn(f"Unknown prefix: {prefix}")
-                    # self.get_logger().warn(payload.decode('utf-8'))
+                    self._record_rx_error(f'UNKNOWN_PREFIX_{prefix}')
+                    continue
+                self._mark_rx_ready(prefix)
 
-            except (serial.SerialException, OSError, TypeError):
-                # Port can be closed mid-read (pyserial sets fd=None before
-                # is_open=False) during connect/disconnect. Drop back to the
-                # top-of-loop guard, which resumes once the port is (re)opened.
-                self.is_connected = False
+            except (struct.error, ValueError, IndexError) as exc:
+                self._record_rx_error(f'MALFORMED_FRAME:{type(exc).__name__}')
+            except (serial.SerialException, OSError, TypeError) as exc:
+                if port is self.serial_port:
+                    self.close(reason=f'RX_ERROR:{exc}')
                 time.sleep(0.1)
     
     # ============================================================
@@ -214,6 +342,9 @@ class SerialCommunication(Node):
 
     def handle_device_stream(self, prefix: int, body: bytes):
         # ENC = raw encoder counts (int32); POS/VEL = physical values (float32).
+        if len(body) != 24:
+            raise ValueError(
+                f'stream predicate={prefix} requires 24 bytes, got {len(body)}')
         fmt = "<6i" if prefix == DeviceStream.ENC else "<6f"
         values = struct.unpack(fmt, body)
 
@@ -224,6 +355,9 @@ class SerialCommunication(Node):
         self.state_pub.publish(msg)
 
     def handle_device_event(self, prefix: int, body: bytes):
+        if len(body) < 6:
+            raise ValueError(
+                f'event predicate={prefix} requires at least 6 state bytes')
         msg = DeviceEvent()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.predicate = prefix
@@ -314,14 +448,15 @@ class SerialCommunication(Node):
             entry = self.pending.pop(req_id, None)
 
         if not entry:
-            self.get_logger().warn("Unmatched response id={req_id}")
+            self.get_logger().warn(f"Unmatched response id={req_id.hex()}")
             return
 
         decoded = payload.decode("utf-8", errors="ignore")
-        entry["future"].set_result({
-            "success": not decoded.startswith("ERR"),
-            "response": decoded
-        })
+        if not entry["future"].done():
+            entry["future"].set_result({
+                "success": not decoded.startswith("ERR"),
+                "response": decoded
+            })
 
     # ============================================================
     # Service
@@ -330,21 +465,52 @@ class SerialCommunication(Node):
     def handle_device_command(self, request, response):
 
         if request.predicate == ManagerEvent.CONNECTION:
-            if self.serial_port is not None and self.serial_port.port == request.cmd:
-                self.send_bytes(bytes([request.predicate]))
-                self.close()
+            command = request.cmd.strip()
+            if command.lower() in ('disconnect', 'close', 'off'):
+                self.close(reason='service_request')
                 response.success = True
                 response.response = "Serial disconnected"
-            else:
-                self.connect(port='/dev/ttyACM0') # request.cmd
-                time.sleep(0.3)
-                self.send_bytes(bytes([request.predicate]))
-                response.success = self.is_connected
-                response.response = "Finished. See success flag"
-                # if self.is_connected:
-                #     response.response = f"Connected to {request.cmd}"
-                # else:
-                #     response.response = f"Failed to connect to {request.cmd}"
+                return response
+
+            # A Windows COM label from Slicer is descriptive only; the actual
+            # serial endpoint belongs to the WSL node parameter.
+            target = command if command.startswith('/dev/') \
+                else self.configured_port
+            was_open = bool(
+                self.serial_port and self.serial_port.is_open
+                and self.serial_port.port == target)
+            if not self.connect(port=target):
+                response.success = False
+                response.response = f"Failed to open {target}"
+                return response
+            if not self.rx_ready.is_set():
+                # Opening the Teensy's USB serial endpoint can reset it. Preserve
+                # the proven settle interval before sending the one-byte stream
+                # enable command, otherwise that command can be lost at startup.
+                if not was_open and self.serial_settle_s:
+                    time.sleep(self.serial_settle_s)
+                if not self.send_bytes(bytes([request.predicate])):
+                    response.success = False
+                    response.response = 'Serial opened but handshake TX failed'
+                    return response
+                if not self.rx_ready.wait(timeout=self.handshake_wait_s):
+                    # Driver power may intentionally be off at this stage. Keep
+                    # the port open, but do not declare it ready: the manager's
+                    # transport gate continues to inhibit all motion until a
+                    # complete valid firmware frame arrives.
+                    self._set_transport_status(
+                        f'SERIAL_AWAITING_RX:{target}')
+                    response.success = True
+                    response.response = (
+                        f'Serial open; awaiting valid device frame: {target}')
+                    return response
+            response.success = True
+            response.response = f"Serial ready: {target}"
+            return response
+
+        if not self.is_connected or not self.rx_ready.is_set():
+            response.success = False
+            response.response = 'Serial transport is not ready'
             return response
 
         req_id = uuid.uuid4().bytes  # 16 bytes
@@ -362,9 +528,14 @@ class SerialCommunication(Node):
         with self.pending_lock:
             self.pending[req_id] = {
                 "future": future,
-                "deadline": time.time() + self.timeout_sec
+                "deadline": time.monotonic() + self.timeout_sec
             }
-        self.send_bytes(payload)
+        if not self.send_bytes(payload):
+            with self.pending_lock:
+                self.pending.pop(req_id, None)
+            response.success = False
+            response.response = 'Serial TX failed'
+            return response
 
         # Poll for completion instead of rclpy.spin_until_future_complete(). The
         # future is resolved by handle_device_response() on the rx thread. Nesting
@@ -372,8 +543,8 @@ class SerialCommunication(Node):
         # executor when a command gets no firmware ack (e.g. START_MOTOR/STOP_MOTOR
         # have no firmware handler) — it wedges on_manager_control (velocity TX)
         # and check_timeouts forever. A plain timed poll can't deadlock.
-        deadline = time.time() + self.timeout_sec
-        while not future.done() and time.time() < deadline:
+        deadline = time.monotonic() + self.timeout_sec
+        while not future.done() and time.monotonic() < deadline:
             time.sleep(0.005)
 
         with self.pending_lock:
@@ -394,27 +565,34 @@ class SerialCommunication(Node):
     # ============================================================
 
     def check_timeouts(self):
-        now = time.time()
+        now = time.monotonic()
         expired = []
 
         with self.pending_lock:
-            for req_id, entry in self.pending.items():
+            for req_id, entry in list(self.pending.items()):
                 if now > entry["deadline"]:
-                    entry["future"].set_result({
-                        "success": False,
-                        "response": "Timeout"
-                    })
-                    expired.append(req_id)
+                    expired.append(self.pending.pop(req_id))
 
-            for req_id in expired:
-                del self.pending[req_id]
+        for entry in expired:
+            if not entry["future"].done():
+                entry["future"].set_result({
+                    "success": False,
+                    "response": "Timeout"
+                })
+
+    def destroy_node(self):
+        self.stop_event.set()
+        self.close(reason='node_shutdown')
+        if self.rx_thread.is_alive():
+            self.rx_thread.join(timeout=max(0.2, 2 * self.serial_timeout_s))
+        return super().destroy_node()
 
 def main():
     rclpy.init()
 
     node = SerialCommunication()
 
-    executor = MultiThreadedExecutor(num_threads=2)
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
 
     try:
