@@ -107,7 +107,7 @@ def test_serial_writes_are_atomic_across_threads():
                for frame in port.frames)
 
 
-def test_close_fails_pending_request_and_publishes_status():
+def test_close_fails_pending_request_and_publishes_status(monkeypatch):
     statuses = []
     future = Future()
     fake = SimpleNamespace(
@@ -127,6 +127,8 @@ def test_close_fails_pending_request_and_publishes_status():
         fake, reason)
     fake._set_transport_status = (
         lambda status: SerialCommunication._set_transport_status(fake, status))
+    monkeypatch.setattr(
+        'control_interface_py.device_serial_com.rclpy.ok', lambda: True)
 
     SerialCommunication.close(fake, reason='test')
 
@@ -261,3 +263,13 @@ def test_connection_disconnect_is_explicit_not_a_toggle():
 
     assert response.success is True
     assert closed == ['service_request']
+
+
+def test_shutdown_stop_is_direct_and_does_not_expect_an_ack():
+    sent = []
+    fake = SimpleNamespace(
+        serial_port=SimpleNamespace(is_open=True),
+        send_bytes=lambda payload: sent.append(payload) or True)
+
+    assert SerialCommunication._send_shutdown_stop(fake) is True
+    assert sent == [bytes([ManagerEvent.STOP_MOTOR])]

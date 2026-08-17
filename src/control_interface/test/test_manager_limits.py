@@ -5,7 +5,8 @@ from builtin_interfaces.msg import Time
 from control_interface.msg import (
     ControlStream, DeviceEvent, DeviceStream, ManagerEvent)
 from control_interface.srv import DeviceCmd
-from control_interface_py.manager import ControlManager, parse_fault_status
+from control_interface_py.manager import (
+    ControlManager, parse_driver_diagnostic, parse_fault_status)
 
 
 def manager(last_pos):
@@ -377,6 +378,106 @@ def test_manager_fault_status_parser_accepts_encoder_startup_latch():
     assert status['latched_mask'] == 0x12
     assert status['enabled_mask'] == 0
     assert status['faults'] == [0, 7, 0, 0, 7, 0]
+
+
+def test_driver_diagnostic_parser_requires_matching_axis_and_real_ack():
+    result = parse_driver_diagnostic(
+        'OK_DRIVER_UART,V1,A=4,S=K,F=0,N=1,R=214C31',
+        expected_axis=4)
+
+    assert result['axis'] == 4
+    assert result['response'] == b'!L1'
+    with pytest.raises(ValueError, match='expected 3'):
+        parse_driver_diagnostic(result['raw'], expected_axis=3)
+    with pytest.raises(ValueError, match='invalid acknowledgement'):
+        parse_driver_diagnostic(
+            'OK_DRIVER_UART,V1,A=4,S=K,F=0,N=1,R=',
+            expected_axis=4)
+
+
+def test_all_driver_uart_probes_are_required():
+    calls = []
+    obj = object.__new__(ControlManager)
+
+    def call(predicate, timeout=1.5, cmd=''):
+        calls.append((predicate, timeout, cmd))
+        axis = int(cmd)
+        return True, (
+            f'OK_DRIVER_UART,V1,A={axis},S=K,F=0,N=1,R=214C31')
+
+    obj._call_device_sync = call
+
+    ok, message = ControlManager._probe_all_drivers(obj)
+
+    assert ok is True
+    assert message == 'all 6 driver UART probes passed'
+    assert [call[2] for call in calls] == list('012345')
+
+
+def test_driver_uart_probe_failure_identifies_axis():
+    obj = object.__new__(ControlManager)
+    obj._call_device_sync = lambda predicate, timeout=1.5, cmd='': (
+        (False, 'ERR_DRIVER_UART,V1,A=2,S=0,F=1,N=3,R=')
+        if cmd == '2' else
+        (True, f'OK_DRIVER_UART,V1,A={cmd},S=K,F=0,N=1,R=214C31'))
+
+    ok, message = ControlManager._probe_all_drivers(obj)
+
+    assert ok is False
+    assert 'axis 2' in message
+
+
+def test_graceful_shutdown_is_idempotent_and_requests_stop(monkeypatch):
+    published = []
+    requests = []
+    obj = object.__new__(ControlManager)
+    obj._shutdown_started = False
+    obj._driver_power_qualified = True
+    obj.active_source = 'slicer'
+    obj.locked_source = 'autonomy'
+    obj.control_mode = ManagerEvent.JOINT_VEL
+    obj._command_zero_velocity = lambda: published.append('zero')
+    obj.device_client = SimpleNamespace(
+        service_is_ready=lambda: True,
+        call_async=lambda request: requests.append(request) or object())
+    obj.get_logger = lambda: SimpleNamespace(
+        info=lambda message: None, warn=lambda message: None)
+    monkeypatch.setattr('control_interface_py.manager.rclpy.ok', lambda: True)
+
+    first = ControlManager.initiate_shutdown(obj)
+    second = ControlManager.initiate_shutdown(obj)
+
+    assert first is not None
+    assert second is None
+    assert published == ['zero']
+    assert len(requests) == 1
+    assert requests[0].predicate == ManagerEvent.STOP_MOTOR
+    assert obj.control_mode == ManagerEvent.NONE
+    assert obj.active_source is None
+    assert obj.locked_source is None
+    assert obj._driver_power_qualified is False
+
+
+def test_shutdown_with_invalid_ros_context_defers_to_serial_stop(monkeypatch):
+    published = []
+    obj = object.__new__(ControlManager)
+    obj._shutdown_started = False
+    obj._driver_power_qualified = True
+    obj.active_source = 'slicer'
+    obj.locked_source = None
+    obj.control_mode = ManagerEvent.JOINT_VEL
+    obj._command_zero_velocity = lambda: published.append('zero')
+    obj.device_client = SimpleNamespace(
+        service_is_ready=lambda: pytest.fail(
+            'invalid ROS context must not touch the service client'))
+    monkeypatch.setattr('control_interface_py.manager.rclpy.ok', lambda: False)
+
+    future = ControlManager.initiate_shutdown(obj)
+
+    assert future is None
+    assert published == []
+    assert obj.control_mode == ManagerEvent.NONE
+    assert obj._driver_power_qualified is False
 
 
 def _command_test_manager(monkeypatch):

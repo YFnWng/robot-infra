@@ -47,6 +47,46 @@ def parse_fault_status(response: str) -> dict:
         'raw': response,
     }
 
+
+def parse_driver_diagnostic(response: str, expected_axis=None) -> dict:
+    """Parse a successful firmware H response and validate its driver ACK."""
+    fields = response.strip().split(',')
+    if len(fields) != 7 or fields[0] != 'OK_DRIVER_UART' or fields[1] != 'V1':
+        raise ValueError(f'malformed driver diagnostic response: {response!r}')
+    values = {}
+    for field in fields[2:]:
+        if '=' not in field:
+            raise ValueError(f'malformed driver diagnostic field: {field!r}')
+        key, value = field.split('=', 1)
+        values[key] = value
+    if set(values) != {'A', 'S', 'F', 'N', 'R'}:
+        raise ValueError(f'incomplete driver diagnostic response: {response!r}')
+    axis = int(values['A'])
+    failure = int(values['F'])
+    attempts = int(values['N'])
+    response_hex = values['R']
+    if expected_axis is not None and axis != expected_axis:
+        raise ValueError(
+            f'driver diagnostic returned axis {axis}, expected {expected_axis}')
+    if values['S'] != 'K' or failure != 0 or attempts < 1:
+        raise ValueError(
+            f'driver diagnostic did not complete cleanly: {response!r}')
+    if (not response_hex or len(response_hex) % 2
+            or any(character not in '0123456789abcdefABCDEF'
+                   for character in response_hex)):
+        raise ValueError(
+            f'driver diagnostic has invalid acknowledgement: {response!r}')
+    return {
+        'version': 1,
+        'axis': axis,
+        'stage': values['S'],
+        'failure': failure,
+        'attempts': attempts,
+        'response': bytes.fromhex(response_hex),
+        'raw': response,
+    }
+
+
 class ControlManager(Node):
 
     def __init__(self):
@@ -115,6 +155,7 @@ class ControlManager(Node):
         self._last_safety_status = None
         self._transport_ready = False
         self._driver_power_qualified = False
+        self._shutdown_started = False
         self._qualification_lock = threading.Lock()
         self._pos_history = deque(maxlen=2000)
         self._enc_history = deque(maxlen=2000)
@@ -586,6 +627,22 @@ class ControlManager(Node):
             return False, f'predicate {predicate} failed: {exc}'
         return bool(result.success), result.response
 
+    def _probe_all_drivers(self):
+        for axis in range(6):
+            ok, message = self._call_device_sync(
+                ManagerEvent.DRIVER_DIAGNOSTIC,
+                timeout=2.0,
+                cmd=str(axis))
+            if not ok:
+                return False, (
+                    f'driver UART probe failed on axis {axis}: {message}')
+            try:
+                parse_driver_diagnostic(message, expected_axis=axis)
+            except (KeyError, TypeError, ValueError) as exc:
+                return False, (
+                    f'driver UART probe invalid on axis {axis}: {exc}')
+        return True, 'all 6 driver UART probes passed'
+
     def qualify_driver_power(self, request, response):
         """Explicitly qualify a driver power-up before motion is permitted."""
         del request
@@ -674,6 +731,12 @@ class ControlManager(Node):
                         f'post-reset feedback qualification failed: {reason}')
                     return response
 
+            probes_ok, probe_message = self._probe_all_drivers()
+            if not probes_ok:
+                response.success = False
+                response.message = probe_message
+                return response
+
             ok, message = self._call_device_sync(ManagerEvent.FAULT_STATUS)
             if not ok:
                 response.success = False
@@ -695,8 +758,8 @@ class ControlManager(Node):
             self._publish_safety_status(force=True)
             response.success = True
             response.message = (
-                'driver power qualified: stable POS/ENC, motors disabled, '
-                'firmware fault status clean')
+                'driver power qualified: stable POS/ENC, all 6 driver UARTs '
+                'responsive, motors disabled, firmware fault status clean')
             return response
         except (KeyError, TypeError, ValueError) as exc:
             response.success = False
@@ -706,6 +769,42 @@ class ControlManager(Node):
             if not self._driver_power_qualified:
                 self._publish_safety_status(force=True)
             self._qualification_lock.release()
+
+    def initiate_shutdown(self):
+        """Best-effort zero and firmware STOP before ROS teardown."""
+        if self._shutdown_started:
+            return None
+        self._shutdown_started = True
+        self._driver_power_qualified = False
+        self.active_source = None
+        self.locked_source = None
+        self.control_mode = ManagerEvent.NONE
+        # The default ROS SIGINT handler may invalidate the context before
+        # executor.spin() returns. ROS publishers and clients are unusable in
+        # that case; the serial node still owns the direct firmware STOP barrier.
+        if not rclpy.ok():
+            return None
+        try:
+            self._command_zero_velocity()
+        except Exception as exc:
+            self.get_logger().warn(
+                f'could not publish shutdown zero velocity: {exc}')
+        if not self.device_client.service_is_ready():
+            self.get_logger().warn(
+                'device service unavailable during graceful shutdown; '
+                'serial-node and firmware watchdog stops remain active')
+            return None
+        request = DeviceCmd.Request()
+        request.predicate = ManagerEvent.STOP_MOTOR
+        try:
+            future = self.device_client.call_async(request)
+        except Exception as exc:
+            self.get_logger().warn(
+                f'failed to request firmware STOP during shutdown: {exc}')
+            return None
+        self.get_logger().info(
+            'graceful shutdown: zero velocity and firmware STOP requested')
+        return future
 
     def _command_zero_velocity(self):
         out = DeviceStream()
@@ -895,10 +994,18 @@ def main():
 
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
+        node.initiate_shutdown()
+        # Let the service request leave this process before its executor and DDS
+        # entities are destroyed. The serial node also emits a direct STOP frame
+        # during its own teardown.
+        time.sleep(0.05)
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

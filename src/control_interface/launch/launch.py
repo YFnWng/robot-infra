@@ -10,7 +10,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def _default_limits():
     """Path to the shared catheter limits YAML (lives in the automation
     package). Resolved at launch time; empty string if automation isn't
-    installed, which disables the manager's joint-limit clamp."""
+    installed, which makes the production manager fail closed."""
     try:
         from ament_index_python.packages import get_package_share_directory
         return os.path.join(
@@ -22,7 +22,7 @@ def _default_limits():
 def generate_launch_description():
     return LaunchDescription([
         # The manager hard-clamps every forwarded command to this catheter
-        # profile (bounds automation AND manual teleop). limits_file:="" disables.
+        # profile (bounds automation AND manual teleop). Missing limits fail closed.
         DeclareLaunchArgument("limits_file", default_value=_default_limits()),
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("serial_port", default_value="/dev/ttyACM0"),

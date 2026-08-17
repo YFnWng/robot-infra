@@ -192,7 +192,7 @@ class SerialCommunication(Node):
                         pass
         self._fail_pending(f'Serial disconnected: {reason}')
         self._set_transport_status(f'SERIAL_DISCONNECTED:{reason}')
-        if port:
+        if port and rclpy.ok():
             self.get_logger().info(
                 f"Serial port {getattr(port, 'name', '')} closed: {reason}")
     
@@ -246,6 +246,8 @@ class SerialCommunication(Node):
         if status == self._last_transport_status:
             return
         self._last_transport_status = status
+        if not rclpy.ok():
+            return
         msg = String()
         msg.data = status
         self.transport_status_pub.publish(msg)
@@ -335,6 +337,10 @@ class SerialCommunication(Node):
                 if port is self.serial_port:
                     self.close(reason=f'RX_ERROR:{exc}')
                 time.sleep(0.1)
+            except Exception:
+                if not rclpy.ok() or self.stop_event.is_set():
+                    break
+                raise
     
     # ============================================================
     # Handlers
@@ -580,7 +586,28 @@ class SerialCommunication(Node):
                     "response": "Timeout"
                 })
 
+    def _send_shutdown_stop(self):
+        if not self.serial_port or not self.serial_port.is_open:
+            return False
+        # A one-byte command intentionally has no request UUID, so firmware
+        # executes STOP without returning an acknowledgement that could become
+        # an unmatched response while this node is tearing down.
+        return self.send_bytes(bytes([ManagerEvent.STOP_MOTOR]))
+
     def destroy_node(self):
+        # This node owns the physical USB link, so it is the final shutdown
+        # barrier if the manager service path is already disappearing.
+        try:
+            if self._send_shutdown_stop():
+                message = 'shutdown STOP frame sent directly to firmware'
+                if rclpy.ok():
+                    self.get_logger().info(message)
+                else:
+                    print(message, flush=True)
+                time.sleep(0.05)
+        except Exception as exc:
+            self.get_logger().error(
+                f'failed to send shutdown STOP frame: {exc}')
         self.stop_event.set()
         self.close(reason='node_shutdown')
         if self.rx_thread.is_alive():
@@ -597,10 +624,13 @@ def main():
 
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
