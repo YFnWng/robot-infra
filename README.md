@@ -65,6 +65,13 @@ ros2 topic echo /manager/safety_status control_interface/msg/ManagerEvent \
 Only `MANAGER_READY` permits motion. Do not bypass an inhibited state by
 calling the low-level device service unless performing deliberate diagnostics.
 
+The normal Slicer teleoperation launch does not depend on the experimental
+shape estimator:
+
+```bash
+ros2 launch teleop slicer.launch.py
+```
+
 ## Live catheter shape estimation
 
 Use a Python 3.10 virtual environment that can also see the ROS 2 Humble
@@ -79,13 +86,17 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 cd robot-infra
 python -m colcon build --packages-select automation teleop --symlink-install
 source install/setup.bash
-ros2 launch teleop slicer.launch.py
+ros2 launch teleop slicer.launch.py enable_state_estimator:=true
 ```
 
 The launch starts the Slicer bridge on TCP 18944 and an isolated tracking
 bridge on TCP 18945. In Slicer, connect the main IGTL interface, send the
 shape configuration, and start the coil simulator. Internal estimator values
 use SI units; the OpenIGTLink boundary uses RAS mm.
+
+The estimator launch uses `~/state_estimation`, `~/cr-common`, and
+`~/cr-venv` by default. Override these locations with
+`STATE_ESTIMATION_PATH`, `CR_COMMON_PATH`, and `CR_VENV`.
 
 ## Serial device
 
