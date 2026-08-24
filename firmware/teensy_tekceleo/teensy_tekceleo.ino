@@ -7,6 +7,7 @@
 #include <cmath>
 #include "position_move_tracker.h"
 #include "stall_detector.h"
+#include "symmetric_module_kinematics.h"
 
 // Teensy 4.0 pin functionalities
 // Serial RX: 0, 7, 15, 16, 21, 25, 28
@@ -111,30 +112,29 @@ int32_t RawEncCounts[numHWSerials];
 // Joint transmission, joint/motor, positive direction: right-hand or forward
 constexpr float linRate = 67.319841f/20.0f; // mm/rev
 constexpr float rotRate = 0.375f/5.0f; // rev/rev
-constexpr float catheterBendRate = -1.190625f/5.0f; // mm/rev, gives max joint V=1mm/s, ask AV
-constexpr float sheathBendRate = 0.375f/5.0f; // rev/rev
-constexpr float jointPRate[numHWSerials] = { linRate/360.0f, rotRate, catheterBendRate/360.0f, 
-                                            linRate/360.0f, rotRate, sheathBendRate }; // mm/deg, deg/deg
-constexpr float jointVRate[numHWSerials] = { linRate/60.0f, rotRate/60.0f*360.0f, catheterBendRate/60.0f, 
-                                            linRate/60.0f, rotRate/60.0f*360.0f, sheathBendRate/60.0f*360.0f }; // mm*min/rev*s, deg*min/rev*s
-constexpr float catheterBendUB = 20.8f;
-constexpr float catheterBendLB = 0.0f;
-constexpr float sheathBendUB = 360.0f;
-constexpr float sheathBendLB = -360.0f;
-
+constexpr float bendRate = 0.375f/5.0f; // rev/rev; identical differential handles
+constexpr float jointPRate[numHWSerials] = {
+    linRate/360.0f, rotRate, bendRate,
+    linRate/360.0f, rotRate, bendRate }; // mm/deg, deg/deg
+constexpr float jointVRate[numHWSerials] = {
+    linRate/60.0f, rotRate/60.0f*360.0f, bendRate/60.0f*360.0f,
+    linRate/60.0f, rotRate/60.0f*360.0f, bendRate/60.0f*360.0f };
+constexpr float bendUB = 360.0f;
+constexpr float bendLB = -360.0f;
 // State Variables
 int limitState[5] = { 0, 0, 0, 0, 0 };
 // long targetCounts[numHWSerials];
 // long targetHz[numHWSerials];
 float targetPos[numHWSerials];
+float logicalTargetPos[numHWSerials];
 uint16_t targetDeg[numHWSerials];
 float requestedPosition[numHWSerials];
 bool requestedPositionValid = false;
-float currentPos[numHWSerials]; // decoupled
-float previousPos[numHWSerials]; // decoupled
-float currentCatheterLMPos = 0.0f; // coupled
-float currentSheathBendPos = 0.0f; // coupled
+float currentPos[numHWSerials]; // physical motor-axis positions
+float previousPos[numHWSerials];
+float currentLogicalPos[numHWSerials];
 float targetVel[numHWSerials];
+float logicalTargetVel[numHWSerials];
 float currentVel[numHWSerials];
 uint16_t targetRPM[numHWSerials];
 uint16_t currentRPM[numHWSerials];
@@ -465,9 +465,9 @@ void procPCBytes() {
           if (PCBytes_len != 1 + 6 * sizeof(float)) break;
           cancelPositionMove(true);
           newJointPosCmd = false;
-          memcpy(targetVel, receivedPCBytes + 1, 24); // float size 4
-          targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
-          targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
+          memcpy(logicalTargetVel, receivedPCBytes + 1, 24); // float size 4
+          SymmetricModuleKinematics::logicalToMotor(
+              logicalTargetVel, targetVel);
           newJointVelCmd = true;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             if (!isVelCmdValid(axis)) {
@@ -501,9 +501,9 @@ void procPCBytes() {
             break;
           }
           newJointVelCmd = false;
-          memcpy(targetPos, receivedPCBytes + 1, 24); // float size 4
-          targetPos[0] -= targetPos[2]; // decouple lm and bend for catheter
-          targetPos[5] += targetPos[4]; // decouple rot and bend for sheath
+          memcpy(logicalTargetPos, receivedPCBytes + 1, 24); // float size 4
+          SymmetricModuleKinematics::logicalToMotor(
+              logicalTargetPos, targetPos);
           float positionSpeed[numHWSerials];
           memcpy(positionSpeed, receivedPCBytes + 1 + 24, 24);
 
@@ -578,8 +578,7 @@ void procPCBytes() {
             previousPos[axis] = 0.0f;
             currentVel[axis] = 0.0f;
           }
-          currentCatheterLMPos = 0.0f;
-          currentSheathBendPos = 0.0f;
+          memset(currentLogicalPos, 0, sizeof(currentLogicalPos));
           lastEncoderReadMs = millis();
           sendAckIfPending();
           break;
@@ -705,47 +704,57 @@ void procPCBytes() {
 static inline bool isVelCmdValid(uint8_t axis) {
   switch (axis) {
     case 0: {
-      return !((limitState[2] && (limitState[1] || targetVel[0] < 0.0f)) ||
-              (limitState[1] && targetVel[3] > 0.0f));
+      return !((limitState[2] &&
+                (limitState[1] || logicalTargetVel[0] < 0.0f)) ||
+               (limitState[1] && logicalTargetVel[3] > 0.0f));
     }
     case 2: {
-      return !((limitState[3] < 0 && targetVel[2] < 0.0f) || 
-              (limitState[3] > 0 && targetVel[2] > 0.0f));
+      return !((limitState[3] < 0 && logicalTargetVel[2] < 0.0f) ||
+               (limitState[3] > 0 && logicalTargetVel[2] > 0.0f));
     }
     case 3: {
-      return !((limitState[0] && (limitState[1] || targetPos[3] > 0.0f)) ||
-              (limitState[1] && targetVel[3] < 0.0f));
+      return !((limitState[0] &&
+                (limitState[1] || logicalTargetVel[3] > 0.0f)) ||
+               (limitState[1] && logicalTargetVel[3] < 0.0f));
     }
     case 5: {
-      return !((limitState[4] < 0 && targetVel[5] < 0.0f) || 
-              (limitState[4] > 0 && targetVel[5] > 0.0f));
+      return !((limitState[4] < 0 && logicalTargetVel[5] < 0.0f) ||
+               (limitState[4] > 0 && logicalTargetVel[5] > 0.0f));
     }
-    default: { return true;}
+    default: { return true; }
   }
 }
-
 static inline bool isPosCmdValid(uint8_t axis) {
   switch (axis) {
     case 0: {
-      return !((limitState[2] && (limitState[1] || targetPos[0] < currentPos[0])) ||
-              (limitState[1] && targetPos[0] > currentPos[0]));
+      return !((limitState[2] &&
+                (limitState[1] ||
+                 logicalTargetPos[0] < currentLogicalPos[0])) ||
+               (limitState[1] &&
+                logicalTargetPos[0] > currentLogicalPos[0]));
     }
     case 2: {
-      return !((limitState[3] < 0 && targetPos[2] < currentPos[2]) || 
-              (limitState[3] > 0 && targetPos[2] > currentPos[2]));
+      return !((limitState[3] < 0 &&
+                logicalTargetPos[2] < currentLogicalPos[2]) ||
+               (limitState[3] > 0 &&
+                logicalTargetPos[2] > currentLogicalPos[2]));
     }
     case 3: {
-      return !((limitState[0] && (limitState[1] || targetPos[3] > currentPos[3])) ||
-              (limitState[1] && targetPos[3] < currentPos[3]));
+      return !((limitState[0] &&
+                (limitState[1] ||
+                 logicalTargetPos[3] > currentLogicalPos[3])) ||
+               (limitState[1] &&
+                logicalTargetPos[3] < currentLogicalPos[3]));
     }
     case 5: {
-      return !((limitState[4] < 0 && targetPos[5] < currentSheathBendPos) || 
-              (limitState[4] > 0 && targetPos[5] > currentSheathBendPos));
+      return !((limitState[4] < 0 &&
+                logicalTargetPos[5] < currentLogicalPos[5]) ||
+               (limitState[4] > 0 &&
+                logicalTargetPos[5] > currentLogicalPos[5]));
     }
-    default: { return true;}
+    default: { return true; }
   }
 }
-
 void procHWBytes() {
   for (uint8_t i = 0; i < numHWSerials; i++) {
     if (newHWMsg[i]) {
@@ -796,13 +805,11 @@ void readRawEncoderCounts(int32_t counts[numHWSerials]) {
 
 void sendEncoderFeedback() {
   if (pc_connected && Serial.availableForWrite() >= 56 && Serial.available() == 0) {
-    // POS frame: physical joint positions (coupling + transmission applied)
+    // POS frame: logical joint positions after differential decoupling.
     sendingPCBytes[0] = PCStartMarker;
     sendingPCBytes[1] = 25;
     sendingPCBytes[2] = POS;
-    memcpy(sendingPCBytes + 3, &currentCatheterLMPos, 4); // 1*float
-    memcpy(sendingPCBytes + 7, &currentPos[1], 16); // 4*float
-    memcpy(sendingPCBytes + 23, &currentSheathBendPos, 4); // 1*float
+    memcpy(sendingPCBytes + 3, currentLogicalPos, 24); // 6*float
     sendingPCBytes[27] = PCEndMarker;
     Serial.write(sendingPCBytes, 28);
 
@@ -884,8 +891,8 @@ bool readEncoders() {
       currentPos[axis] = EncCounts[axis] * EncRes * jointPRate[axis];
       currentVel[axis] = (currentPos[axis] - previousPos[axis]) / elapsed_s;
     }
-    currentCatheterLMPos = currentPos[0] + currentPos[2];
-    currentSheathBendPos = currentPos[5] - currentPos[4];
+    SymmetricModuleKinematics::motorToLogical(
+        currentPos, currentLogicalPos);
     lastEncoderReadMs = now;
   }
 
@@ -921,9 +928,9 @@ void checkLimitSwitches() {
   // }
 
   // catheter bending
-  if (currentPos[2] >= catheterBendUB) {
+  if (currentLogicalPos[2] >= bendUB) {
       temp = 1;
-  } else if (currentPos[2] <= catheterBendLB) {
+  } else if (currentLogicalPos[2] <= bendLB) {
       temp = -1;
   } else {
       temp = 0;
@@ -937,9 +944,9 @@ void checkLimitSwitches() {
   }
 
   // sheath bending
-  if (currentPos[5] >= sheathBendUB) {
+  if (currentLogicalPos[5] >= bendUB) {
       temp = 1;
-  } else if (currentPos[5] <= sheathBendLB) {
+  } else if (currentLogicalPos[5] <= bendLB) {
       temp = -1;
   } else {
       temp = 0;
@@ -981,10 +988,10 @@ void reportLimitStates() {
   sendingPCBytes[3] = TRIGGER_N;
 
   // catheter bending
-  if (currentPos[2] >= catheterBendUB) {
+  if (currentLogicalPos[2] >= bendUB) {
       limitState[3] = 1;
       sendingPCBytes[4] = TRIGGER_P;
-  } else if (currentPos[2] <= catheterBendLB) {
+  } else if (currentLogicalPos[2] <= bendLB) {
       limitState[3] = -1;
       sendingPCBytes[4] = TRIGGER_M;
   } else {
@@ -993,10 +1000,10 @@ void reportLimitStates() {
   }
 
   // sheath bending
-  if (currentPos[5] >= sheathBendUB) {
+  if (currentLogicalPos[5] >= bendUB) {
       limitState[4] = 1;
       sendingPCBytes[5] = TRIGGER_P;
-  } else if (currentPos[5] <= sheathBendLB) {
+  } else if (currentLogicalPos[5] <= bendLB) {
       limitState[4] = -1;
       sendingPCBytes[5] = TRIGGER_M;
   } else {
@@ -1011,13 +1018,8 @@ void reportLimitStates() {
 }
 
 uint8_t coupledAxis(uint8_t axis) {
-  if (axis == 0) return 2;
-  if (axis == 2) return 0;
-  if (axis == 4) return 5;
-  if (axis == 5) return 4;
-  return 255;
+  return SymmetricModuleKinematics::coupledAxis(axis);
 }
-
 static inline uint8_t* writeU16LE(uint8_t* p, uint16_t value) {
   *p++ = static_cast<uint8_t>(value & 0xff);
   *p++ = static_cast<uint8_t>((value >> 8) & 0xff);

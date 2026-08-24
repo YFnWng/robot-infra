@@ -38,9 +38,9 @@ JOINTS = [
 ]
 TARGET_JOINTS = {"catheter": [0, 1, 2], "sheath": [3, 4, 5]}
 ROT_JOINTS = {1, 4}   # rotation joints (deg, wrap-around): catheter_rot, sheath_rot
-DEFAULT_MAX_SPEEDS = [5.0, 30.0, 1.0, 5.0, 30.0, 30.0]
+DEFAULT_MAX_SPEEDS = [5.0, 30.0, 30.0, 5.0, 30.0, 30.0]
 DEFAULT_MIN_SPEEDS = [0.0] * 6
-DEFAULT_PREFLIGHT_POSITION_DRIFT = [0.1, 1.0, 0.1, 0.1, 1.0, 1.0]
+DEFAULT_PREFLIGHT_POSITION_DRIFT = [0.1, 1.0, 1.0, 0.1, 1.0, 1.0]
 
 
 def collection_marker_qos() -> QoSProfile:
@@ -189,7 +189,7 @@ class CollectionNode(Node):
         self.declare_parameter('return_to_zero', False)
         self.declare_parameter('return_position_speed_factor', 0.5)
         self.declare_parameter(
-            'return_position_tolerance', [0.1, 0.5, 0.05, 0.1, 0.5, 0.5])
+            'return_position_tolerance', [0.1, 0.5, 0.5, 0.1, 0.5, 0.5])
         self.declare_parameter('return_position_settle_s', 0.2)
         self.declare_parameter('return_position_mode_delay_s', 0.1)
         self._return_control_mode = str(

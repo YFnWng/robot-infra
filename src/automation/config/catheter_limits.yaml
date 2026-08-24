@@ -2,9 +2,8 @@
 #
 # Joint order (6): [catheter_lin, catheter_rot, catheter_bend,
 #                   sheath_lin,   sheath_rot,   sheath_bend]
-# Units (match the Teensy firmware physical joints):
-#   *_lin : mm       *_rot : deg
-#   catheter_bend : mm        sheath_bend : deg
+# Units (match the Teensy firmware logical joints):
+#   *_lin : mm       *_rot : deg       *_bend : deg
 #
 #   pos_lower / pos_upper : position range the generator sweeps (per joint).
 #   vel_min               : per-joint minimum reliable nonzero speed. Zero is
@@ -13,28 +12,19 @@
 #                           commanded velocity in the collection node.
 #
 # Select a profile with the `catheter` param and point `limits_file` here.
-# Known firmware bounds: catheter_bend 0..20.8 mm, sheath_bend -360..360 deg.
+# Known firmware bounds: both bending joints -360..360 deg.
 # NOTE: units are mm/deg (NOT metres) — the joint_vel command the firmware
 # expects is mm/s and deg/s.
 
 catheters:
   default:
-    pos_lower: [-250.0,   -360.0, 0.0,   -100.0,   -360.0, -360.0]
-    pos_upper: [250.0,  360.0, 20.8,  100.0,  360.0,  360.0]   # TODO: real lin/rot ranges
+    pos_lower: [-250.0, -360.0, -360.0, -100.0, -360.0, -360.0]
+    pos_upper: [ 250.0,  360.0,  360.0,  100.0,  360.0,  360.0]   # TODO: real lin/rot ranges
     vel_min:   [0.0,     0.0,  0.0,   0.0,     0.0,    0.0]
-    vel_max:   [5.0,    30.0,  1.0,   5.0,    30.0,   30.0]
-
-  # imricor_test:
-  #   pos_lower: [0.0,   -180.0, 0.0,   0.0,   -180.0, -360.0]
-  #   pos_upper: [40.0,   180.0, 10.0,  80.0,   180.0,  360.0]
-  #   # catheter_bend is coupled into the linear motor in firmware. Keeping its
-  #   # nonzero speed at 1 mm/s prevents that motor from re-entering the
-  #   # unreliable sub-18-RPM region while bending alone.
-  #   vel_min:   [2.0,      7.0,  1.0,   0.0,     0.0,    0.0]
-  #   vel_max:   [10.0,    40.0,  1.0,   4.0,    25.0,   25.0]
+    vel_max:   [5.0, 30.0, 30.0, 5.0, 30.0, 30.0]
 
   imricor_test:
-    pos_lower: [-50.0,   -360.0, 0.0,   -50.0,   -360.0, -360.0]
-    pos_upper: [50.0,  360.0, 20.8,  50.0,  360.0,  360.0]
-    vel_min:   [0.0,     0.0,  0.0,   0.0,     0.0,    0.0]
-    vel_max:   [15.0,    60.0,  1.0,   15.0,    60.0,   60.0]
+    pos_lower: [-50.0, -360.0, -360.0, -50.0, -360.0, -360.0]
+    pos_upper: [ 50.0,  360.0,  360.0,  50.0,  360.0,  360.0]
+    vel_min:   [  0.0,    0.0,    0.0,   0.0,    0.0,    0.0]
+    vel_max:   [ 15.0,   60.0,   60.0,  15.0,   60.0,   60.0]

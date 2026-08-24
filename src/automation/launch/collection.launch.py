@@ -133,7 +133,7 @@ def generate_launch_description():
             'return_position_speed_factor', default_value='0.5'),
         DeclareLaunchArgument(
             'return_position_tolerance',
-            default_value='0.1,0.5,0.05,0.1,0.5,0.5'),
+            default_value='0.1,0.5,0.5,0.1,0.5,0.5'),
         DeclareLaunchArgument('return_position_settle_s', default_value='0.2'),
         DeclareLaunchArgument('return_timeout_s', default_value='30.0'),
         DeclareLaunchArgument("target", default_value="catheter"),      # catheter|sheath

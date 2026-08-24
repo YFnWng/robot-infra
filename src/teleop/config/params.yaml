@@ -6,7 +6,8 @@ slicer:
       'w', 's', 'd', 'a', 'e', 'q']
     key_joint_idx: [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
     directions: [1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1]
-    joint_vels: [5.0, 30.0, 1.0, 5.0, 30.0, 30.0]
+    # Both robot modules use linear insertion, axial rotation, and rotary bending.
+    joint_vels: [5.0, 30.0, 30.0, 5.0, 30.0, 30.0]
 
 teleop_bag_recorder:
   ros__parameters:

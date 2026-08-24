@@ -131,9 +131,10 @@ Stream frames (`prefix ∈ {POS='P'(80), VEL='V'(86), ENC='E'(69)}`) carry
 
 > **FIRMWARE (teensy_tekceleo.ino):** at 100 Hz the MCU streams TWO frames on
 > `/device/state`:
-> - **`POS`** — 6 **physical joint positions** (`count × EncRes(0.045°) ×
->   jointPRate`) with coupling baked in (catheter LM = j0+j2, sheath bend = j5−j4).
->   For teleop/safety/limits.
+> - **`POS`** — 6 **logical joint positions** derived from encoder counts.
+>   For both identical differential handles, logical bend is
+>   `bend_motor - rotation_motor`. These values drive teleop, safety, and
+>   logical joint limits.
 > - **`ENC`** — 6 **raw encoder counts, uncoupled, int32** (added 2026-07-05).
 >   No transmission/coupling applied → **this is the model input** (learns the
 >   mapping). Parsed on the ROS side as `<6i` (POS/VEL stay `<6f`), stored exactly
@@ -149,7 +150,7 @@ Command frames (host→MCU) are `prefix + 6×float32` written by
 | `/teleop/control` | `control_interface/ControlStream` | `header`, `float64[] joint_vel`, `float64[] joint_pos`, cartesian… | command; automation fills `joint_vel` (6), `frame_id="autonomy"` |
 | `/teleop/event` | `control_interface/ManagerEvent` | `header`, `uint8 predicate`, `string text`, `uint8[] state`, `float64[] data` | mode select (`MODE`,`"3"`), triggers |
 | `/manager/control` | `control_interface/DeviceStream` | `header`, `uint8 predicate` (VEL/POS/ENC), `float64[] data` | manager → device driver |
-| `/device/state` | `control_interface/DeviceStream` | `header`, `uint8 predicate`, `float64[] data[6]` | firmware sends **`POS`** (physical joint pos) AND **`ENC`** (raw counts, model input) per cycle; `header.stamp` = ROS receive time |
+| `/device/state` | `control_interface/DeviceStream` | `header`, `uint8 predicate`, `float64[] data[6]` | firmware sends **`POS`** (logical joint pos) AND **`ENC`** (raw counts, model input) per cycle; `header.stamp` = ROS receive time |
 | `/manager/state` | `control_interface/ManagerStream` | `header`, `float64[] joint_vel`, `float64[] joint_pos` | manager echo (nominal) |
 | `/device/event`, `/manager/event` | `DeviceEvent` / `ManagerEvent` | LIMIT/STALL/… | faults, mode changes |
 

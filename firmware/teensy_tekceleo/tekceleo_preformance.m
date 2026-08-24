@@ -27,9 +27,8 @@ grid on
 %%
 linRate = 67.319841; % mm/rev
 rotRate = 0.375; % rev/rev
-catheterBendRate = -1.190625; % mm/rev
-sheathBendRate = 0.375; % rev/rev
-jointVRate = [linRate/60.0, rotRate/60.0*360.0, catheterBendRate/60.0, ...
-              linRate/60.0, rotRate/60.0*360.0, sheathBendRate/60.0*360.0 ]; % mm*min/rev*s, deg*min/rev*s
+bendRate = 0.375; % rev/rev; both modules use identical rotary bending
+jointVRate = [linRate/60.0, rotRate/60.0*360.0, bendRate/60.0*360.0, ...
+              linRate/60.0, rotRate/60.0*360.0, bendRate/60.0*360.0 ]; % mm/s or deg/s per RPM
 
 165*jointVRate./[20, 5, 4, 20, 5, 5]

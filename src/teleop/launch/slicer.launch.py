@@ -46,7 +46,7 @@ def generate_launch_description():
     #   'w', 's', 'd', 'a', 'e', 'q'],
     #     "key_joint_idx": [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
     #     "directions": [1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1],
-    #     "joint_vels": [5.0, 30.0, 30.0, 5.0, 30.0, 1.0]
+    #     "joint_vels": [5.0, 30.0, 30.0, 5.0, 30.0, 30.0]
     # }
 
     igtl_bridge = Node(

@@ -8,6 +8,22 @@ Currently under construction.
 
 Tested on Windows 11 + WSL2, Ubuntu 22.04 + ROS2 Humble
 
+## Symmetric catheter-module branch
+
+This branch targets a robot whose catheter and sheath modules have identical
+mechanics: linear insertion, axial rotation, and differential rotary bending.
+The logical joint order is unchanged:
+`[catheter_lin, catheter_rot, catheter_bend, sheath_lin, sheath_rot,
+sheath_bend]`, with linear joints in mm and all other joints in degrees.
+
+The firmware converts each module's logical rotation/bend pair to motor axes:
+`bend_motor = bend + rotation`. Encoder feedback applies the inverse
+`bend = bend_motor - rotation_motor`. Consequently, both bend ranges and
+speed limits are symmetric. This branch is intentionally a dedicated hardware
+profile: switching back to the original translational catheter-bend module
+requires switching branches, rebuilding ROS, and reflashing the Teensy. Do not
+mix a firmware binary and ROS/Slicer configuration from different branches.
+
 ## Hardened catheter teleoperation
 
 The production path is fail-closed:
