@@ -54,6 +54,23 @@ void test_healthy_motion() {
   assert(!detector.latched());
 }
 
+void test_twenty_one_percent_progress_is_not_stall() {
+  StallDetector detector;
+  uint32_t now = 0;
+  int32_t counts = 0;
+  double exact_counts = 0.0;
+  constexpr float units_per_count = 0.001f;
+  detector.begin(now, counts);
+  detector.setCommand(now, 20, '1', 1.0f);
+  for (int i = 0; i < 150; ++i) {
+    now += 10;
+    exact_counts += 0.21 * 0.01 / units_per_count;
+    counts = static_cast<int32_t>(llround(exact_counts));
+    detector.update(now, counts, units_per_count);
+  }
+  assert(!detector.latched());
+}
+
 void test_startup_grace_then_stall() {
   StallDetector detector;
   uint32_t now = 0;
@@ -293,6 +310,7 @@ void test_latch_requires_clear() {
 
 int main() {
   test_healthy_motion();
+  test_twenty_one_percent_progress_is_not_stall();
   test_startup_grace_then_stall();
   test_wrong_direction();
   test_suspect_recovers();

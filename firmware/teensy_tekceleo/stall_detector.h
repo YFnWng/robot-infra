@@ -44,7 +44,7 @@ class StallDetector {
     uint16_t slow_confirm_ms = 500;
     uint16_t slow_rpm_boundary = 10;
     uint16_t minimum_window_counts = 4;
-    float stall_fraction = 0.25f;
+    float stall_fraction = 0.20f;
     float overspeed_fraction = 2.5f;
     float feedback_jump_fraction = 50.0f;
     uint16_t feedback_jump_margin_counts = 100;
