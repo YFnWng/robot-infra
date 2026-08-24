@@ -28,7 +28,9 @@ def generate_launch_description():
             executable="state_estimator",
             name="state_estimator",
             output="screen",
-            parameters=[{"config_path": config_path}],
+            parameters=[{
+                "config_path": config_path,
+            }],
             additional_env={"PYTHONPATH": python_path},
         ),
     ])

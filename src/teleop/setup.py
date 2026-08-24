@@ -28,7 +28,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'slicer = teleop.slicer:main'
+            'slicer = teleop.slicer:main',
+            'bag_recorder = teleop.bag_recorder:main',
         ],
     },
 )

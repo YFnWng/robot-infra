@@ -8,6 +8,27 @@ slicer:
     directions: [1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1]
     joint_vels: [5.0, 30.0, 1.0, 5.0, 30.0, 30.0]
 
+teleop_bag_recorder:
+  ros__parameters:
+    output_root: /mnt/d/robot-dev/catheter_sessions
+    session_prefix: teleop
+    heartbeat_timeout_s: 1.0
+    # ROS callbacks enqueue serialized records; a worker writes to the slower
+    # Windows-mounted bag without delaying fault/control subscriptions.
+    max_queue_messages: 20000
+    backlog_warn_messages: 2000
+    topics:
+      - /teleop/control
+      - /teleop/event
+      - /manager/control
+      - /device/state
+      - /device/event
+      - /manager/event
+      - /manager/safety_status
+      # Raw sensor positions consumed by the optional live shape estimator.
+      # The estimated shape output is intentionally not recorded.
+      - /IGTL_TRANSFORM_IN
+
 igtl_node:
   ros__parameters:
     RIB_server_ip: "127.0.0.1"

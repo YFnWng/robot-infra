@@ -72,6 +72,29 @@ shape estimator:
 ros2 launch teleop slicer.launch.py
 ```
 
+That launch also starts `teleop_bag_recorder`. Pressing **Enable Keyboard
+Control** creates
+`D:\robot-dev\catheter_sessions\teleop_YYYYMMDD_HHMMSS\rosbag`; pressing
+**Disable Keyboard Control** closes the active writer and finalizes rosbag
+metadata. Recorder subscriptions stay live while idle, so the enable marker and
+first keyboard command are not lost to subprocess startup or topic discovery.
+Callbacks serialize and enqueue records immediately; a dedicated writer thread
+writes the slower Windows-mounted database. Message header timestamps are used
+when available, preserving command/feedback timing even if disk writes lag.
+Fault and control records are retained preferentially if the bounded queue ever
+fills.
+Recording also stops if the Slicer key heartbeat is lost, the manager becomes
+inhibited, or the launch shuts down. Each bag contains the Slicer command,
+manager-clamped command, POS/ENC feedback, mode events, device events, and
+retained manager safety status. When available, it also stores the `/IGTL_TRANSFORM_IN` stream from the
+existing robot connector. The recorder keeps only exact `RX<number>` and
+`RX<number>_filtered` devices from that shared topic. The live estimator consumes
+the translation of the filtered transforms and ignores their identity rotations.
+Estimated shape output is intentionally excluded. Configure `output_root`,
+`session_prefix`,
+`topics`, heartbeat timeout, and queue warning/limit thresholds in
+`src/teleop/config/params.yaml`.
+
 ## Live catheter shape estimation
 
 Use a Python 3.10 virtual environment that can also see the ROS 2 Humble
@@ -89,10 +112,12 @@ source install/setup.bash
 ros2 launch teleop slicer.launch.py enable_state_estimator:=true
 ```
 
-The launch starts the Slicer bridge on TCP 18944 and an isolated tracking
-bridge on TCP 18945. In Slicer, connect the main IGTL interface, send the
-shape configuration, and start the coil simulator. Internal estimator values
-use SI units; the OpenIGTLink boundary uses RAS mm.
+The launch starts one Slicer bridge on TCP 18944. In Slicer, connect the main
+IGTL interface; streamed `RX<number>` and `RX<number>_filtered` transforms are
+forwarded through that connector automatically. Configure the coil locations,
+then click **Enable shape estimation**. The configured coil count must match
+the number of active raw/filtered RX pairs. Internal estimator values use SI
+units; the OpenIGTLink boundary uses RAS mm.
 
 The estimator launch uses `~/state_estimation`, `~/cr-common`, and
 `~/cr-venv` by default. Override these locations with

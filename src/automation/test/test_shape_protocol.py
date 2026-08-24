@@ -5,6 +5,7 @@ import pytest
 from automation.estimation.protocol import (
     ShapeConfigError,
     coil_points_mm_to_positions,
+    filtered_rx_index,
     parse_shape_config,
     stream_is_stale,
 )
@@ -51,6 +52,23 @@ def test_status_reports_effective_mapping():
     assert status["state"] == "configured"
     assert status["proximal_node_idx"] == 3
     assert status["coil_node_indices"] == [3, 7, 12]
+
+
+def test_estimation_enable_flag_defaults_true_and_accepts_false():
+    assert parse_shape_config(_payload()).enabled
+    disabled = parse_shape_config(_payload(enabled=False))
+    assert not disabled.enabled
+    assert disabled.status_payload()["state"] == "disabled"
+    with pytest.raises(ShapeConfigError, match="enabled must be boolean"):
+        parse_shape_config(_payload(enabled=1))
+
+
+def test_filtered_rx_transform_names_are_strict_and_one_based():
+    assert filtered_rx_index("RX1_filtered") == 1
+    assert filtered_rx_index("RX12_filtered") == 12
+    assert filtered_rx_index("RX1") is None
+    assert filtered_rx_index("RX0_filtered") is None
+    assert filtered_rx_index("RX1_filtered_1") is None
 
 
 def test_point_frame_converts_mm_to_m_and_checks_count():
