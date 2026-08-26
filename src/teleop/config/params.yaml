@@ -28,6 +28,8 @@ teleop_bag_recorder:
       # Raw sensor positions consumed by the optional live shape estimator.
       # The estimated shape output is intentionally not recorded.
       - /IGTL_TRANSFORM_IN
+      # Records the exact per-device coil-name and arc-length configuration.
+      - /IGTL_STRING_IN
 
 igtl_node:
   ros__parameters:

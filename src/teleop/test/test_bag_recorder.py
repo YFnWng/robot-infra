@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from control_interface.msg import ManagerEvent
 from teleop.bag_recorder import (
     COIL_TRANSFORM_PATTERN, TOPIC_TYPES, TeleopBagRecorder,
-    allocate_session_dir)
+    allocate_session_dir, configured_coil_names)
 
 
 def test_allocate_session_dir_adds_suffix_on_collision(tmp_path):
@@ -71,6 +71,7 @@ def test_message_timestamp_falls_back_for_zero_or_missing_stamp():
 
 def test_raw_sensor_transforms_are_recorded_but_estimated_shape_is_not():
     assert '/IGTL_TRANSFORM_IN' in TOPIC_TYPES
+    assert '/IGTL_STRING_IN' in TOPIC_TYPES
     assert '/IGTL_POINT_IN' not in TOPIC_TYPES
     assert '/IGTL_POINT_OUT' not in TOPIC_TYPES
 
@@ -78,6 +79,7 @@ def test_raw_sensor_transforms_are_recorded_but_estimated_shape_is_not():
 def test_only_exact_raw_and_filtered_rx_transforms_are_recorded():
     calls = []
     fake = SimpleNamespace(
+        configured_coil_names=set(),
         record_message=lambda topic, msg: calls.append((topic, msg.name)))
 
     for name in ('robot/joint_pos_target', 'RX1', 'RX1_filtered',
@@ -93,3 +95,25 @@ def test_only_exact_raw_and_filtered_rx_transforms_are_recorded():
         ('/IGTL_TRANSFORM_IN', 'RX10_filtered'),
     ]
     assert COIL_TRANSFORM_PATTERN.fullmatch('RX2_filtered')
+
+
+def test_explicitly_configured_non_rx_transform_is_recorded():
+    calls = []
+    fake = SimpleNamespace(
+        configured_coil_names={'CatheterTipA'},
+        record_message=lambda topic, msg: calls.append((topic, msg.name)))
+    for name in ('CatheterTipA', 'unrelated'):
+        TeleopBagRecorder.coil_transform_callback(
+            fake, SimpleNamespace(name=name))
+    assert calls == [('/IGTL_TRANSFORM_IN', 'CatheterTipA')]
+
+
+def test_configured_coil_names_support_two_device_schema():
+    payload = (
+        '{"schema_version":2,"devices":['
+        '{"id":"catheter","coils":['
+        '{"transform":"C1"},{"transform":"C2"}]},'
+        '{"id":"sheath","coils":['
+        '{"transform":"S1"},{"transform":"S2"}]}]}'
+    )
+    assert configured_coil_names(payload) == ('C1', 'C2', 'S1', 'S2')

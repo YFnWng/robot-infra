@@ -2,6 +2,7 @@
 
 from collections import deque
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 import threading
@@ -14,11 +15,12 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.serialization import serialize_message
 import rosbag2_py
-from std_msgs.msg import String
+from std_msgs.msg import String as StdString
 
 try:
-    from ros2_igtl_bridge.msg import Transform
+    from ros2_igtl_bridge.msg import String as IGTLString, Transform
 except ImportError:  # Optional without the tracking bridge overlay.
+    IGTLString = None
     Transform = None
 
 
@@ -39,9 +41,29 @@ TOPIC_TYPES = {
         ManagerEvent, 'control_interface/msg/ManagerEvent'),
     '/IGTL_TRANSFORM_IN': (
         Transform, 'ros2_igtl_bridge/msg/Transform'),
+    '/IGTL_STRING_IN': (
+        IGTLString, 'ros2_igtl_bridge/msg/String'),
 }
 DEFAULT_TOPICS = list(TOPIC_TYPES)
 COIL_TRANSFORM_PATTERN = re.compile(r"^RX[1-9][0-9]*(_filtered)?$")
+ESTIMATOR_CONFIG_DEVICE = 'estimator/config'
+
+
+def configured_coil_names(config_json):
+    """Extract exact coil transform names from estimator schema v1 or v2."""
+    payload = json.loads(config_json)
+    if payload.get('schema_version') == 1:
+        locations = payload.get('coil_locations_mm', [])
+        return tuple(
+            f'RX{index + 1}_filtered' for index in range(len(locations)))
+    if payload.get('schema_version') != 2:
+        return ()
+    return tuple(
+        coil['transform']
+        for device in payload.get('devices', [])
+        for coil in device.get('coils', [])
+        if isinstance(coil.get('transform'), str)
+    )
 
 
 def allocate_session_dir(output_root, prefix, now=None):
@@ -114,6 +136,7 @@ class TeleopBagRecorder(Node):
         self._writer_error = None
         self._dropped_state_messages = 0
         self._last_backlog_warning = 0.0
+        self.configured_coil_names = set()
 
         record_qos = QoSProfile(depth=1000)
         record_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -136,6 +159,9 @@ class TeleopBagRecorder(Node):
             elif topic == '/IGTL_TRANSFORM_IN':
                 callback = self.coil_transform_callback
                 qos = record_qos
+            elif topic == '/IGTL_STRING_IN':
+                callback = self.estimator_config_callback
+                qos = record_qos
             else:
                 callback = (
                     lambda msg, topic_name=topic:
@@ -145,7 +171,7 @@ class TeleopBagRecorder(Node):
                 self.create_subscription(message_type, topic, callback, qos))
 
         self.status_pub = self.create_publisher(
-            String, '/teleop/recording_status', 10)
+            StdString, '/teleop/recording_status', 10)
         self.watchdog = self.create_timer(0.1, self.watchdog_callback)
         self.get_logger().info(
             f'teleop bag recorder ready: output_root={self.output_root}')
@@ -183,11 +209,24 @@ class TeleopBagRecorder(Node):
             self.stop_recording(f'manager inhibited: {msg.text}')
 
     def coil_transform_callback(self, msg):
-        if COIL_TRANSFORM_PATTERN.fullmatch(msg.name):
+        if (
+            COIL_TRANSFORM_PATTERN.fullmatch(msg.name)
+            or msg.name in self.configured_coil_names
+        ):
             self.record_message('/IGTL_TRANSFORM_IN', msg)
 
+    def estimator_config_callback(self, msg):
+        if msg.name == ESTIMATOR_CONFIG_DEVICE:
+            try:
+                self.configured_coil_names = set(
+                    configured_coil_names(msg.data))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                self.get_logger().warn(
+                    'ignored malformed estimator coil configuration')
+        self.record_message('/IGTL_STRING_IN', msg)
+
     def _publish_status(self, state, detail):
-        msg = String()
+        msg = StdString()
         msg.data = f'{state}:{detail}'
         self.status_pub.publish(msg)
 

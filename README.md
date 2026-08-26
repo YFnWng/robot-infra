@@ -95,7 +95,7 @@ Estimated shape output is intentionally excluded. Configure `output_root`,
 `topics`, heartbeat timeout, and queue warning/limit thresholds in
 `src/teleop/config/params.yaml`.
 
-## Live catheter shape estimation
+## Live catheter and sheath shape estimation
 
 Use a Python 3.10 virtual environment that can also see the ROS 2 Humble
 system packages. From the workspace root:
@@ -113,11 +113,22 @@ ros2 launch teleop slicer.launch.py enable_state_estimator:=true
 ```
 
 The launch starts one Slicer bridge on TCP 18944. In Slicer, connect the main
-IGTL interface; streamed `RX<number>` and `RX<number>_filtered` transforms are
-forwarded through that connector automatically. Configure the coil locations,
-then click **Enable shape estimation**. The configured coil count must match
-the number of active raw/filtered RX pairs. Internal estimator values use SI
-units; the OpenIGTLink boundary uses RAS mm.
+IGTL interface and configure the catheter and sheath separately. Each coil row
+contains an exact incoming transform name and its arc-length location. A
+per-device **Rigidly fixed coils** toggle selects a direct straight-line fit;
+rigid mode always uses one section (two endpoints), which Slicer renders as a
+cyan capped cylinder alongside the coil transforms. When the toggle is off,
+that device uses the continuum backend. A device may have zero coils;
+it is then explicitly inactive, does not gate enabling, and publishes no shape.
+One coil is rejected because it cannot define either supported shape. Enabling
+is allowed only while every configured transform is actively updating. Shape
+outputs are `catheter_shape` and `sheath_shape`. These names intentionally
+stay below OpenIGTLink's 20-byte device-name limit. Internal continuum values
+use SI units; the OpenIGTLink boundary and rigid fit use RAS mm.
+
+The teleop recorder also stores `/IGTL_STRING_IN`, so each bag contains the
+schema-v2 device/coil configuration. It records conventional RX transforms and
+any additional transform names explicitly assigned in that configuration.
 
 The estimator launch uses `~/state_estimation`, `~/cr-common`, and
 `~/cr-venv` by default. Override these locations with
