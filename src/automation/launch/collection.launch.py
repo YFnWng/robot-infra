@@ -78,6 +78,24 @@ def launch_setup(context, *_args, **_kwargs):
             "joint_lower": _floats(cfg("joint_lower")),
             "joint_upper": _floats(cfg("joint_upper")),
             "return_to_start": cfg("return_to_start").lower() in ("true", "1", "yes"),
+            "identification_amplitudes": _floats(
+                cfg("identification_amplitudes")),
+            "identification_margins": _floats(
+                cfg("identification_margins")),
+            "identification_minimum_amplitudes": _floats(
+                cfg("identification_minimum_amplitudes")),
+            "identification_settle_s": float(
+                cfg("identification_settle_s")),
+            "identification_dwell_s": float(
+                cfg("identification_dwell_s")),
+            "identification_hold_s": float(
+                cfg("identification_hold_s")),
+            "identification_slow_fraction": float(
+                cfg("identification_slow_fraction")),
+            "identification_medium_fraction": float(
+                cfg("identification_medium_fraction")),
+            "identification_max_duration_s": float(
+                cfg("identification_max_duration_s")),
             "shutdown_on_done": True,
         }, {
             'return_control_mode': cfg('return_control_mode'),
@@ -137,10 +155,10 @@ def generate_launch_description():
         DeclareLaunchArgument('return_position_settle_s', default_value='0.2'),
         DeclareLaunchArgument('return_timeout_s', default_value='30.0'),
         DeclareLaunchArgument("target", default_value="catheter"),      # catheter|sheath
-        DeclareLaunchArgument("mode", default_value="sinusoidal"),      # sinusoidal|constant
+        DeclareLaunchArgument("mode", default_value="sinusoidal"),
         DeclareLaunchArgument("seed", default_value="-1"),
         DeclareLaunchArgument("limits_file", default_value=default_limits),
-        DeclareLaunchArgument("catheter", default_value="default"),     # profile in limits_file
+        DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("expect_enc", default_value="true"),
         DeclareLaunchArgument("duration_s", default_value="60.0"),
         DeclareLaunchArgument("rate_hz", default_value="100.0"),
@@ -150,6 +168,21 @@ def generate_launch_description():
                               default_value="/home/wangyf/sofa-cosserat-sim"),
         DeclareLaunchArgument("joint_lower", default_value="0.0,-180.0,0.0"),
         DeclareLaunchArgument("joint_upper", default_value="0.1,180.0,0.01"),
+        DeclareLaunchArgument(
+            "identification_amplitudes", default_value="20.0,100.0,6.0"),
+        DeclareLaunchArgument(
+            "identification_margins", default_value="0.5,5.0,0.25"),
+        DeclareLaunchArgument(
+            "identification_minimum_amplitudes", default_value="2.0,20.0,1.0"),
+        DeclareLaunchArgument("identification_settle_s", default_value="2.0"),
+        DeclareLaunchArgument("identification_dwell_s", default_value="1.0"),
+        DeclareLaunchArgument("identification_hold_s", default_value="2.0"),
+        DeclareLaunchArgument(
+            "identification_slow_fraction", default_value="0.30"),
+        DeclareLaunchArgument(
+            "identification_medium_fraction", default_value="0.70"),
+        DeclareLaunchArgument(
+            "identification_max_duration_s", default_value="900.0"),
         DeclareLaunchArgument("session_root", default_value="~/catheter_sessions"),
         DeclareLaunchArgument("record", default_value="true"),
         DeclareLaunchArgument("storage_id", default_value="mcap"),      # mcap|sqlite3

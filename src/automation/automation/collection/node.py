@@ -31,6 +31,8 @@ from rclpy.qos import (
     DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy)
 from std_msgs.msg import String
 
+from .identification import IdentificationConfig, IdentificationGenerator
+
 # Joint order matches teleop/config/params.yaml
 JOINTS = [
     "catheter_lin", "catheter_rot", "catheter_bend",
@@ -53,7 +55,7 @@ def collection_marker_qos() -> QoSProfile:
     """
     return QoSProfile(
         history=HistoryPolicy.KEEP_LAST,
-        depth=10,
+        depth=128,
         reliability=ReliabilityPolicy.RELIABLE,
         durability=DurabilityPolicy.TRANSIENT_LOCAL,
     )
@@ -99,7 +101,7 @@ class CollectionNode(Node):
         self.declare_parameter("source_name", "autonomy")
         self.declare_parameter("rate_hz", 100.0)
         self.declare_parameter("duration_s", 10.0)
-        self.declare_parameter("mode", "constant")          # constant | sinusoidal
+        self.declare_parameter("mode", "constant")  # constant | sinusoidal | identification
         self.declare_parameter("target", "catheter")        # catheter | sheath
         self.declare_parameter("joint_min_speeds", DEFAULT_MIN_SPEEDS)
         self.declare_parameter("joint_max_speeds", DEFAULT_MAX_SPEEDS)
@@ -124,10 +126,23 @@ class CollectionNode(Node):
         self.declare_parameter("speed_factor", 1.0)
         self.declare_parameter("freq_change_interval", 10.0)
         self.declare_parameter("amp_range", [0.2, 1.0])
+        # Identification-mode parameters, in physical target-joint units.
+        self.declare_parameter(
+            "identification_amplitudes", [20.0, 100.0, 6.0])
+        self.declare_parameter(
+            "identification_margins", [0.5, 5.0, 0.25])
+        self.declare_parameter(
+            "identification_minimum_amplitudes", [2.0, 20.0, 1.0])
+        self.declare_parameter("identification_settle_s", 2.0)
+        self.declare_parameter("identification_dwell_s", 1.0)
+        self.declare_parameter("identification_hold_s", 2.0)
+        self.declare_parameter("identification_slow_fraction", 0.30)
+        self.declare_parameter("identification_medium_fraction", 0.70)
+        self.declare_parameter("identification_max_duration_s", 900.0)
         # per-catheter pos + vel limits from YAML (overrides the joint_lower/upper
         # and joint_max_speeds params when limits_file is set)
         self.declare_parameter("limits_file", "")
-        self.declare_parameter("catheter", "default")
+        self.declare_parameter("catheter", "imricor_test")
         self.declare_parameter("expect_enc", True)      # warn if no raw-ENC frames
         # Feedback qualification before MODE/START or any velocity publication.
         self.declare_parameter("preflight_feedback_timeout_s", 3.0)
@@ -220,12 +235,17 @@ class CollectionNode(Node):
         if self._target not in TARGET_JOINTS:
             raise ValueError(f"target must be catheter|sheath, got {self._target}")
         self._target_idx = TARGET_JOINTS[self._target]
+        if self._mode not in ("constant", "sinusoidal", "identification"):
+            raise ValueError(f"unknown mode '{self._mode}'")
+        if self._mode == "identification" and self._target != "catheter":
+            raise ValueError("identification mode currently supports target=catheter")
 
         self._gen = None
         self._shortest_delta = None
         self._floor_tracking_direction = np.zeros(6, dtype=np.int8)
         self._floor_reference_offset = np.zeros(6)
         self._h = 1.0 / self._rate
+        self._episode_index = -1
         if self._mode == "sinusoidal":
             self._build_generator()
 
@@ -435,12 +455,23 @@ class CollectionNode(Node):
     def _begin_run(self) -> None:
         if self._preflight_timer is not None:
             self._preflight_timer.cancel()
+        self._start_pos = list(self._last_pos) if self._last_pos is not None else None
+        if self._mode == "identification":
+            try:
+                self._build_identification_generator()
+            except Exception as exc:
+                self._abort_preflight(
+                    f"identification trajectory validation failed: {exc}",
+                    self._fault_status)
+                return
         if self.get_parameter("auto_enable").value:
             self._send_event(ManagerEvent.MODE, text=chr(ManagerEvent.JOINT_VEL))
             self.get_logger().info("requested JOINT_VEL mode")
         if self._start_motor:
             self._send_event(ManagerEvent.START_MOTOR)
             self.get_logger().warn("START_MOTOR sent — hardware may move")
+        generator_metadata = (
+            self._gen.metadata if self._mode == "identification" else None)
         self._marker("run_start", mode=self._mode, target=self._target,
                      seed=int(self.get_parameter("seed").value),
                      floor_tracking={
@@ -449,13 +480,14 @@ class CollectionNode(Node):
                          "enter_time_s": self._floor_tracking_enter_time_s,
                          "exit_time_s": self._floor_tracking_exit_time_s,
                      },
-                     start_state=self._state_snapshot())
-        self._start_pos = list(self._last_pos) if self._last_pos is not None else None
+                     start_state=self._state_snapshot(),
+                     generator=generator_metadata)
         self._initialize_floor_tracking()
         self._run_status = "running"
         if self.get_parameter("return_to_start").value and self._start_pos is None:
             self.get_logger().warn("no POS at run_start — return-to-start disabled")
         self._t0 = self.get_clock().now()
+        self._update_episode_markers(0.0)
         self._timer = self.create_timer(1.0 / self._rate, self._tick)
         if self.get_parameter("expect_enc").value:       # early ENC warning
             self._enc_timer = self.create_timer(3.0, self._check_enc_early)
@@ -479,8 +511,10 @@ class CollectionNode(Node):
         t = (self.get_clock().now() - self._t0).nanoseconds * 1e-9
         done = t >= self._duration or (self._gen is not None and self._gen.is_done(t))
         if done:
+            self._update_episode_markers(self._duration, finishing=True)
             self._begin_return()
             return
+        self._update_episode_markers(t)
         vel = self._trajectory_velocity(t)
         self._publish_velocity(vel)
 
@@ -843,6 +877,79 @@ class CollectionNode(Node):
             f"max_speeds={self._max_speeds[idx]} "
             f"seed={seed} auto_ramp_s={self._gen.ramp_duration:.3f}")
 
+    def _build_identification_generator(self) -> None:
+        """Resolve and validate the full plan from measured run-start POS."""
+        if self._start_pos is None:
+            raise ValueError("fresh POS feedback is required")
+        idx = self._target_idx
+        if self._pos_lower6 is not None:
+            lower = self._pos_lower6[idx]
+            upper = self._pos_upper6[idx]
+        else:
+            lower = np.asarray(self.get_parameter("joint_lower").value, dtype=float)
+            upper = np.asarray(self.get_parameter("joint_upper").value, dtype=float)
+        seed = int(self.get_parameter("seed").value)
+        config = IdentificationConfig(
+            amplitudes=tuple(self.get_parameter(
+                "identification_amplitudes").value),
+            margins=tuple(self.get_parameter("identification_margins").value),
+            minimum_amplitudes=tuple(self.get_parameter(
+                "identification_minimum_amplitudes").value),
+            settle_s=float(self.get_parameter("identification_settle_s").value),
+            dwell_s=float(self.get_parameter("identification_dwell_s").value),
+            hold_s=float(self.get_parameter("identification_hold_s").value),
+            slow_fraction=float(self.get_parameter(
+                "identification_slow_fraction").value),
+            medium_fraction=float(self.get_parameter(
+                "identification_medium_fraction").value),
+            seed=1 if seed < 0 else seed,
+            max_duration_s=float(self.get_parameter(
+                "identification_max_duration_s").value),
+        )
+        self._gen = IdentificationGenerator(
+            start_position=np.asarray(self._start_pos, dtype=float)[idx],
+            lower_limits=lower,
+            upper_limits=upper,
+            minimum_speeds=self._min_speeds[idx],
+            maximum_speeds=self._max_speeds[idx],
+            dt=self._h,
+            config=config,
+        )
+        self._duration = self._gen.duration
+        self._episode_index = -1
+        self.get_logger().info(
+            f"identification generator: duration={self._duration:.3f}s "
+            f"requested={list(config.amplitudes)} "
+            f"resolved={self._gen.amplitudes.tolist()} "
+            f"episodes={len(self._gen.episodes)} seed={config.seed}")
+
+    def _update_episode_markers(self, t: float, finishing: bool = False) -> None:
+        """Publish every crossed episode boundary exactly once."""
+        if self._mode != "identification" or self._gen is None:
+            return
+        target_index = len(self._gen.episodes) if finishing else (
+            self._gen.episode_index(t) + 1)
+        while self._episode_index + 1 < target_index:
+            if self._episode_index >= 0:
+                previous = self._gen.episodes[self._episode_index]
+                self._marker(
+                    "episode_end", index=self._episode_index,
+                    name=previous.name,
+                    planned_end_s=previous.start_s + previous.duration_s)
+            self._episode_index += 1
+            if self._episode_index < len(self._gen.episodes):
+                current = self._gen.episodes[self._episode_index]
+                self._marker(
+                    "episode_start", index=self._episode_index,
+                    name=current.name, planned_start_s=current.start_s,
+                    planned_duration_s=current.duration_s)
+        if finishing and self._episode_index == len(self._gen.episodes) - 1:
+            previous = self._gen.episodes[self._episode_index]
+            self._marker(
+                "episode_end", index=self._episode_index, name=previous.name,
+                planned_end_s=previous.start_s + previous.duration_s)
+            self._episode_index += 1
+
     def _velocity(self, t: float) -> np.ndarray:
         """Return a length-6 velocity vector for time t."""
         v = np.zeros(6)
@@ -855,6 +962,8 @@ class CollectionNode(Node):
             q0 = self._gen.step(t)
             q1 = self._gen.step(t + self._h)
             v[self._target_idx] = self._shortest_delta(q0, q1) / self._h
+        elif self._mode == "identification":
+            v[self._target_idx] = self._gen.relative_velocity(t)
         else:
             raise ValueError(f"unknown mode '{self._mode}'")
         return v
@@ -863,7 +972,7 @@ class CollectionNode(Node):
         """Reset tracking and rebase the generator at the measured start pose."""
         self._floor_tracking_direction[:] = 0
         self._floor_reference_offset[:] = 0.0
-        if (self._mode != "sinusoidal" or self._gen is None
+        if (self._mode not in ("sinusoidal", "identification") or self._gen is None
                 or self._last_pos is None):
             return
         q0 = np.asarray(self._gen.step(0.0), dtype=float)
@@ -876,16 +985,22 @@ class CollectionNode(Node):
         """Return the rebased, position-limited six-joint reference."""
         reference = np.asarray(self._last_pos, dtype=float).copy()
         generated = np.asarray(self._gen.step(t), dtype=float)
-        reference[self._target_idx] = (
-            generated + self._floor_reference_offset[self._target_idx])
-        if self._pos_lower6 is not None:
+        if self._mode == "identification":
+            reference[self._target_idx] = (
+                np.asarray(self._start_pos, dtype=float)[self._target_idx]
+                + generated)
+        else:
+            reference[self._target_idx] = (
+                generated + self._floor_reference_offset[self._target_idx])
+        if self._pos_lower6 is not None and self._mode != "identification":
             reference = np.clip(reference, self._pos_lower6, self._pos_upper6)
         return reference
 
     def _trajectory_velocity(self, t: float) -> np.ndarray:
         """Generate a bounded command, using floor-aware tracking when needed."""
         feedforward = self._velocity(t)
-        if (self._mode != "sinusoidal" or not self._floor_tracking_enabled
+        if (self._mode not in ("sinusoidal", "identification")
+                or not self._floor_tracking_enabled
                 or not np.any(self._min_speeds[self._target_idx] > 0.0)):
             return self._apply_velocity_bounds(feedforward)
         if self._last_pos is None or len(self._last_pos) != 6:
@@ -1164,7 +1279,12 @@ class CollectionNode(Node):
         raw-ENC frame (starting encoder counts, the model input)."""
         if self._last_state is None:
             self.get_logger().warn("no /device/state yet — run_start has no start_state")
-        return {"last": self._last_state, "enc": self._last_enc}
+        return {
+            "last": self._last_state,
+            "pos": None if self._last_pos is None else [
+                float(value) for value in self._last_pos],
+            "enc": self._last_enc,
+        }
 
     # -- publishing helpers ---------------------------------------------- #
     def _publish_velocity(self, vel: np.ndarray) -> None:

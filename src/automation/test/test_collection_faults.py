@@ -12,9 +12,37 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
 def test_collection_marker_qos_retains_run_start_for_rosbag_discovery():
     qos = collection_marker_qos()
     assert qos.history == HistoryPolicy.KEEP_LAST
-    assert qos.depth == 10
+    assert qos.depth == 128
     assert qos.reliability == ReliabilityPolicy.RELIABLE
     assert qos.durability == DurabilityPolicy.TRANSIENT_LOCAL
+
+
+def test_identification_episode_markers_survive_skipped_timer_boundaries():
+    episodes = [
+        SimpleNamespace(name="first", start_s=0.0, duration_s=1.0),
+        SimpleNamespace(name="second", start_s=1.0, duration_s=2.0),
+        SimpleNamespace(name="third", start_s=3.0, duration_s=1.0),
+    ]
+    generator = SimpleNamespace(
+        episodes=episodes,
+        episode_index=lambda t: 0 if t < 1.0 else (1 if t < 3.0 else 2),
+    )
+    markers = []
+    fake = SimpleNamespace(
+        _mode="identification", _gen=generator, _episode_index=-1,
+        _marker=lambda event, **fields: markers.append((event, fields)),
+    )
+
+    CollectionNode._update_episode_markers(fake, 0.0)
+    CollectionNode._update_episode_markers(fake, 3.5)  # skips two boundaries
+    CollectionNode._update_episode_markers(fake, 4.0, finishing=True)
+    CollectionNode._update_episode_markers(fake, 4.0, finishing=True)
+
+    assert [(event, fields["name"]) for event, fields in markers] == [
+        ("episode_start", "first"), ("episode_end", "first"),
+        ("episode_start", "second"), ("episode_end", "second"),
+        ("episode_start", "third"), ("episode_end", "third"),
+    ]
 
 
 def preflight_feedback(**overrides):
