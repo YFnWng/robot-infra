@@ -111,7 +111,9 @@ int32_t RawEncCounts[numHWSerials];
 // Joint transmission, joint/motor, positive direction: right-hand or forward
 constexpr float linRate = 67.319841f/20.0f; // mm/rev
 constexpr float rotRate = 0.375f/5.0f; // rev/rev
-constexpr float catheterBendRate = -1.190625f/5.0f; // mm/rev, gives max joint V=1mm/s, ask AV
+// Direct-drive catheter bending shaft (the former 5:1 gearbox was removed).
+// At maxRPM=250 this gives a maximum joint speed of 4.9609375 mm/s.
+constexpr float catheterBendRate = -1.190625f/1.0f; // mm/rev
 constexpr float sheathBendRate = 0.375f/5.0f; // rev/rev
 constexpr float jointPRate[numHWSerials] = { linRate/360.0f, rotRate, catheterBendRate/360.0f, 
                                             linRate/360.0f, rotRate, sheathBendRate }; // mm/deg, deg/deg
