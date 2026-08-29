@@ -152,12 +152,11 @@ v_medium = approximately 0.7*vel_max
 ```
 
 Only label an episode pair as a rate pair if the hardware has a meaningful
-reliable interval (suggested requirement: `v_medium >= 1.5*v_slow`).  In the
-current `imricor_test` profile, catheter bend has `vel_min == vel_max == 1
-mm/s`.  It therefore cannot provide a clean slow/medium damping comparison.
-Use one reliable bend rate, holds, reversals, and repeated loops instead.  Do
-not describe pulse-density tracking at one physical speed as two actuator
-rates.
+reliable interval (suggested requirement: `v_medium >= 1.5*v_slow`). With the
+direct-drive catheter-bending shaft, the current `imricor_test` profile uses a
+2.0--4.9 mm/s reliable interval and supports a clean slow/medium damping
+comparison. The 2 mm/s floor also keeps the coupled catheter-linear motor at
+or above its reliable operating speed.
 
 ## Planned experiment suite
 
@@ -178,27 +177,31 @@ durations.  The following order is recommended.
 8. `rotation_positive_negative_medium`
    - Same position path at the second reliable rate.
 9. `settle_after_rotation_medium`
-10. `bend_out_back`
-    - One reliable bend rate under the current hardware limits.
-11. `bend_hold_unload_relaxation`
+10. `bend_out_and_back`
+    - Execute the bend path at the slow reliable rate.
+11. `dwell_after_bend_slow`
+12. `bend_medium`
+    - Repeat the identical bend path at the second reliable rate when enabled.
+13. `dwell_after_bend_medium`
+14. `bend_hold_unload_relaxation`
     - Smooth load, nonzero hold, smooth unload, then a zero-reference dwell.
       This is a relaxation experiment, not an instantaneous external-force
       ring-down.
-12. `bend_repeated_loops`
+15. `bend_repeated_loops`
     - At least two identical load/unload loops to expose repeatability,
       backlash, and rate-independent memory.
-13. `bend_at_mid_insertion`
+16. `bend_at_mid_insertion`
     - Establish and hold an insertion plateau before repeating bend loading.
-14. `insertion_bend_interaction`
-15. `rotation_bend_interaction`
-16. `insertion_rotation_interaction`
-17. `repeated_state_opposite_history`
+17. `insertion_bend_interaction`
+18. `rotation_bend_interaction`
+19. `insertion_rotation_interaction`
+20. `repeated_state_opposite_history`
     - Revisit the same three-joint target through at least two distinct paths.
-18. `coupled_persistent_excitation`
+21. `coupled_persistent_excitation`
     - Smooth, modest-amplitude, incommensurate motion in all three channels.
       This comes last so isolated identification remains available if the run
       is interrupted.
-19. `settle_end`
+22. `settle_end`
     - Return the relative reference to zero and hold for at least 5 s before the
       existing return controller begins.
 
@@ -367,4 +370,3 @@ Add pure-Python tests that do not require connected hardware.
 - Do not optimize the trajectory using the current learned model.
 - Do not use the held-out sinusoidal validation session for fitting amplitudes,
   delays, hidden states, or model parameters.
-

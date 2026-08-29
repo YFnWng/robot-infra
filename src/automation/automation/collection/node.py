@@ -40,7 +40,7 @@ JOINTS = [
 ]
 TARGET_JOINTS = {"catheter": [0, 1, 2], "sheath": [3, 4, 5]}
 ROT_JOINTS = {1, 4}   # rotation joints (deg, wrap-around): catheter_rot, sheath_rot
-DEFAULT_MAX_SPEEDS = [5.0, 30.0, 1.0, 5.0, 30.0, 30.0]
+DEFAULT_MAX_SPEEDS = [5.0, 30.0, 4.9, 5.0, 30.0, 30.0]
 DEFAULT_MIN_SPEEDS = [0.0] * 6
 DEFAULT_PREFLIGHT_POSITION_DRIFT = [0.1, 1.0, 0.1, 0.1, 1.0, 1.0]
 
@@ -942,7 +942,9 @@ class CollectionNode(Node):
                 self._marker(
                     "episode_start", index=self._episode_index,
                     name=current.name, planned_start_s=current.start_s,
-                    planned_duration_s=current.duration_s)
+                    planned_duration_s=current.duration_s,
+                    command_speed_limits=(
+                        current.maximum_command_speed_limits.tolist()))
         if finishing and self._episode_index == len(self._gen.episodes) - 1:
             previous = self._gen.episodes[self._episode_index]
             self._marker(
@@ -1002,20 +1004,42 @@ class CollectionNode(Node):
         if (self._mode not in ("sinusoidal", "identification")
                 or not self._floor_tracking_enabled
                 or not np.any(self._min_speeds[self._target_idx] > 0.0)):
-            return self._apply_velocity_bounds(feedforward)
+            bounded = self._apply_velocity_bounds(feedforward)
+            return self._apply_identification_speed_ceiling(t, bounded)
         if self._last_pos is None or len(self._last_pos) != 6:
             # Feedback is required to decide whether a minimum-speed pulse is
             # needed. Stop floored joints rather than integrating blindly.
             safe = feedforward.copy()
             safe[self._min_speeds > 0.0] = 0.0
-            return self._apply_velocity_bounds(safe)
+            bounded = self._apply_velocity_bounds(safe)
+            return self._apply_identification_speed_ceiling(t, bounded)
         measured = np.asarray(self._last_pos, dtype=float)
         if not np.all(np.isfinite(measured)):
             safe = feedforward.copy()
             safe[self._min_speeds > 0.0] = 0.0
-            return self._apply_velocity_bounds(safe)
+            bounded = self._apply_velocity_bounds(safe)
+            return self._apply_identification_speed_ceiling(t, bounded)
         reference = self._trajectory_reference(t)
-        return self._floor_aware_velocity(feedforward, reference, measured)
+        tracked = self._floor_aware_velocity(feedforward, reference, measured)
+        return self._apply_identification_speed_ceiling(t, tracked)
+
+    def _apply_identification_speed_ceiling(
+            self, t: float, velocity) -> np.ndarray:
+        """Keep feedback correction inside the active experiment's budget."""
+        bounded = np.asarray(velocity, dtype=float).copy()
+        if self._mode != "identification" or self._gen is None:
+            return bounded
+        limits = np.asarray(self._gen.command_speed_limits(t), dtype=float)
+        if limits.shape != (3,) or np.any(limits < 0.0):
+            raise ValueError("identification command speed limits are invalid")
+        for local_index, joint in enumerate(self._target_idx):
+            limit = limits[local_index]
+            bounded[joint] = float(np.clip(bounded[joint], -limit, limit))
+            if limit == 0.0:
+                # A dwell is an explicit zero-input experiment. Do not carry
+                # the floor tracker's Schmitt-trigger state into the next move.
+                self._floor_tracking_direction[joint] = 0
+        return bounded
 
     def _floor_aware_velocity(
             self, feedforward, reference, measured) -> np.ndarray:

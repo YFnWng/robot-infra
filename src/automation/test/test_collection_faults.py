@@ -19,9 +19,12 @@ def test_collection_marker_qos_retains_run_start_for_rosbag_discovery():
 
 def test_identification_episode_markers_survive_skipped_timer_boundaries():
     episodes = [
-        SimpleNamespace(name="first", start_s=0.0, duration_s=1.0),
-        SimpleNamespace(name="second", start_s=1.0, duration_s=2.0),
-        SimpleNamespace(name="third", start_s=3.0, duration_s=1.0),
+        SimpleNamespace(name="first", start_s=0.0, duration_s=1.0,
+                        maximum_command_speed_limits=np.zeros(3)),
+        SimpleNamespace(name="second", start_s=1.0, duration_s=2.0,
+                        maximum_command_speed_limits=np.ones(3)),
+        SimpleNamespace(name="third", start_s=3.0, duration_s=1.0,
+                        maximum_command_speed_limits=np.zeros(3)),
     ]
     generator = SimpleNamespace(
         episodes=episodes,
@@ -43,6 +46,33 @@ def test_identification_episode_markers_survive_skipped_timer_boundaries():
         ("episode_start", "second"), ("episode_end", "second"),
         ("episode_start", "third"), ("episode_end", "third"),
     ]
+
+
+def test_identification_floor_correction_respects_episode_ceiling():
+    fake = SimpleNamespace(
+        _mode="identification",
+        _gen=SimpleNamespace(
+            command_speed_limits=lambda t: np.array([0.0, 12.0, 0.0])),
+        _target_idx=[0, 1, 2],
+        _floor_tracking_direction=np.array([1, 1, -1, 0, 0, 0], dtype=np.int8),
+    )
+    result = CollectionNode._apply_identification_speed_ceiling(
+        fake, 19.31, np.array([2.0, 14.65, -1.0, 0.0, 0.0, 0.0]))
+    assert np.allclose(result, [0.0, 12.0, 0.0, 0.0, 0.0, 0.0])
+    assert fake._floor_tracking_direction[:3].tolist() == [0, 1, 0]
+
+
+def test_identification_dwell_forces_exact_zero_command():
+    fake = SimpleNamespace(
+        _mode="identification",
+        _gen=SimpleNamespace(command_speed_limits=lambda t: np.zeros(3)),
+        _target_idx=[0, 1, 2],
+        _floor_tracking_direction=np.array([1, -1, 1, 0, 0, 0], dtype=np.int8),
+    )
+    result = CollectionNode._apply_identification_speed_ceiling(
+        fake, 5.0, np.array([-2.0, 7.0, 1.0, 0.0, 0.0, 0.0]))
+    assert np.allclose(result, 0.0)
+    assert np.all(fake._floor_tracking_direction == 0)
 
 
 def preflight_feedback(**overrides):

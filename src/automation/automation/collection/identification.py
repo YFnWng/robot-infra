@@ -51,6 +51,7 @@ class _Segment:
     end: np.ndarray
     frequencies: np.ndarray | None = None
     phases: np.ndarray | None = None
+    speed_limits: np.ndarray | None = None
 
     def state(self, t: float):
         if self.duration <= 0.0:
@@ -103,19 +104,36 @@ class IdentificationEpisode:
     duration_s: float
     segments: tuple[_Segment, ...]
 
-    def state(self, local_t: float):
+    def _segment_at(self, local_t: float):
         remaining = min(max(float(local_t), 0.0), self.duration_s)
         for segment in self.segments:
             if remaining <= segment.duration:
-                return segment.state(remaining)
+                return segment, remaining
             remaining -= segment.duration
-        return self.segments[-1].state(self.segments[-1].duration)
+        return self.segments[-1], self.segments[-1].duration
+
+    def state(self, local_t: float):
+        segment, segment_t = self._segment_at(local_t)
+        return segment.state(segment_t)
+
+    def command_speed_limits(self, local_t: float):
+        segment, _ = self._segment_at(local_t)
+        if segment.speed_limits is None:
+            return np.zeros(3)
+        return segment.speed_limits.copy()
+
+    @property
+    def maximum_command_speed_limits(self):
+        return np.max(np.asarray([
+            np.zeros(3) if segment.speed_limits is None
+            else segment.speed_limits
+            for segment in self.segments]), axis=0)
 
 
 class IdentificationGenerator:
     """Build and sample one complete hardware-safe identification plan."""
 
-    version = "hardware_identification_v1"
+    version = "hardware_identification_v3"
 
     def __init__(
         self,
@@ -217,12 +235,16 @@ class IdentificationGenerator:
         holds = holds or {}
         for index in range(len(points) - 1):
             duration = self._move_duration(points[index], points[index + 1], speeds)
+            moving = np.abs(points[index + 1] - points[index]) > 1e-12
+            segment_limits = np.where(moving, speeds, 0.0)
             segments.append(_Segment(
-                "move", duration, points[index], points[index + 1]))
+                "move", duration, points[index], points[index + 1],
+                speed_limits=np.asarray(segment_limits, dtype=float)))
             hold = float(holds.get(index + 1, 0.0))
             if hold > 0.0:
                 segments.append(_Segment(
-                    "hold", hold, points[index + 1], points[index + 1]))
+                    "hold", hold, points[index + 1], points[index + 1],
+                    speed_limits=np.zeros(3)))
         return name, tuple(segments)
 
     def _build_episodes(self):
@@ -234,7 +256,8 @@ class IdentificationGenerator:
         specs = []
 
         def hold(name, duration):
-            specs.append((name, (_Segment("hold", duration, z, z),)))
+            specs.append((name, (_Segment(
+                "hold", duration, z, z, speed_limits=np.zeros(3)),)))
 
         def path(name, points, speeds, holds=None):
             specs.append(self._waypoint_episode(name, points, speeds, holds))
@@ -255,6 +278,12 @@ class IdentificationGenerator:
             hold("rotation_medium_skipped", self.config.dwell_s)
         hold("dwell_after_rotation_medium", self.config.dwell_s)
         path("bend_out_and_back", [z, bend, z], slow)
+        hold("dwell_after_bend_slow", self.config.dwell_s)
+        if self.medium_enabled[2]:
+            path("bend_medium", [z, bend, z], medium)
+        else:
+            hold("bend_medium_skipped", self.config.dwell_s)
+        hold("dwell_after_bend_medium", self.config.dwell_s)
         path("bend_hold_unload_relax", [z, bend, z], slow, {
             1: self.config.hold_s, 2: self.config.hold_s})
         path("repeated_bend_loops", [z, bend, z, bend, z], slow)
@@ -287,7 +316,7 @@ class IdentificationGenerator:
         while True:
             segment = _Segment(
                 "multisine", pe_duration, z, pe_amplitude,
-                pe_frequencies, phases)
+                pe_frequencies, phases, slow.copy())
             times = np.linspace(0.0, pe_duration, 2001)
             peak = np.max(np.abs([segment.state(t)[1] for t in times]), axis=0)
             if np.all(peak <= slow * (1.0 + 1e-10)):
@@ -336,6 +365,14 @@ class IdentificationGenerator:
     def relative_velocity(self, t: float):
         return self.state(t)[1]
 
+    def command_speed_limits(self, t: float):
+        """Per-axis ceiling for the final command, including feedback terms."""
+        if t >= self.duration:
+            return np.zeros(3)
+        index = self.episode_index(t)
+        episode = self._episodes[index]
+        return episode.command_speed_limits(float(t) - episode.start_s)
+
     def step(self, t: float):
         return self.relative_position(t)
 
@@ -359,6 +396,15 @@ class IdentificationGenerator:
                 "name": episode.name,
                 "start_s": episode.start_s,
                 "duration_s": episode.duration_s,
+                "command_speed_limits": (
+                    episode.maximum_command_speed_limits.tolist()),
+                "segments": [{
+                    "kind": segment.kind,
+                    "duration_s": segment.duration,
+                    "command_speed_limits": (
+                        np.zeros(3) if segment.speed_limits is None
+                        else segment.speed_limits).tolist(),
+                } for segment in episode.segments],
             } for episode in self._episodes],
         }
 
@@ -366,6 +412,8 @@ class IdentificationGenerator:
         sample_times = np.arange(0.0, self.duration + self.dt, self.dt)
         positions = np.asarray([self.relative_position(t) for t in sample_times])
         velocities = np.asarray([self.relative_velocity(t) for t in sample_times])
+        command_limits = np.asarray([
+            self.command_speed_limits(t) for t in sample_times])
         absolute = positions + self.start_position
         if not np.all(np.isfinite(absolute)) or not np.all(np.isfinite(velocities)):
             raise ValueError("identification plan contains non-finite samples")
@@ -374,6 +422,9 @@ class IdentificationGenerator:
             raise ValueError("identification plan exceeds joint position limits")
         if np.any(np.abs(velocities) > self.maximum_speeds + 1e-7):
             raise ValueError("identification plan exceeds joint speed limits")
+        if np.any(np.abs(velocities) > command_limits + 1e-7):
+            raise ValueError(
+                "identification feed-forward exceeds an episode speed ceiling")
         q0, v0, _ = self.state(0.0)
         q1, v1, _ = self.state(self.duration)
         if not (np.allclose(q0, 0.0) and np.allclose(v0, 0.0)
