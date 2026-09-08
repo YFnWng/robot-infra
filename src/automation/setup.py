@@ -25,6 +25,9 @@ setup(
             "state_estimator = automation.estimation.node:main",
             "em_bridge = automation.collection.em_bridge:main",
             "collection = automation.collection.node:main",
+            "marker_tracking = automation.marker_tracking.node:main",
+            "marker_udp_receiver = "
+            "automation.marker_tracking.udp_receiver:main",
         ],
     },
 )

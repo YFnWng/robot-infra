@@ -130,15 +130,16 @@ class CollectionNode(Node):
         self.declare_parameter(
             "identification_amplitudes", [20.0, 100.0, 6.0])
         self.declare_parameter(
-            "identification_margins", [0.5, 5.0, 0.25])
+            "identification_margins", [0.0, 0.0, 0.0])
         self.declare_parameter(
             "identification_minimum_amplitudes", [2.0, 20.0, 1.0])
+        self.declare_parameter("identification_full_limits", True)
         self.declare_parameter("identification_settle_s", 2.0)
         self.declare_parameter("identification_dwell_s", 1.0)
         self.declare_parameter("identification_hold_s", 2.0)
         self.declare_parameter("identification_slow_fraction", 0.30)
         self.declare_parameter("identification_medium_fraction", 0.70)
-        self.declare_parameter("identification_max_duration_s", 900.0)
+        self.declare_parameter("identification_max_duration_s", 600.0)
         # per-catheter pos + vel limits from YAML (overrides the joint_lower/upper
         # and joint_max_speeds params when limits_file is set)
         self.declare_parameter("limits_file", "")
@@ -902,6 +903,8 @@ class CollectionNode(Node):
                 "identification_slow_fraction").value),
             medium_fraction=float(self.get_parameter(
                 "identification_medium_fraction").value),
+            full_position_limits=bool(self.get_parameter(
+                "identification_full_limits").value),
             seed=1 if seed < 0 else seed,
             max_duration_s=float(self.get_parameter(
                 "identification_max_duration_s").value),
@@ -919,6 +922,14 @@ class CollectionNode(Node):
         self._episode_index = -1
         self.get_logger().info(
             f"identification generator: duration={self._duration:.3f}s "
+            f"full_limits={config.full_position_limits} "
+            f"position=[{self._gen.usable_lower.tolist()}, "
+            f"{self._gen.usable_upper.tolist()}] "
+            f"velocity_tiers=[{self._gen.slow_speeds.tolist()}, "
+            f"{self._gen.medium_speeds.tolist()}, "
+            f"{self._gen.fast_speeds.tolist()}] "
+            f"bend_experiment_amplitude="
+            f"{self._gen.bend_experiment_amplitude:.3f} "
             f"requested={list(config.amplitudes)} "
             f"resolved={self._gen.amplitudes.tolist()} "
             f"episodes={len(self._gen.episodes)} seed={config.seed}")
@@ -1253,6 +1264,12 @@ class CollectionNode(Node):
                     chr(value) if 32 <= value < 127 else "."
                     for value in response),
             })
+        if fault["transition"] == ManagerEvent.MOTION_RETRYING:
+            self.get_logger().warn(
+                "transient device stall; firmware is retrying motion: "
+                f"{fault}")
+            self._marker("stall_retry", **fault)
+            return
         if fault["transition"] != ManagerEvent.MOTION_CONFIRMED:
             return
         if self._t0 is None and not self._done:

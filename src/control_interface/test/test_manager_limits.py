@@ -270,6 +270,31 @@ def test_confirmed_device_fault_latches_and_commands_zero():
     assert events[-1].text == 'MANAGER_INHIBITED:MOTION_CONFIRMED:STALL'
 
 
+def test_retrying_stall_is_forwarded_without_latching_or_zeroing():
+    published = []
+    events = []
+    obj = manager([5.0] * 6)
+    obj.active_source = 'autonomy'
+    obj.control_mode = ManagerEvent.JOINT_VEL
+    obj.control_pub = SimpleNamespace(publish=published.append)
+    obj.event_pub = SimpleNamespace(publish=events.append)
+    obj.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+    msg = DeviceEvent()
+    msg.predicate = ManagerEvent.STALL
+    msg.text = 'MOTION_RETRYING:STALL'
+    msg.data = [3.0, float(ManagerEvent.MOTION_RETRYING),
+                float(ManagerEvent.FAULT_STALL)]
+
+    ControlManager.device_event_callback(obj, msg)
+
+    assert obj._fault_latched is False
+    assert obj.active_source == 'autonomy'
+    assert obj.control_mode == ManagerEvent.JOINT_VEL
+    assert published == []
+    assert events[-1].text == 'MOTION_RETRYING:STALL'
+
+
 def test_stop_is_accepted_while_fault_is_latched():
     published = []
     dispatched = []

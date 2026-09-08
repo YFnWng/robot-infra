@@ -54,6 +54,29 @@ def test_protocol_v3_motion_event_exposes_driver_response():
         4, 3, 4, ord('!'), ord('E'), ord('R'), ord('R')])
 
 
+def test_stall_retry_transition_is_named_and_preserves_attempt_number():
+    published = []
+    fake = SimpleNamespace(
+        event_pub=SimpleNamespace(publish=published.append),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            to_msg=Time)),
+        get_logger=lambda: SimpleNamespace(warn=lambda message: None),
+    )
+    legacy_state = bytes([110] * 6)
+    structured = struct.pack(
+        '<BBBBBHfffHH', 3, ManagerEvent.MOTION_RETRYING,
+        ManagerEvent.FAULT_STALL, 1, 255, 8,
+        -40.0, 0.0, 0.0, 89, 209)
+    diagnostics = bytes([2, 0, 0, 0])
+
+    SerialCommunication.handle_device_event(
+        fake, ManagerEvent.STALL, legacy_state + structured + diagnostics)
+
+    assert published[0].text == 'MOTION_RETRYING:STALL'
+    assert published[0].data[4] == -1
+    assert published[0].data[11] == 2
+
+
 def test_stream_handler_rejects_wrong_payload_size():
     fake = SimpleNamespace()
     with pytest.raises(ValueError, match='requires 24 bytes'):

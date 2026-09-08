@@ -39,8 +39,9 @@ class IdentificationConfig:
     hold_s: float = 2.0
     slow_fraction: float = 0.30
     medium_fraction: float = 0.70
+    full_position_limits: bool = False
     seed: int = 1
-    max_duration_s: float = 900.0
+    max_duration_s: float = 600.0
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,7 @@ class IdentificationEpisode:
 class IdentificationGenerator:
     """Build and sample one complete hardware-safe identification plan."""
 
-    version = "hardware_identification_v3"
+    version = "hardware_identification_v4"
 
     def __init__(
         self,
@@ -163,6 +164,10 @@ class IdentificationGenerator:
         margins = np.asarray(self.config.margins, dtype=float)
         usable_lower = self.lower_limits + margins
         usable_upper = self.upper_limits - margins
+        if np.any(usable_upper <= usable_lower):
+            raise ValueError("identification margins leave no usable range")
+        self.usable_lower = usable_lower
+        self.usable_upper = usable_upper
         if np.any(self.start_position < self.lower_limits) or np.any(
                 self.start_position > self.upper_limits):
             raise ValueError(
@@ -171,27 +176,64 @@ class IdentificationGenerator:
                 f"{self.lower_limits.tolist()} upper={self.upper_limits.tolist()}")
 
         requested = np.asarray(self.config.amplitudes, dtype=float)
-        # Insertion and bending use positive excursions. Rotation requires both
-        # signed branches so the resolved amplitude is symmetric about run start.
-        available = np.array([
-            usable_upper[0] - self.start_position[0],
-            min(usable_upper[1] - self.start_position[1],
-                self.start_position[1] - usable_lower[1]),
-            usable_upper[2] - self.start_position[2],
-        ])
-        self.amplitudes = np.minimum(requested, available)
+        if self.config.full_position_limits:
+            self.lower_excursions = usable_lower - self.start_position
+            self.upper_excursions = usable_upper - self.start_position
+            available = usable_upper - usable_lower
+            # Isolated sweeps below use both asymmetric full-limit endpoints.
+            # Coupled/PE episodes remain at their requested moderate amplitudes;
+            # making every interaction full-range is unnecessarily long and
+            # mechanically aggressive.
+            interaction_available = np.array([
+                max(0.0, self.upper_excursions[0]),
+                min(abs(self.lower_excursions[1]),
+                    abs(self.upper_excursions[1])),
+                max(0.0, self.upper_excursions[2]),
+            ])
+            self.amplitudes = np.minimum(requested, interaction_available)
+        else:
+            # Insertion and bending use positive excursions. Rotation requires
+            # both signed branches about the measured run-start pose.
+            available = np.array([
+                usable_upper[0] - self.start_position[0],
+                min(usable_upper[1] - self.start_position[1],
+                    self.start_position[1] - usable_lower[1]),
+                usable_upper[2] - self.start_position[2],
+            ])
+            self.amplitudes = np.minimum(requested, available)
+            self.lower_excursions = np.array(
+                [0.0, -self.amplitudes[1], 0.0])
+            self.upper_excursions = self.amplitudes.copy()
         minimum = np.asarray(self.config.minimum_amplitudes, dtype=float)
-        if np.any(self.amplitudes + 1e-12 < minimum):
+        resolved_range = self.amplitudes
+        if np.any(resolved_range + 1e-12 < minimum):
             raise ValueError(
                 "insufficient safe excursion for identification: requested="
-                f"{requested.tolist()} resolved={self.amplitudes.tolist()} "
+                f"{requested.tolist()} resolved={resolved_range.tolist()} "
                 f"minimum={minimum.tolist()}")
+        self.bend_experiment_amplitude = (
+            self.upper_excursions[2] if self.config.full_position_limits
+            else self.amplitudes[2])
 
-        self.slow_speeds = np.maximum(
-            self.minimum_speeds,
+        fractional_slow = (
             self.config.slow_fraction * self.maximum_speeds)
+        if self.config.full_position_limits:
+            # A positive vel_min is the lowest speed qualified as reliable and
+            # is itself an identification endpoint. Profiles without a floor
+            # retain the conservative fractional slow tier.
+            self.slow_speeds = np.where(
+                self.minimum_speeds > 0.0,
+                self.minimum_speeds,
+                fractional_slow)
+        else:
+            self.slow_speeds = np.maximum(
+                self.minimum_speeds, fractional_slow)
         self.medium_speeds = self.config.medium_fraction * self.maximum_speeds
         self.medium_enabled = self.medium_speeds >= 1.5 * self.slow_speeds
+        self.fast_speeds = self.maximum_speeds.copy()
+        previous_speeds = np.where(
+            self.medium_enabled, self.medium_speeds, self.slow_speeds)
+        self.fast_enabled = self.fast_speeds >= 1.2 * previous_speeds
         self._episodes = self._build_episodes()
         self.duration = sum(ep.duration_s for ep in self._episodes)
         if self.duration > self.config.max_duration_s:
@@ -251,8 +293,32 @@ class IdentificationGenerator:
         z = np.zeros(3)
         lin = np.array([self.amplitudes[0], 0.0, 0.0])
         rot = np.array([0.0, self.amplitudes[1], 0.0])
-        bend = np.array([0.0, 0.0, self.amplitudes[2]])
-        slow, medium = self.slow_speeds, self.medium_speeds
+        lin_upper = np.array([self.upper_excursions[0], 0.0, 0.0])
+        lin_lower = np.array([self.lower_excursions[0], 0.0, 0.0])
+        rot_upper = np.array([0.0, self.upper_excursions[1], 0.0])
+        rot_lower = np.array([0.0, self.lower_excursions[1], 0.0])
+        bend_upper = np.array([0.0, 0.0, self.upper_excursions[2]])
+        bend_lower = np.array([0.0, 0.0, self.lower_excursions[2]])
+        # In full-limit mode, every purposeful bend experiment reaches the
+        # configured absolute upper bend limit. The multisine remains modest
+        # and continues to use the requested identification amplitude below.
+        bend = np.array([0.0, 0.0, self.bend_experiment_amplitude])
+        slow, medium, fast = (
+            self.slow_speeds, self.medium_speeds, self.fast_speeds)
+        lin_rate_path = [z, lin, z]
+        rot_rate_path = [z, rot, z, -rot, z]
+        bend_rate_path = [z, bend, z]
+        lin_full_path = ([z, lin_upper, z, lin_lower, z]
+                         if self.config.full_position_limits
+                         else lin_rate_path)
+        rot_full_path = ([z, rot_upper, z, rot_lower, z]
+                         if self.config.full_position_limits
+                         else rot_rate_path)
+        bend_full_path = ([z, bend_upper, z, bend_lower, z]
+                          if self.config.full_position_limits
+                          else bend_rate_path)
+        interaction_speeds = np.where(
+            self.medium_enabled, medium, slow)
         specs = []
 
         def hold(name, duration):
@@ -263,47 +329,64 @@ class IdentificationGenerator:
             specs.append(self._waypoint_episode(name, points, speeds, holds))
 
         hold("settle_start", self.config.settle_s)
-        path("insertion_slow", [z, lin, z], slow)
+        path("insertion_slow", lin_rate_path, slow)
         hold("dwell_after_insertion_slow", self.config.dwell_s)
         if self.medium_enabled[0]:
-            path("insertion_medium", [z, lin, z], medium)
+            path("insertion_medium", lin_rate_path, medium)
         else:
             hold("insertion_medium_skipped", self.config.dwell_s)
         hold("dwell_after_insertion_medium", self.config.dwell_s)
-        path("rotation_slow", [z, rot, z, -rot, z], slow)
+        if self.fast_enabled[0]:
+            path("insertion_fast", lin_full_path, fast)
+        else:
+            hold("insertion_fast_skipped", self.config.dwell_s)
+        hold("dwell_after_insertion_fast", self.config.dwell_s)
+        path("rotation_slow", rot_rate_path, slow)
         hold("dwell_after_rotation_slow", self.config.dwell_s)
         if self.medium_enabled[1]:
-            path("rotation_medium", [z, rot, z, -rot, z], medium)
+            path("rotation_medium", rot_rate_path, medium)
         else:
             hold("rotation_medium_skipped", self.config.dwell_s)
         hold("dwell_after_rotation_medium", self.config.dwell_s)
-        path("bend_out_and_back", [z, bend, z], slow)
+        if self.fast_enabled[1]:
+            path("rotation_fast", rot_full_path, fast)
+        else:
+            hold("rotation_fast_skipped", self.config.dwell_s)
+        hold("dwell_after_rotation_fast", self.config.dwell_s)
+        path("bend_out_and_back", bend_rate_path, slow)
         hold("dwell_after_bend_slow", self.config.dwell_s)
         if self.medium_enabled[2]:
-            path("bend_medium", [z, bend, z], medium)
+            path("bend_medium", bend_rate_path, medium)
         else:
             hold("bend_medium_skipped", self.config.dwell_s)
         hold("dwell_after_bend_medium", self.config.dwell_s)
+        if self.fast_enabled[2]:
+            path("bend_fast", bend_full_path, fast)
+        else:
+            hold("bend_fast_skipped", self.config.dwell_s)
+        hold("dwell_after_bend_fast", self.config.dwell_s)
         path("bend_hold_unload_relax", [z, bend, z], slow, {
             1: self.config.hold_s, 2: self.config.hold_s})
         path("repeated_bend_loops", [z, bend, z, bend, z], slow)
 
         mid_lin = 0.5 * lin
         path("bend_at_mid_insertion",
-             [z, mid_lin, mid_lin + bend, mid_lin, z], slow)
+             [z, mid_lin, mid_lin + bend, mid_lin, z], interaction_speeds)
         path("insertion_bend_interaction",
              [z, 0.6 * lin + 0.3 * bend, 0.3 * lin + 0.7 * bend,
-              0.7 * lin + 0.6 * bend, z], slow)
+              0.7 * lin + bend, 0.2 * lin + 0.4 * bend,
+              0.8 * lin + bend, z], interaction_speeds)
         path("rotation_bend_interaction",
              [z, 0.5 * rot + 0.3 * bend, -0.4 * rot + 0.7 * bend,
-              0.6 * rot + 0.5 * bend, z], slow)
+              0.6 * rot + bend, z], interaction_speeds)
         path("insertion_rotation_interaction",
              [z, 0.5 * lin + 0.4 * rot, 0.8 * lin - 0.4 * rot,
-              0.3 * lin + 0.6 * rot, z], slow)
+              0.3 * lin + 0.6 * rot, z], interaction_speeds)
 
-        target = 0.45 * lin + 0.35 * rot + 0.45 * bend
+        target = 0.45 * lin + 0.35 * rot + bend
         path("opposite_history_revisit",
-             [z, 0.7 * lin, target, z, -0.6 * rot, target, z], slow,
+             [z, 0.7 * lin, target, z, -0.6 * rot, target, z],
+             interaction_speeds,
              {2: self.config.dwell_s, 5: self.config.dwell_s})
 
         rng = np.random.default_rng(self.config.seed)
@@ -316,12 +399,13 @@ class IdentificationGenerator:
         while True:
             segment = _Segment(
                 "multisine", pe_duration, z, pe_amplitude,
-                pe_frequencies, phases, slow.copy())
+                pe_frequencies, phases, interaction_speeds.copy())
             times = np.linspace(0.0, pe_duration, 2001)
             peak = np.max(np.abs([segment.state(t)[1] for t in times]), axis=0)
-            if np.all(peak <= slow * (1.0 + 1e-10)):
+            if np.all(peak <= interaction_speeds * (1.0 + 1e-10)):
                 break
-            pe_duration *= float(np.max(peak / slow)) * 1.001
+            pe_duration *= float(
+                np.max(peak / interaction_speeds)) * 1.001
         specs.append(("coupled_persistent_excitation", (segment,)))
         hold("settle_end", self.config.settle_s)
 
@@ -387,10 +471,18 @@ class IdentificationGenerator:
             "start_position": self.start_position.tolist(),
             "requested_amplitudes": list(self.config.amplitudes),
             "resolved_amplitudes": self.amplitudes.tolist(),
+            "bend_experiment_amplitude": self.bend_experiment_amplitude,
+            "full_position_limits": self.config.full_position_limits,
+            "usable_position_lower": self.usable_lower.tolist(),
+            "usable_position_upper": self.usable_upper.tolist(),
+            "relative_position_lower": self.lower_excursions.tolist(),
+            "relative_position_upper": self.upper_excursions.tolist(),
             "margins": list(self.config.margins),
             "slow_speeds": self.slow_speeds.tolist(),
             "medium_speeds": self.medium_speeds.tolist(),
             "medium_enabled": self.medium_enabled.tolist(),
+            "fast_speeds": self.fast_speeds.tolist(),
+            "fast_enabled": self.fast_enabled.tolist(),
             "seed": self.config.seed,
             "episodes": [{
                 "name": episode.name,

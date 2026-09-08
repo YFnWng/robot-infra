@@ -372,6 +372,39 @@ def test_confirmed_fault_finishes_active_run():
     assert fake._hardware_fault["driver_stage"] == "O"
 
 
+def test_retrying_stall_records_marker_without_finishing_run():
+    finished = []
+    markers = []
+    warnings = []
+    fake = SimpleNamespace(
+        _t0=object(), _done=False, _returning=False,
+        _return_status="not_started", _hardware_fault=None,
+        _run_status="running",
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=321)),
+        get_logger=lambda: SimpleNamespace(
+            warn=warnings.append, error=lambda message: None),
+        _marker=lambda event, **fields: markers.append((event, fields)),
+        _finish=lambda: finished.append(True),
+    )
+    msg = DeviceEvent()
+    msg.predicate = ManagerEvent.STALL
+    msg.text = "MOTION_RETRYING:STALL"
+    msg.data = [float(value) for value in [
+        3, ManagerEvent.MOTION_RETRYING, ManagerEvent.FAULT_STALL,
+        1, -1, 12, -40.0, 0.0, 0.0, 89, 209, 2, 0, 0, 0]]
+
+    CollectionNode._device_event_cb(fake, msg)
+
+    assert finished == []
+    assert fake._hardware_fault is None
+    assert fake._run_status == "running"
+    assert markers[0][0] == "stall_retry"
+    assert markers[0][1]["axis"] == 1
+    assert markers[0][1]["detail"] == 2
+    assert warnings
+
+
 def test_protocol_v3_driver_diagnostics_are_decoded():
     finished = []
     fake = SimpleNamespace(

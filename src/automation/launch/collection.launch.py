@@ -82,6 +82,8 @@ def launch_setup(context, *_args, **_kwargs):
                 cfg("identification_amplitudes")),
             "identification_margins": _floats(
                 cfg("identification_margins")),
+            "identification_full_limits": cfg(
+                "identification_full_limits").lower() in ("true", "1", "yes"),
             "identification_minimum_amplitudes": _floats(
                 cfg("identification_minimum_amplitudes")),
             "identification_settle_s": float(
@@ -171,7 +173,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "identification_amplitudes", default_value="20.0,100.0,6.0"),
         DeclareLaunchArgument(
-            "identification_margins", default_value="0.5,5.0,0.25"),
+            "identification_margins", default_value="0.0,0.0,0.0"),
+        DeclareLaunchArgument(
+            "identification_full_limits", default_value="true"),
         DeclareLaunchArgument(
             "identification_minimum_amplitudes", default_value="2.0,20.0,1.0"),
         DeclareLaunchArgument("identification_settle_s", default_value="2.0"),
@@ -182,7 +186,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "identification_medium_fraction", default_value="0.70"),
         DeclareLaunchArgument(
-            "identification_max_duration_s", default_value="900.0"),
+            "identification_max_duration_s", default_value="600.0"),
         DeclareLaunchArgument("session_root", default_value="~/catheter_sessions"),
         DeclareLaunchArgument("record", default_value="true"),
         DeclareLaunchArgument("storage_id", default_value="mcap"),      # mcap|sqlite3

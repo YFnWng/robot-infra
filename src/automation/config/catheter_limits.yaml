@@ -25,14 +25,14 @@ catheters:
     vel_max:   [5.0,    30.0,  4.9,   5.0,    30.0,   30.0]
 
   imricor_test:
-    pos_lower: [0.0,   -180.0, 0.0,   0.0,   -180.0, -360.0]
-    pos_upper: [40.0,   180.0, 10.0,  80.0,   180.0,  360.0]
+    pos_lower: [0.0,   -270.0, 0.0,   0.0,   -180.0, -360.0]
+    pos_upper: [40.0,   270.0, 15.0,  80.0,   180.0,  360.0]
     # catheter_bend is coupled into the linear motor in firmware. A 2 mm/s
     # bend floor keeps the coupled linear motor near or above its reliable
     # 36-RPM operating floor. Direct-drive bend reaches 4.96 mm/s at 250 RPM;
     # retain a small command margin below the firmware RPM clamp.
     vel_min:   [2.0,      7.0,  2.0,   0.0,     0.0,    0.0]
-    vel_max:   [10.0,    40.0,  4.9,   4.0,    25.0,   25.0]
+    vel_max:   [10.0,    40.0,  4.5,   4.0,    25.0,   25.0]
 
   imricor_freudenberg:
     pos_lower: [-50.0,   -360.0, 0.0,   -50.0,   -360.0, -360.0]

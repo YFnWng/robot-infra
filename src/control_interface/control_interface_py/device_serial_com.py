@@ -398,6 +398,7 @@ class SerialCommunication(Node):
                 4: "MOTION_RESET",
                 5: "MOTION_UNOBSERVABLE",
                 6: "MOTION_STATUS",
+                7: "MOTION_RETRYING",
             }
             fault_names = {
                 0: "NONE",
