@@ -7,6 +7,7 @@
 #include <cmath>
 #include "position_move_tracker.h"
 #include "stall_detector.h"
+#include "stall_retry.h"
 
 // Teensy 4.0 pin functionalities
 // Serial RX: 0, 7, 15, 16, 21, 25, 28
@@ -147,10 +148,12 @@ bool directionValid[numHWSerials] = { false };
 bool motorEnabled[numHWSerials] = { false };
 bool controlModeValid[numHWSerials] = { false };
 
-// Confirmed faults are latched: the affected physical motor and its coupled
-// partner are stopped and ignore the 100 Hz command stream until RESET_FAULT.
+// Non-stall faults and persistent stalls are latched. A transient STALL gets
+// two bounded stop/cooldown/retry attempts before normal latching takes over.
 constexpr bool FAULT_STOP_ENABLED = true;
 StallDetector motionMonitors[numHWSerials];
+StallRetryBudget stallRetryBudgets[numHWSerials];
+uint32_t stallRetryBlockedUntilMs[numHWSerials] = {0};
 PositionMoveTracker positionMoveTracker;
 uint16_t motionFaultSequence = 0;
 bool encoderIntegrityLatched = false;
@@ -206,6 +209,8 @@ void setup() {
   // requires an acknowledgement before enabling each motor.
   for (uint8_t axis = 0; axis < numHWSerials; axis++) {
     motionMonitors[axis].begin(millis(), EncCounts[axis]);
+    stallRetryBudgets[axis].reset();
+    stallRetryBlockedUntilMs[axis] = 0;
   }
 
   // set up motor communications
@@ -261,6 +266,8 @@ void loop() {
         targetVel[i] = 0.0f;
         motionMonitors[i].setCommand(
             millis(), 0, targetDir[i], 0.0f);
+        stallRetryBudgets[i].reset();
+        stallRetryBlockedUntilMs[i] = 0;
       }
       newJointVelCmd = false;
       newJointPosCmd = false;
@@ -597,6 +604,8 @@ void procPCBytes() {
             targetVel[axis] = 0.0f;
             motionMonitors[axis].setCommand(
                 millis(), 0, targetDir[axis], 0.0f);
+            stallRetryBudgets[axis].reset();
+            stallRetryBlockedUntilMs[axis] = 0;
           }
           newJointVelCmd = false;
           newJointPosCmd = false;
@@ -628,6 +637,8 @@ void procPCBytes() {
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             StallDetector::Event event =
                 motionMonitors[axis].clearFault(millis(), EncCounts[axis]);
+            stallRetryBudgets[axis].reset();
+            stallRetryBlockedUntilMs[axis] = 0;
             if (event.transition == StallDetector::RESET) {
               reportMotionEvent(axis, 255, event);
             }
@@ -1212,6 +1223,24 @@ void updateMotionMonitors() {
 
     const uint8_t coupled = coupledAxis(axis);
     if (event.transition == StallDetector::CONFIRMED &&
+        event.fault == StallDetector::STALL &&
+        stallRetryBudgets[axis].request(now)) {
+      stopMotorAxis(axis, true);
+      motionMonitors[axis].clearFault(now, EncCounts[axis]);
+      const uint32_t retryAt =
+          stallRetryBudgets[axis].retryNotBeforeMs();
+      stallRetryBlockedUntilMs[axis] = retryAt;
+      if (coupled < numHWSerials) {
+        stopMotorAxis(coupled, true);
+        motionMonitors[coupled].clearFault(now, EncCounts[coupled]);
+        stallRetryBlockedUntilMs[coupled] = retryAt;
+      }
+      event.transition = StallDetector::RETRYING;
+      event.detail = stallRetryBudgets[axis].retryCount();
+      reportMotionEvent(axis, coupled, event);
+      continue;
+    }
+    if (event.transition == StallDetector::CONFIRMED &&
         FAULT_STOP_ENABLED) {
       cancelPositionMove(true);
       stopMotorAxis(axis, true);
@@ -1450,8 +1479,17 @@ static void stopMotorMask(uint8_t mask, bool force) {
 
 static uint8_t velocityActiveMask() {
   uint8_t mask = 0;
+  const uint32_t now = millis();
   for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    const uint32_t blockedUntil = stallRetryBlockedUntilMs[axis];
+    const bool coolingDown =
+        blockedUntil != 0 &&
+        static_cast<int32_t>(now - blockedUntil) < 0;
+    if (blockedUntil != 0 && !coolingDown) {
+      stallRetryBlockedUntilMs[axis] = 0;
+    }
     if (targetRPM[axis] != 0 &&
+        !coolingDown &&
         !(FAULT_STOP_ENABLED && motionMonitors[axis].latched())) {
       mask |= static_cast<uint8_t>(1U << axis);
     }

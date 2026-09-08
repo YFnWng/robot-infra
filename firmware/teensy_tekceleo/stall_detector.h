@@ -34,6 +34,7 @@ class StallDetector {
     RESET = 4,
     UNOBSERVABLE = 5,
     STATUS = 6,
+    RETRYING = 7,
   };
 
   struct Config {
