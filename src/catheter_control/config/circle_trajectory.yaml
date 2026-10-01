@@ -1,0 +1,30 @@
+# HARDWARE TRAJECTORY. The fixed reference tip below was measured at the
+# established 20 mm insertion configuration. The circle is parallel to the
+# base YZ plane, centered at (x0 + 10 mm, 0, z0), with radius 10 mm.
+# Fixed center: (0.03190615423023701, 0.0, 0.07138097286224365) metres.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_trajectory
+marker_topic: /shape_tracking/markers
+
+auto_arm: true
+tolerance_mm: 1.8
+settle_time_s: 0.25
+
+generator:
+  type: circle_yz_from_current_tip
+  reference_tip_m:
+    - 0.021906154230237007
+    - 0.017045380547642708
+    - 0.07138097286224365
+  radius_mm: 10.0
+  center_x_offset_mm: 10.0
+  # Five intermediate points connect the fixed initial tip to the circle.
+  # Together with the circle endpoint, this divides the 12.23 mm approach
+  # into approximately 2.04 mm target increments.
+  approach_waypoint_count: 5
+  # Eighteen points include the duplicated closing endpoint, giving 17
+  # approximately 3.67 mm circle intervals at the 10 mm radius.
+  waypoint_count: 18
+  waypoint_timeout_s: 2.0
+  direction: ccw
+  close_circle: true

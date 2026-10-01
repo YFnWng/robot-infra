@@ -1,0 +1,67 @@
+catheter_mppi:
+  ros__parameters:
+    # Matched hardware A/B profile: restore the v174 fixed-J baseline used by
+    # the documented successful axial trial.  All other controller parameters
+    # match causal_v2_fixed_hardware.yaml so Jacobian selection is the only
+    # intended model difference.
+    marker_estimator: ukf
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json
+    adaptation_enabled: false
+    # Rotation-disabled two-DOF isolation. Joint order is insertion, rotation,
+    # tendon, sheath insertion/rotation/bend.
+    controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]
+
+    backlash_compensation_enabled: true
+    takeup_transaction_enabled: true
+    mppi_transmission_aware_rollout: false
+    mppi_rotation_direction_latch: false
+    mppi_best_candidate_guard: true
+    mppi_takeup_risk_weight: 4.0
+    mppi_takeup_confirmation_time_s: 0.10
+    reversal_scheduler_enabled: true
+    reversal_scheduler_required_plans: 3
+    reversal_scheduler_minimum_absolute_cost_improvement: 5.0
+    reversal_scheduler_minimum_fractional_cost_improvement: 0.0
+    reversal_scheduler_minimum_terminal_error_improvement_mm: 0.25
+    reversal_scheduler_minimum_accepted_observations: 3
+    reversal_scheduler_cooldown_s: 1.0
+    backlash_engagement_confirmation_observations: 3
+    backlash_provisional_rejection_observations: 2
+    backlash_minimum_distal_bending_increment: 0.05
+    backlash_width_rad: [0.0, 0.0, 0.0]
+    backlash_width_positive_rad: [8.369, 7.020, 34.858]
+    backlash_width_negative_rad: [6.856, 7.090, 3.587]
+    backlash_takeup_velocity: [2.0, 5.0, 1.0]
+
+    estimator_filter_initial_covariance: 0.25
+    estimator_filter_process_std_sqrt_s: 1.0
+    estimator_initial_roll_hypotheses: 24
+    estimator_history_reconciliation_enabled: true
+    estimator_history_reconciliation_maximum_shift: 120.0
+
+    # Diagnostic-only adaptation gates; adaptation remains disabled.
+    adaptation_minimum_observations: 8
+    adaptation_minimum_normalized_action: 0.10
+    adaptation_minimum_rotation_deg: 0.30
+    adaptation_minimum_translation_mm: 0.30
+    adaptation_minimum_response_snr: 1.0
+    adaptation_maximum_window_s: 1.0
+    adaptation_directional_purity: 0.90
+    adaptation_reversal_holdoff_normalized_action_shaft_0: 4.5
+    adaptation_reversal_holdoff_normalized_action_shaft_1: 6.5
+    adaptation_reversal_holdoff_normalized_action_shaft_2: 4.0
+    adaptation_confirmation_windows: 2
+    adaptation_consistency_cosine: 0.80
+    adaptation_minimum_column_gain: 0.50
+    adaptation_maximum_column_gain: 1.50
+    adaptation_maximum_direction_deviation_deg: 30.0
+
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    device: cuda
+    samples: 1024
+    mppi_grouped_mode_sampling: true
+    mppi_takeup_limit_reserve_scale: 1.0
+    planning_deadline_s: 0.06
+    plan_rate_hz: 15.0
+    command_rate_hz: 100.0

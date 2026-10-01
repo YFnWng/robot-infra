@@ -1,0 +1,50 @@
+# Independent simulation targets. The robot returns to the same joint home
+# before every point; the absolute circle is frozen from the first home tip.
+frame_id: robot_base
+action_name: /sim/catheter_mppi/track_tip_trajectory
+marker_topic: /sim/shape_tracking/markers
+position_topic: /sim/device/state
+status_topic: /sim/catheter_mppi/status
+safety_topic: /sim/manager/safety_status
+control_topic: /sim/teleop/control
+event_topic: /sim/teleop/event
+source_name: autonomy
+
+target_timeout_s: 10.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+
+# Controller-isolation mode. After encoder homing, reset the simulated
+# transmission memory, exact truth recurrence, and controller estimator. This
+# makes every target start from the same complete plant state. Change only the
+# mode to history_preserving to retain tendon remanence like real hardware.
+plant_reset:
+  mode: full_simulation
+  services:
+    - /sim/catheter_sim/reset_plant
+    - /sim/catheter_sim/reset_perception
+    - /sim/catheter_mppi/reset_simulation_state
+  timeout_s: 5.0
+  settle_time_s: 1.0
+
+home:
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  # Match the simulated device's completion tolerances. Catheter bending uses
+  # a 2 mm/s reliable-speed floor and a 50 ms limit guard, so its reachable
+  # lower-bound tolerance is 0.10 mm rather than 0.05 mm.
+  joint_tolerance: [0.10, 0.50, 0.10, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.50
+
+generator:
+  type: circle_yz_from_current_tip
+  radius_mm: 10.0
+  # Shift the test plane far enough in +x that the precurved catheter can
+  # reach the upper/lower portions when each trial begins from reset truth.
+  center_x_offset_mm: 15.0
+  waypoint_count: 8
+  direction: ccw
+  close_circle: false

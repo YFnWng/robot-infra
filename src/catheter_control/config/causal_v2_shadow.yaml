@@ -1,0 +1,46 @@
+catheter_mppi:
+  ros__parameters:
+    # This profile is deliberately non-actuating until recorded replay passes.
+    marker_estimator: ukf
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_causal_v2.json
+    command_output_enabled: false
+    adaptation_enabled: false
+
+    # The UKF remained healthy for all 10,665 accepted observations. The run
+    # does not justify changing these process-prior values yet.
+    estimator_filter_initial_covariance: 0.25
+    estimator_filter_process_std_sqrt_s: 1.0
+    estimator_initial_roll_hypotheses: 24
+
+    # Static-start p99 over 1 s was 0.237 deg / 0.085 mm. Translation retains
+    # the existing conservative 0.30 mm floor; rotation is raised above noise.
+    adaptation_minimum_observations: 8
+    adaptation_minimum_normalized_action: 0.10
+    adaptation_minimum_rotation_deg: 0.30
+    adaptation_minimum_translation_mm: 0.30
+    # The recorded covariance-derived SNR had p95 near 1.0 while marker NIS
+    # was strongly conservative. Absolute motion floors remain authoritative.
+    adaptation_minimum_response_snr: 1.0
+    adaptation_maximum_window_s: 1.0
+    adaptation_directional_purity: 0.90
+
+    # Marker-onset hinge fits, rounded upward from per-axis empirical ranges.
+    # These replace the previous scalar 0.02 holdoff for this profile.
+    adaptation_reversal_holdoff_normalized_action_shaft_0: 4.5
+    adaptation_reversal_holdoff_normalized_action_shaft_1: 6.5
+    adaptation_reversal_holdoff_normalized_action_shaft_2: 4.0
+
+    adaptation_confirmation_windows: 2
+    adaptation_consistency_cosine: 0.80
+    adaptation_minimum_column_gain: 0.50
+    adaptation_maximum_column_gain: 1.50
+    adaptation_maximum_direction_deviation_deg: 30.0
+
+    # Retain the simulation-qualified minimal planner until a command-producing
+    # shadow comparison shows that a controller-level change is necessary.
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    samples: 32
+    planning_deadline_s: 0.06
+    plan_rate_hz: 15.0
+    command_rate_hz: 100.0

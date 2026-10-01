@@ -1,0 +1,35 @@
+# Hardware-faithful simulation comparison. Joint homing does not erase the
+# simulated transmitted tendon coordinate or any estimator/controller history.
+frame_id: robot_base
+action_name: /sim/catheter_mppi/track_tip_trajectory
+marker_topic: /sim/shape_tracking/markers
+position_topic: /sim/device/state
+status_topic: /sim/catheter_mppi/status
+safety_topic: /sim/manager/safety_status
+control_topic: /sim/teleop/control
+event_topic: /sim/teleop/event
+source_name: autonomy
+
+target_timeout_s: 10.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+
+plant_reset:
+  mode: history_preserving
+
+home:
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  joint_tolerance: [0.10, 0.50, 0.10, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.50
+
+generator:
+  type: circle_yz_from_current_tip
+  radius_mm: 10.0
+  center_x_offset_mm: 15.0
+  waypoint_count: 8
+  direction: ccw
+  close_circle: false

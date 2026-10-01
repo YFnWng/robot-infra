@@ -1,0 +1,24 @@
+# Continuous simulation path. The current measured tip is prepended and used
+# to generate a smooth approach to a 10 mm-radius circle parallel to base YZ.
+# The plane is shifted to x0+15 mm, matching the reachable sparse-point test.
+frame_id: robot_base
+action_name: /sim/catheter_mppi/track_tip_path
+marker_topic: /sim/shape_tracking/markers
+auto_arm: true
+
+nominal_speed_mm_s: 2.0
+total_timeout_s: 90.0
+final_tolerance_mm: 1.8
+final_settle_time_s: 0.30
+soft_error_mm: 2.0
+pause_error_mm: 5.0
+resume_error_mm: 1.5
+hard_error_mm: 15.0
+
+generator:
+  type: circle_yz_from_current_tip
+  radius_mm: 10.0
+  center_x_offset_mm: 15.0
+  waypoint_count: 72
+  direction: ccw
+  close_circle: true

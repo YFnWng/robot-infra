@@ -1,0 +1,61 @@
+# Simulation qualification for the farther, per-home two-axis hardware block.
+frame_id: robot_base
+action_name: /sim/catheter_mppi/track_tip_trajectory
+marker_topic: /sim/shape_tracking/markers
+position_topic: /sim/device/state
+status_topic: /sim/catheter_mppi/status
+safety_topic: /sim/manager/safety_status
+control_topic: /sim/teleop/control
+event_topic: /sim/teleop/event
+planned_control_topic: /sim/catheter_mppi/planned_control
+manager_control_topic: /sim/manager/control
+source_name: autonomy
+
+target_timeout_s: 20.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+
+plant_reset:
+  mode: full_simulation
+  services:
+    - /sim/catheter_sim/reset_plant
+    - /sim/catheter_sim/reset_perception
+    - /sim/catheter_mppi/reset_simulation_state
+  timeout_s: 10.0
+  estimator_recovery_timeout_s: 15.0
+  minimum_accepted_observations: 3
+
+home:
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  joint_tolerance: [0.10, 0.50, 0.10, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.75
+
+required_controller_status:
+  command_output_enabled: true
+  marker_estimator: ukf
+  model_adaptation_enabled: false
+  controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]
+
+rotation_guard:
+  enabled: true
+  axis: 1
+  tolerance: 1.0e-9
+
+generator:
+  type: controller_model_joint_displacements
+  regenerate_after_each_home: true
+  service: /sim/catheter_mppi/generate_sparse_targets
+  service_timeout_s: 10.0
+  rollout_steps: 40
+  logical_displacements:
+    - [8.0, 0.0, 0.0]
+    - [0.0, 0.0, 4.5]
+    - [-8.0, 0.0, 3.0]
+    - [-6.0, 0.0, 4.5]
+  minimum_endpoint_reserve: [2.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+  minimum_tip_displacement_mm: 3.0
+  maximum_tip_displacement_mm: 20.0

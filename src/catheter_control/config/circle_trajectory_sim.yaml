@@ -1,0 +1,19 @@
+# Simulation version: (x0,y0,z0) is sampled from the current simulated tip.
+# The circle is parallel to the base YZ plane, centered at
+# (x0 + center_x_offset_mm, 0, z0).
+frame_id: robot_base
+action_name: /sim/catheter_mppi/track_tip_trajectory
+marker_topic: /sim/shape_tracking/markers
+
+auto_arm: true
+tolerance_mm: 1.8
+settle_time_s: 0.25
+
+generator:
+  type: circle_yz_from_current_tip
+  radius_mm: 10.0
+  center_x_offset_mm: 10.0
+  waypoint_count: 36
+  waypoint_timeout_s: 2.0
+  direction: ccw
+  close_circle: true

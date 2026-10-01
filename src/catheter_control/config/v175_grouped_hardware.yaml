@@ -1,0 +1,101 @@
+catheter_mppi:
+  ros__parameters:
+    # v175 changes only the motor-to-interface branch. Raw motor 2 still
+    # drives the frozen v171 tendon-history/distal model in parallel.
+    marker_estimator: ukf
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json
+    interface_transmission_checkpoint: /home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_interface_transmission_v175.pt
+    adaptation_enabled: false
+
+    # Inherit reviewed manager limits on every axis. Hardware output remains
+    # exclusively controlled by control.launch.py's explicit launch argument.
+    controller_velocity_max: [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+
+    # Widths and the interface Jacobian are loaded atomically from v175. Any
+    # width values in this YAML would be ignored to prevent artifact drift.
+    backlash_compensation_enabled: true
+    takeup_transaction_enabled: true
+    takeup_confirmation_hold_timeout_s: 1.0
+    mppi_transmission_aware_rollout: false
+    backlash_width_rad: [0.0, 0.0, 0.0]
+    backlash_width_positive_rad: [0.0, 0.0, 0.0]
+    backlash_width_negative_rad: [0.0, 0.0, 0.0]
+    # Deliberately slow response-terminated take-up for hardware. MPPI is
+    # inhibited until every commanded shaft is response-confirmed.
+    backlash_takeup_velocity: [1.0, 2.5, 0.5]
+    backlash_engagement_confirmation_observations: 3
+    backlash_provisional_rejection_observations: 2
+    backlash_minimum_distal_bending_increment: 0.05
+
+    # Direction-specific engaged distal response is learned only from accepted
+    # UKF corrections after engagement. Reversal widens the posterior before
+    # the next branch is observed.
+    engaged_gain_enabled: true
+    engaged_gain_minimum: 0.10
+    engaged_gain_maximum: 2.0
+    engaged_gain_prior_mean: [1.0, 1.0]
+    engaged_gain_prior_log_std: 0.70
+    engaged_gain_reversal_log_std: 0.80
+    engaged_gain_process_log_std_sqrt_s: 0.05
+    engaged_gain_observation_std: 0.08
+    engaged_gain_minimum_nominal_increment: 0.02
+    engaged_gain_huber_sigma: 3.0
+    engaged_gain_maximum_normalized_innovation: 8.0
+    # A rejected response invalidates tight gain confidence and re-anchors.
+    engaged_gain_contradiction_log_std: 0.70
+    engaged_gain_confidence_log_width: 0.50
+    engaged_gain_minimum_updates: 2
+    engaged_gain_credible_sigma: 1.645
+
+    estimator_filter_initial_covariance: 0.25
+    estimator_filter_process_std_sqrt_s: 1.0
+    estimator_initial_roll_hypotheses: 24
+    estimator_history_reconciliation_enabled: true
+    estimator_history_reconciliation_maximum_shift: 120.0
+
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    # Point targets use exactly four coarse model/control steps over 0.8 s.
+    # Continuous paths retain the 40 ms grid above. The explicit coarse route
+    # performs no hidden model subdivisions.
+    mppi_point_rollout_step_s: 0.20
+    mppi_point_rollout_coarse_steps: true
+    mppi_point_prediction_tail_steps: 0
+    mppi_point_prediction_tail_step_s: 0.12
+    device: cuda
+    # Three gain scenarios expand 512 stochastic samples to 1536 four-step
+    # rollouts; deterministic grouped probes add a small bounded number.
+    samples: 512
+    mppi_grouped_mode_sampling: true
+    mppi_engaged_gain_scenarios: true
+    mppi_engaged_gain_risk_beta: 0.50
+    mppi_engaged_gain_cvar_alpha: 0.67
+    mppi_engaged_gain_maximum_first_step_shift: 8.0
+    # Score cautious tendon candidates until the active directional gain is
+    # re-learned after engagement or a contradictory response.
+    mppi_engaged_gain_learning_velocity_scale: 0.50
+    # Point-target capture: require a material model-predicted benefit over
+    # zero, then observe delayed residual response for longer than settle time.
+    mppi_capture_radius_mm: 2.5
+    mppi_capture_minimum_terminal_improvement_mm: 0.25
+    mppi_capture_hold_s: 0.30
+    mppi_capture_response_minimum_prediction_mm: 0.25
+    mppi_capture_response_minimum_ratio: 0.50
+    mppi_best_candidate_guard: true
+    mppi_takeup_risk_weight: 4.0
+    mppi_takeup_confirmation_time_s: 0.10
+    mppi_takeup_limit_reserve_scale: 1.0
+    reversal_scheduler_enabled: true
+    reversal_scheduler_required_plans: 3
+    reversal_scheduler_minimum_absolute_cost_improvement: 5.0
+    reversal_scheduler_minimum_fractional_cost_improvement: 0.0
+    reversal_scheduler_minimum_terminal_error_improvement_mm: 0.25
+    reversal_scheduler_minimum_accepted_observations: 3
+    reversal_scheduler_cooldown_s: 1.0
+
+    planning_deadline_s: 0.06
+    # Raw ENC must remain fresh. If only estimator processing is late, force
+    # zero for this bounded window before retaining encoder_stale.
+    estimator_catchup_timeout_s: 0.35
+    plan_rate_hz: 15.0
+    command_rate_hz: 100.0

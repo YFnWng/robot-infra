@@ -25,8 +25,28 @@ catheters:
     vel_max:   [5.0,    30.0,  4.9,   5.0,    30.0,   30.0]
 
   imricor_test:
-    pos_lower: [0.0,   -270.0, 0.0,   0.0,   -180.0, -360.0]
-    pos_upper: [40.0,   270.0, 15.0,  80.0,   180.0,  360.0]
+    pos_lower: [-10.0,   -270.0, 0.0,   0.0,   -180.0, -360.0]
+    pos_upper: [50.0,   270.0, 15.0,  80.0,   180.0,  360.0]
+    # Measurement-only allowance at a hard-limit boundary. These values cover
+    # a few encoder counts and floating-point conversion noise; commands remain
+    # clamped to pos_lower/pos_upper exactly.
+    feedback_limit_tolerance: [0.001, 0.01, 0.002, 0.001, 0.01, 0.01]
+    # Autonomous velocity control retains an interior insertion reserve. The
+    # manager's hard limits remain unchanged; this margin absorbs feedback
+    # quantization, command/feedback latency, and unequal coupled bend-motor
+    # response before the physical boundary is reached.
+    control_position_margin: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Validity envelope for the first three raw encoder-count channels consumed
+    # by the v171 learned model.  The v171 training data spans approximately
+    # [-35806, -79999, -100404] .. [94903, 79955, 0] counts.  These bounds add
+    # margin for normal operation while rejecting counter-wrap / lost-reference
+    # values before they can initialize or advance the learned recurrence.
+    model_encoder_count_lower: [-50000, -100000, -120000]
+    model_encoder_count_upper: [110000, 100000, 10000]
+    # Interior command reserve for estimator/planner latency and drivetrain
+    # stopping distance. Validity still uses the exact envelope above, while
+    # controller projection aims to stop 1000 counts before either boundary.
+    model_encoder_count_margin: [1000, 1000, 1000]
     # catheter_bend is coupled into the linear motor in firmware. A 2 mm/s
     # bend floor keeps the coupled linear motor near or above its reliable
     # 36-RPM operating floor. Direct-drive bend reaches 4.96 mm/s at 250 RPM;

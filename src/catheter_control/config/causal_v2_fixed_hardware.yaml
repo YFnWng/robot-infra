@@ -1,0 +1,105 @@
+catheter_mppi:
+  ros__parameters:
+    # Fixed-J hardware candidate. The causal prior passed recorded replay;
+    # online commits remain disabled because they degraded per-axis p95 error.
+    marker_estimator: ukf
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_causal_v2.json
+    # Hardware output is intentionally not a profile parameter. The guarded
+    # launch rejects profiles that declare it and owns the sole explicit
+    # command_output_enabled interlock.
+    adaptation_enabled: false
+    # Temporary two-DOF convergence experiment: disable logical catheter
+    # rotation in MPPI while preserving the manager's hardware limit profile.
+    # Order: insertion, rotation, tendon, sheath insertion/rotation/bend.
+    controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]
+    # MPPI plans only post-take-up motion. A downstream transaction arbiter
+    # holds ready shafts and drives pending shafts until measured response,
+    # then discards the old action and requires a fresh plan.
+    backlash_compensation_enabled: true
+    takeup_transaction_enabled: true
+    mppi_transmission_aware_rollout: false
+    mppi_rotation_direction_latch: false
+    # Execute an actually scored sample; retain the weighted update only as
+    # the next sampling distribution's nominal.
+    mppi_best_candidate_guard: true
+    # These costs participate in grouped MPPI mode selection.  They never
+    # alter or veto a selected plan.  A response-confirmed shaft reversal pays
+    # one unit per switched axis plus four cost units per estimated second of
+    # physical take-up; a materially better reversing rollout can still win.
+    mppi_takeup_risk_weight: 4.0
+    mppi_takeup_confirmation_time_s: 0.10
+    # Response-clocked direction leases prevent a small target-component
+    # crossing from opening a new opposite take-up transaction every solve.
+    # MPPI still scores reverse candidates, but executes its best separately
+    # scored lease-compatible candidate until all gates approve reversal.
+    reversal_scheduler_enabled: true
+    reversal_scheduler_required_plans: 3
+    reversal_scheduler_minimum_absolute_cost_improvement: 5.0
+    reversal_scheduler_minimum_fractional_cost_improvement: 0.0
+    reversal_scheduler_minimum_terminal_error_improvement_mm: 0.25
+    reversal_scheduler_minimum_accepted_observations: 3
+    reversal_scheduler_cooldown_s: 1.0
+    backlash_engagement_confirmation_observations: 3
+    # Stop full-rate take-up on the first strongly attributed response.
+    # Missing/subthreshold evidence is inconclusive and preserves that
+    # boundary; two strongly opposite responses fail closed rather than
+    # restarting an unbounded take-up burst.
+    backlash_provisional_rejection_observations: 2
+    # Project the marker-corrected 24-D distal strain onto the learned,
+    # gauge-fixed bending mode.  This is the primary shaft-2 engagement
+    # evidence because tendon bending can be visible without appreciable
+    # interface-body motion when the proximal segment is retracted.
+    backlash_minimum_distal_bending_increment: 0.05
+    # Physical-shaft take-up measured from the fast causal-v2 repetitions.
+    # These are median raw-encoder travels to a sustained 0.25 mm RMS
+    # four-marker response after reversal, grouped by *motor* direction.
+    # They are deliberately separate from the much more conservative RLS
+    # reversal holdoffs below. Shaft 2 is strongly release/pull asymmetric.
+    backlash_width_rad: [0.0, 0.0, 0.0]
+    backlash_width_positive_rad: [8.369, 7.020, 34.858]
+    backlash_width_negative_rad: [6.856, 7.090, 3.587]
+    # Hardware path audit 20260916_165943 showed that 40 deg/s rotation
+    # take-up moved the measured tip 1.52 mm at the median and up to 6.13 mm.
+    # Halve only shaft 1 so the next matched run isolates response-latency
+    # overshoot from reversal-selection behavior.
+    backlash_takeup_velocity: [2.0, 5.0, 1.0]
+
+    estimator_filter_initial_covariance: 0.25
+    estimator_filter_process_std_sqrt_s: 1.0
+    estimator_initial_roll_hypotheses: 24
+    # Carry UKF strain corrections into the hidden scalar tendon equilibrium;
+    # otherwise the next zero-command rollout relaxes toward stale history.
+    estimator_history_reconciliation_enabled: true
+    estimator_history_reconciliation_maximum_shift: 120.0
+
+    # Retained for diagnostics and future shadow replay. They have no effect
+    # on J while adaptation_enabled is false.
+    adaptation_minimum_observations: 8
+    adaptation_minimum_normalized_action: 0.10
+    adaptation_minimum_rotation_deg: 0.30
+    adaptation_minimum_translation_mm: 0.30
+    adaptation_minimum_response_snr: 1.0
+    adaptation_maximum_window_s: 1.0
+    adaptation_directional_purity: 0.90
+    adaptation_reversal_holdoff_normalized_action_shaft_0: 4.5
+    adaptation_reversal_holdoff_normalized_action_shaft_1: 6.5
+    adaptation_reversal_holdoff_normalized_action_shaft_2: 4.0
+    adaptation_confirmation_windows: 2
+    adaptation_consistency_cosine: 0.80
+    adaptation_minimum_column_gain: 0.50
+    adaptation_maximum_column_gain: 1.50
+    adaptation_maximum_direction_deviation_deg: 30.0
+
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    # One CUDA batch is stratified across U/C proposal modes. The configured
+    # count is total, not per mode (128 samples/mode when all axes are leased).
+    device: cuda
+    samples: 1024
+    mppi_grouped_mode_sampling: true
+    # Reserve the estimated raw encoder travel needed to exhaust the selected
+    # directional gap before evaluating useful-motion joint limits.
+    mppi_takeup_limit_reserve_scale: 1.0
+    planning_deadline_s: 0.06
+    plan_rate_hz: 15.0
+    command_rate_hz: 100.0

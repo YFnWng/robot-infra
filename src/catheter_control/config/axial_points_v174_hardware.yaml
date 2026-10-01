@@ -1,0 +1,36 @@
+# Conservative active-hardware A/B test. Each target starts from the same
+# [20,0,0] encoder home. Targets are frozen at +/-5 mm in base Z relative to
+# the first measured home tip; no path between the targets is commanded.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_trajectory
+marker_topic: /shape_tracking/markers
+position_topic: /device/state
+status_topic: /catheter_mppi/status
+safety_topic: /manager/safety_status
+control_topic: /teleop/control
+event_topic: /teleop/event
+source_name: autonomy
+
+target_timeout_s: 12.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+
+# Hardware remanence is retained. Homing restores encoder position but does
+# not claim to reset tendon or torsional history.
+plant_reset:
+  mode: history_preserving
+
+home:
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  joint_tolerance: [0.10, 0.50, 0.05, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.75
+
+generator:
+  type: relative_offsets_from_current_tip
+  offsets_mm:
+    - [0.0, 0.0, 5.0]
+    - [0.0, 0.0, -5.0]

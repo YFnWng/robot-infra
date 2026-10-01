@@ -1,0 +1,74 @@
+# Second active-hardware gate. Each Cartesian target is generated inside the
+# controller from the accepted estimator/history snapshot after that target's
+# own guarded home. Input triplets are logical [insertion mm, rotation deg,
+# tendon mm] displacements over 25 x 40 ms model steps.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_trajectory
+marker_topic: /shape_tracking/markers
+position_topic: /device/state
+status_topic: /catheter_mppi/status
+safety_topic: /manager/safety_status
+control_topic: /teleop/control
+event_topic: /teleop/event
+planned_control_topic: /catheter_mppi/planned_control
+manager_control_topic: /manager/control
+source_name: autonomy
+
+target_timeout_s: 15.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+
+plant_reset:
+  mode: history_preserving
+
+home:
+  # Reach the tendon lower boundary before translating the chassis. This
+  # prevents the boundary's deliberate all-axis stop from interrupting the
+  # insertion leg of the final [20,0,0] home transaction.
+  decoupled_tendon_prehome: true
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  joint_tolerance: [0.10, 0.50, 0.10, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.75
+
+required_controller_status:
+  command_output_enabled: true
+  marker_estimator: ukf
+  model_adaptation_enabled: false
+  engaged_gain_enabled: true
+  mppi_engaged_gain_scenarios: true
+  mppi_samples: 512
+  mppi_point_rollout_step_s: 0.2
+  mppi_point_rollout_coarse_steps: true
+  mppi_point_prediction_tail_steps: 0
+  controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]
+
+rotation_guard:
+  enabled: true
+  axis: 1
+  tolerance: 1.0e-9
+
+generator:
+  type: controller_model_joint_displacements
+  # Preserve physical history, but derive each absolute Cartesian target from
+  # the accepted UKF/model snapshot after that candidate's own guarded home.
+  regenerate_after_each_home: true
+  service: /catheter_mppi/generate_sparse_targets
+  service_timeout_s: 10.0
+  rollout_steps: 25
+  # insertion-dominant, tendon-dominant, and two coupled diagonals
+  logical_displacements:
+    - [5.0, 0.0, 0.0]
+    - [0.0, 0.0, 3.0]
+    # Positive insertion and tendon oppose in Cartesian space near home.
+    # Seven millimetres cleared the simulation model's 2 mm information gate
+    # while retaining the configured insertion endpoint reserve.
+    - [7.0, 0.0, 3.0]
+    - [-4.0, 0.0, 3.0]
+  # Endpoint reserve is evaluated after estimated response-free take-up travel.
+  minimum_endpoint_reserve: [2.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+  minimum_tip_displacement_mm: 2.0
+  maximum_tip_displacement_mm: 15.0
