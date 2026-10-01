@@ -262,14 +262,32 @@ The active branch still contains the uncommitted research files. Removal from
 that branch remains a separately reviewed cleanup operation; M4 only guarantees
 recoverability first.
 
-### M5 — artifact manifests and hygiene
+### M5 — artifact manifests and hygiene (complete)
 
-Commit the manifest boundary, cleanup documentation, and path-specific ignore
-rules. Do not commit checkpoint or evaluation binaries.
+Commit `ae8752b` defines the model-artifact boundary without committing any
+checkpoint or evaluation binary. It adds:
+
+- a portable manifest for the qualified
+  `20260929_175554_grouped_no_rotation` bundle;
+- a standard-library validator that rejects path escape, missing artifacts,
+  duplicate IDs, invalid hashes, size drift, and content drift;
+- exact byte sizes and SHA-256 identities for the v171 distal checkpoint,
+  v174 Jacobian initialization, and v175 interface-transmission checkpoint;
+- path-specific generated-output ignores in place of global JSON/PT/media
+  extension rules; and
+- the small identification episode-name JSON that the global ignore rule had
+  incorrectly hidden from source control.
+
+The exact staged source snapshot passed eight focused tests, metadata-only
+manifest validation, Python compilation, and JSON parsing. Validation against
+the installed artifact bundle also passed all three size and SHA-256 checks.
+The manifest documents the original hardware qualification as a dirty
+historical session and limits its claim to four sparse two-axis targets with
+rotation disabled; it does not authorize hardware output.
 
 ## Cross-repository gate before tagging
 
-After R1–R7 and M1–M5 are reviewed:
+After R1–R8 and M1–M5 are reviewed:
 
 1. clean-clone build in the supported ROS/Python environments;
 2. artifact hash validation;
