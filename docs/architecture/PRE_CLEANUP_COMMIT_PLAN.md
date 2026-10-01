@@ -13,6 +13,7 @@ whole-file sweep.
 | R2 + R3 — controller package, launch and profiles | complete: `ed7d78c` | isolated index snapshot built both ROS packages; 302 tests passed; 15 installed console entry points resolved |
 | R4 — perception and experiment automation | complete: `72335b4`, `438f379` | marker slice: 4 tests passed; experiment slice: 75 tests passed; both exact index snapshots built all three dependent ROS packages |
 | R5 — manager and serial safety | complete: `bc242f7` | exact index snapshot built `control_interface`; all 70 manager/transport safety tests passed |
+| R6 — firmware safety | complete: `20f2930` | exact index snapshot passed all 8 C++ host regressions and 2 firmware source-contract tests; no flash performed |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
@@ -134,10 +135,24 @@ Verification built the exact staged `control_interface` snapshot under ROS
 Humble and reran all 70 manager and serial framing tests against that snapshot.
 No ROS node, device link, motor, or recovery service was started.
 
-### R6 — firmware safety changes
+### R6 — firmware safety changes (complete)
 
 Scope firmware source, new safety headers, and host regression tests only.
 Keep separate from ROS/controller commits.
+
+The preserved firmware adds semantic motion-command watchdog authority,
+immediate all-axis stop handling, fixed-baseline encoder-integrity recovery,
+bounded position-transaction resumption, and boot/watchdog diagnostics. The
+incident-specific historical encoder seed remains compile-time disabled. R6
+also closes the legacy raw `ZERO` command: firmware now stops motion and returns
+`ERR_ZERO_FORBIDDEN`, so read-only encoder calibration no longer depends only
+on the manager and serial bridge.
+
+Verification exported the exact staged snapshot, compiled all eight
+Arduino-independent C++ tests with warnings treated as errors, and passed two
+source-contract tests covering forbidden encoder zeroing and the disabled
+recovery seed. No Teensy toolchain was installed, so the full sketch was not
+compiled; no firmware was flashed and no hardware link was opened.
 
 ### R7 — maintained docs and audit summaries
 
