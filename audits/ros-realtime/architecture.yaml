@@ -1,0 +1,132 @@
+audit:
+  date: 2026-09-11
+  mode: observational
+  live_stack_present: true
+  ros_distribution: humble
+  safety_invariant: never_send_SET_ZERO
+
+nodes:
+  marker_tracking:
+    package: automation
+    language: python
+    executor: single_threaded
+    non_ros_threads:
+      camera_capture: 2
+      marker_workers: 4
+    publishes:
+      - topic: /shape_tracking/markers
+        qos: sensor_data_best_effort_depth_5
+        rate_hz: 30
+      - topic: /shape_tracking/marker_status
+        qos: reliable_keep_last_depth_10
+        rate_hz: event_driven_up_to_30
+  catheter_mppi:
+    package: catheter_control
+    language: python
+    interpreter: /home/chen-lab/Yifan/cr-venv/bin/python
+    executor: multi_threaded_8
+    callback_groups:
+      - causal_estimator_owner
+      - marker_input
+      - device_input
+      - io_and_diagnostics
+      - services
+      - planner
+      - command_heartbeat
+    shared_resources:
+      lifecycle_lock: recursive
+      planner_snapshot_exchange: nonrecursive_small_critical_section
+      planner_lock: nonblocking
+    timers_hz:
+      causal_estimator_owner: 50
+      marker_correction_rate_limit: 20
+      planner: 15
+      command_heartbeat: 100
+      diagnostic: 10
+    scheduling_contract:
+      learned_runtime_mutation: causal_estimator_owner_only
+      planner_state: replace_only_clone
+      planning_period_ms: 66.667
+      planning_deadline_ms: 60
+      deadline_start: planner_callback_entry
+      deadline_recheck: immediately_before_command_commit
+    native_thread_limits:
+      pytorch_intraop: 2
+      pytorch_interop: 1
+  manager:
+    package: control_interface
+    language: python
+    executor: multi_threaded_4
+    callback_groups:
+      default: mutually_exclusive
+      qualification: reentrant
+      device_client: reentrant
+    timers_hz:
+      source_watchdog: 20
+      feedback_watchdog: 20
+      safety_heartbeat: 5
+  serial_bridge:
+    package: control_interface
+    language: python
+    executor: multi_threaded_4
+    non_ros_threads:
+      serial_rx: 1
+    callback_groups:
+      control: reentrant
+      service: reentrant
+  teensy:
+    language: cpp_arduino
+    nominal_cycle_ms: 10
+    actual_cycle_condition: elapsed_ms_greater_than_10
+    motion_command_watchdog_ms: 250
+    watchdog_refresh: semantically_valid_VEL_or_POS_only
+    queued_host_frames: drained_before_motor_control_cycle
+    baud: 115200
+
+critical_topics:
+  - name: /shape_tracking/markers
+    publisher: marker_tracking
+    subscriber: catheter_mppi
+    semantic_timestamp: zed_image_time
+    qos: best_effort_keep_last_depth_5
+  - name: /device/state
+    publisher: serial_bridge
+    subscribers: [catheter_mppi, manager]
+    semantic_timestamp: host_serial_receive_time
+    qos_to_controller: best_effort_keep_last_depth_5
+    qos_from_publisher: reliable_keep_last_depth_10
+  - name: /teleop/control
+    publisher: catheter_mppi
+    subscriber: manager
+    semantic_timestamp: controller_publish_time
+    qos: reliable_keep_last_depth_1
+    expiry_ms: 100
+  - name: /manager/control
+    publisher: manager
+    subscriber: serial_bridge
+    semantic_timestamp: preserved_source_publish_time
+    qos: reliable_keep_last_depth_1
+    expiry_ms: 100
+  - name: /manager/safety_status
+    publisher: manager
+    subscriber: catheter_mppi
+    qos: reliable_transient_local_depth_1
+
+external_models:
+  distal_runtime: cr_meta_lnn/deployment/v171_streaming_runtime.py
+  adaptive_jacobian: control/adapj.py
+  model_config: cr_meta_lnn/configs/real_cosserat_nominal.yaml
+
+live_snapshot:
+  duration_s: 30.008
+  controller_state: DISARMED
+  command_output_enabled: false
+  manager_state: MANAGER_READY
+  transport_state: SERIAL_READY
+  marker_rate_hz: 29.966
+  encoder_rate_hz: 90.909
+  position_rate_hz: 90.910
+  commands_observed:
+    teleop_control: 0
+    manager_control: 0
+  raw_data: /media/chen-lab/84BABCB7BABCA6D81/Yifan/catheter_sessions/20260911_passive_ros_audit/passive_monitor_30s.json

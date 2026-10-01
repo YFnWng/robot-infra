@@ -1,0 +1,22 @@
+digraph control_paths {
+  rankdir=LR;
+  graph [fontname="sans-serif", label="Control, feedback, and stop paths", labelloc=t];
+  node [fontname="sans-serif", shape=box];
+  edge [fontname="sans-serif"];
+
+  feedback [label="ZED marker time +\nhost-stamped encoder"];
+  estimate [label="delayed-state correction\nand rewind/replay"];
+  plan [label="MPPI plan"];
+  hb [label="100 Hz command heartbeat"];
+  q1 [label="reliable queue\ndepth 10", shape=cylinder];
+  manager [label="manager arbitration\n0.5 s source watchdog"];
+  q2 [label="reliable queue\ndepth 10", shape=cylinder];
+  serial [label="serial bridge"];
+  fw [label="firmware command state\n10 s PC watchdog"];
+  motor [label="motors", shape=component];
+
+  feedback -> estimate -> plan -> hb -> q1 -> manager -> q2 -> serial -> fw -> motor;
+  manager -> q2 [label="zero on source timeout", color=red];
+  serial -> fw [label="no host-side command-age field", color=red];
+  fw -> motor [label="last velocity persists until stop/watchdog", color=red];
+}

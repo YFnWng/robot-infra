@@ -1,0 +1,18 @@
+digraph gating_model {
+  rankdir=LR;
+  graph [fontname="sans-serif", label="Catheter controller gate progression", labelloc=t];
+  node [fontname="sans-serif", shape=box];
+
+  disarmed -> manager [label="arm"];
+  manager [label="WAITING_FOR_MANAGER\ncollection absent; manager status/freshness;\nPOS/ENC freshness and pair skew"];
+  estimator [label="INITIALIZING_ESTIMATOR\nmodel valid; observation count;\nestimator TRACKING"];
+  marker [label="WAITING_FOR_MARKERS\naccepted update freshness; diagnostic\nfreshness/OK; rejection count"];
+  target [label="WAITING_FOR_TARGET"];
+  ready [label="READY\nwarm planner; request JOINT_VEL;\nfixed 100 ms settle"];
+  active [label="ACTIVE\n15 Hz planner + 100 Hz command"];
+  fault [label="FAULTED\nzero + request mode NONE", color=red];
+
+  manager -> estimator -> marker -> target -> ready -> active;
+  active -> fault [label="any gate failure; repeated planner miss;\nstale command; estimator/model exception", color=red];
+  ready -> fault [label="gate loss after mode assumed claimed", color=red];
+}

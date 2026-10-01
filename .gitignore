@@ -32,3 +32,14 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 *.egg-info/
+
+# Local presentation generation and editor backups
+.codex_ppt_pipeline/
+presentation_outputs/
+*.orig
+
+# Generated audit evidence belongs in the external session archive. Keep
+# maintained Markdown, diagrams, small CSV tables, and reusable source here.
+audits/**/*.json
+audits/**/*.npz
+audits/**/*.png

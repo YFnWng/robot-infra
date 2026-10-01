@@ -1,0 +1,27 @@
+digraph ros_topology {
+  rankdir=LR;
+  graph [fontname="sans-serif", label="ROS data and safety topology", labelloc=t];
+  node [fontname="sans-serif", shape=box];
+  edge [fontname="sans-serif"];
+
+  zed [label="2 x ZED2\ncapture threads", shape=component];
+  marker [label="/marker_tracking\nPython, single ROS thread"];
+  mppi [label="/catheter_mppi\nPython, 8 executor threads"];
+  manager [label="/manager\nPython, 4 executor threads"];
+  serial [label="/device_serial_com\nPython, 4 executor + RX"];
+  teensy [label="Teensy firmware\nmotor/encoder loop", shape=component];
+  drivers [label="6 motor drivers", shape=component];
+
+  zed -> marker [label="image frames\nper-camera worker"];
+  marker -> mppi [label="/shape_tracking/markers\nbest effort, depth 5, 30 Hz"];
+  marker -> mppi [label="/shape_tracking/marker_status\nreliable, depth 10"];
+  teensy -> serial [label="USB serial\nPOS + ENC"];
+  serial -> mppi [label="/device/state\nbest effort at subscriber"];
+  serial -> manager [label="/device/state\nreliable, depth 10"];
+  manager -> mppi [label="/manager/safety_status\nreliable + transient local, 5 Hz"];
+  mppi -> manager [label="/teleop/event\nmode/stop"];
+  mppi -> manager [label="/teleop/control\nreliable, depth 10, 100 Hz"];
+  manager -> serial [label="/manager/control\nreliable, depth 10"];
+  serial -> teensy [label="USB serial velocity"];
+  teensy -> drivers [label="6 UARTs\nblocking ACK operations"];
+}

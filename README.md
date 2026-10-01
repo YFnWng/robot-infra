@@ -17,12 +17,18 @@ The production path is fail-closed:
   qualification before accepting motion;
 - serial disconnect, stale feedback, a stale command source, or a confirmed
   firmware fault commands zero/stop and returns the manager to mode `NONE`;
+- both motion topics are reliable keep-last depth 1; the original command
+  timestamp is preserved through the manager and nonzero commands older than
+  100 ms or out of order are rejected again at the serial bridge;
+- the firmware grants motion authority only to valid velocity/position frames
+  and disables all axes after 250 ms without one; unrelated serial traffic does
+  not refresh this watchdog;
 - reconnecting always revokes driver-power qualification;
 - the Slicer key state is a heartbeat. Loss of that heartbeat first publishes
   zero locally, then the independent manager watchdog disables the mode;
-- legacy `START_MOTOR`, raw Slicer fault reset, and production debug commands
-  are rejected. `SET_ZERO` is accepted only in mode `NONE` after a stationary
-  feedback window.
+- legacy `START_MOTOR`, raw Slicer fault reset, production debug commands, and
+  `SET_ZERO` are rejected. The installed encoder zero is the learned-model
+  calibration reference and must not be changed through the production stack.
 
 Build and source the workspace normally, then start the control stack:
 
@@ -94,6 +100,21 @@ The supported hardware startup order is:
    latches, and rechecks firmware status.
 6. Enable a motion mode only after Slicer reports `MANAGER_READY`.
 
+The diagnostic firmware emits a driver-independent boot heartbeat on
+`/device/event` every 500 ms before `CONNECT`. The serial bridge exposes this
+one-way state as `SERIAL_FIRMWARE_ALIVE_AWAITING_CONNECT:<build-id>` without
+claiming bidirectional readiness. This distinguishes firmware/main-loop
+liveness from a completed `SERIAL_READY` handshake. After reflashing, verify
+the boot heartbeat with motor-driver power off. Before `CONNECT`, the Teensy
+built-in LED also blinks every 500 ms; after `CONNECT` it remains steadily on.
+The bridge waits for up to one second for this heartbeat before sending
+`CONNECT`:
+
+```bash
+ros2 topic echo /device/event control_interface/msg/DeviceEvent \
+  --filter 'm.predicate == 66'
+```
+
 Terminal equivalents for steps 3 and 5 are:
 
 ```bash
@@ -113,6 +134,29 @@ ros2 topic echo /manager/safety_status control_interface/msg/ManagerEvent \
 
 Only `MANAGER_READY` permits motion. Do not bypass an inhibited state by
 calling the low-level device service unless performing deliberate diagnostics.
+
+### Bounded catheter-linear limit recovery
+
+If quantized or coupled physical-axis response leaves only logical
+`catheter_lin` (axis 0) slightly outside its configured position range, the
+manager exposes one narrow recovery service:
+
+```bash
+ros2 service call /manager/recover_catheter_linear_limit \
+  std_srvs/srv/Trigger "{}"
+```
+
+This is not a general safety bypass. It requires mode `NONE`, no active command
+source, fresh POS/ENC, ready transport, disabled motors, clean firmware fault
+state (or an exactly confirmed encoder-integrity restoration), responsive
+driver UARTs, exactly one violated axis, and an axis-0
+excursion no larger than `limit_recovery_max_violation` (0.25 mm by default).
+It commands only the configured minimum reliable axis-0 speed in the inward
+direction, stops at the configured interior margin, aborts on stale,
+unexpected, or farther-outward feedback, and applies a firmware STOP barrier.
+It never changes encoder zero. Success deliberately leaves driver-power
+qualification false; call `/manager/qualify_driver_power` and require
+`MANAGER_READY` before any subsequent home or control command.
 
 The normal Slicer teleoperation launch does not depend on the experimental
 shape estimator:

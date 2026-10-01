@@ -1,0 +1,34 @@
+digraph execution_topology {
+  rankdir=TB;
+  graph [fontname="sans-serif", label="Execution resources and contention", labelloc=t];
+  node [fontname="sans-serif", shape=box];
+  edge [fontname="sans-serif"];
+
+  host [label="i7-12700K\n20 logical CPUs\ngeneric PREEMPT_DYNAMIC kernel\npowersave governor", shape=folder];
+  marker [label="marker_tracking\n1 ROS + 2 capture + 4 pool workers\nOpenCV configured for 20 threads"];
+  mppi [label="catheter_mppi\n8 ROS executor threads\nPyTorch intra-op 4 / inter-op 1"];
+  manager [label="manager\n4 ROS executor threads"];
+  serial [label="serial bridge\n4 ROS executor + 1 RX"];
+
+  snapshot_lock [label="replace-only snapshot exchange", shape=diamond];
+  lifecycle_lock [label="lifecycle mutex", shape=diamond];
+  marker_work [label="Gauss-Newton + autograd\nrewind and replay"];
+  encoder_work [label="50 Hz recurrent advance"];
+  planner [label="15 Hz MPPI\nNumPy sample/project + Torch rollout"];
+  heartbeat [label="100 Hz command heartbeat"];
+
+  host -> marker;
+  host -> mppi;
+  host -> manager;
+  host -> serial;
+  marker_work -> encoder_work [label="single causal owner", dir=both];
+  encoder_work -> snapshot_lock [label="publish clone"];
+  marker_work -> snapshot_lock [label="publish corrected clone"];
+  snapshot_lock -> planner [label="read clone"];
+  heartbeat -> lifecycle_lock [label="nonblocking acquire", dir=both];
+  planner -> lifecycle_lock [label="gates + commit", dir=both];
+  marker -> marker_work [label="latest-only input; 20 Hz limit"];
+  mppi -> encoder_work;
+  mppi -> planner;
+  mppi -> heartbeat;
+}
