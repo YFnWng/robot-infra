@@ -77,7 +77,7 @@
       "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d"
     }
   },
-  "generated_at_utc": "2026-10-01T16:22:20.622739+00:00",
+  "generated_at_utc": "2026-10-01T16:26:24.534848+00:00",
   "python_import_closure": {
     "conservative": true,
     "entry_modules": {
@@ -1714,7 +1714,7 @@
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/command_freshness.py",
         "bytes": 1330,
         "exists": true,
-        "git_status": "?? src/control_interface/control_interface_py/command_freshness.py",
+        "git_status": "",
         "path": "robot-infra/src/control_interface/control_interface_py/command_freshness.py",
         "reasons": [
           "imported by control_interface_py.device_serial_com",
@@ -1724,13 +1724,13 @@
         "repository_relative_path": "src/control_interface/control_interface_py/command_freshness.py",
         "role": "python_import_closure",
         "sha256": "c4d86c4e7bf7504dcc087d76c85d6f2354fd8010e6172ed58ec51c8bc0c77830",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/device_serial_com.py",
         "bytes": 32242,
         "exists": true,
-        "git_status": "M src/control_interface/control_interface_py/device_serial_com.py",
+        "git_status": "",
         "path": "robot-infra/src/control_interface/control_interface_py/device_serial_com.py",
         "reasons": [
           "Teensy serial bridge"
@@ -1745,7 +1745,7 @@
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/manager.py",
         "bytes": 61326,
         "exists": true,
-        "git_status": "M src/control_interface/control_interface_py/manager.py",
+        "git_status": "",
         "path": "robot-infra/src/control_interface/control_interface_py/manager.py",
         "reasons": [
           "command arbitration and safety manager"
@@ -1760,7 +1760,7 @@
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/launch/launch.py",
         "bytes": 3744,
         "exists": true,
-        "git_status": "M src/control_interface/launch/launch.py",
+        "git_status": "",
         "path": "robot-infra/src/control_interface/launch/launch.py",
         "reasons": [
           "manager and serial launch"
@@ -1865,7 +1865,7 @@
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/ManagerEvent.msg",
         "bytes": 1557,
         "exists": true,
-        "git_status": "M src/control_interface/msg/ManagerEvent.msg",
+        "git_status": "",
         "path": "robot-infra/src/control_interface/msg/ManagerEvent.msg",
         "reasons": [
           "ROS interface definition"
@@ -1997,11 +1997,11 @@
   "repositories": [
     {
       "branch": "main",
-      "commit": "438f379638221e0d89d672cbc47c699077d337b0",
+      "commit": "bc242f783b502599994d2a891a948d0a487ea80e",
       "dirty": true,
       "is_git_repository": true,
       "path": "/home/chen-lab/Yifan/robot-infra",
-      "status_entry_count": 38
+      "status_entry_count": 30
     },
     {
       "branch": "main",

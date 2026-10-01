@@ -12,6 +12,7 @@ whole-file sweep.
 | R1 — ROS control interfaces | complete: `f3640b6` | isolated index snapshot built; XML/CMake lint passed; package-wide Python lint still reports pre-existing manager/serial style debt |
 | R2 + R3 — controller package, launch and profiles | complete: `ed7d78c` | isolated index snapshot built both ROS packages; 302 tests passed; 15 installed console entry points resolved |
 | R4 — perception and experiment automation | complete: `72335b4`, `438f379` | marker slice: 4 tests passed; experiment slice: 75 tests passed; both exact index snapshots built all three dependent ROS packages |
+| R5 — manager and serial safety | complete: `bc242f7` | exact index snapshot built `control_interface`; all 70 manager/transport safety tests passed |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
@@ -113,7 +114,7 @@ dirty working tree. Each snapshot built `control_interface`,
 `catheter_control`, and `automation` under ROS Humble. No camera, controller,
 manager, or device process was started.
 
-### R5 — manager and serial safety changes
+### R5 — manager and serial safety changes (complete)
 
 Scope:
 
@@ -121,8 +122,17 @@ Scope:
 - matching manager/transport tests;
 - related message fields not already committed in R1.
 
-This group needs a safety-focused review. Preserve fail-closed behavior,
-manager authority, watchdogs, command projection, and `SET_ZERO` rejection.
+This group received a safety-focused review. The preserved implementation adds
+end-to-end source timestamp validation, position-feedback plausibility gates,
+firmware boot/watchdog status handling, and a narrowly bounded inward-only
+axis-0 limit-recovery service. Delayed zero velocity remains an unconditional
+safe preemption. Both the manager and serial bridge reject `SET_ZERO` before it
+can reach firmware. Manager authority, command projection, freshness
+watchdogs, driver qualification, and fault latching remain fail-closed.
+
+Verification built the exact staged `control_interface` snapshot under ROS
+Humble and reran all 70 manager and serial framing tests against that snapshot.
+No ROS node, device link, motor, or recovery service was started.
 
 ### R6 — firmware safety changes
 
