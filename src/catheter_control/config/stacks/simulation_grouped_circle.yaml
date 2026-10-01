@@ -1,0 +1,14 @@
+schema_version: 1
+name: simulation.grouped.circle
+node_name: sim_catheter_mppi
+description: Isolated exact-model grouped simulation with circular path task.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/grouped.yaml
+  platform: platform/simulation_exact_model.yaml
+  performance: performance/cpu_development.yaml
+  experiment: circle_trajectory_sim.yaml
+  visualization: rviz/simulation.rviz
+compatibility_aliases:
+  - simulation.launch.py defaults

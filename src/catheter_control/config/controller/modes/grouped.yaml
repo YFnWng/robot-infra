@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    backlash_compensation_enabled: true
+    takeup_transaction_enabled: true
+    engaged_gain_enabled: true
+    mppi_grouped_mode_sampling: true
+    mppi_engaged_gain_scenarios: true
+    mppi_best_candidate_guard: true
+    mppi_takeup_risk_weight: 4.0
+    reversal_scheduler_enabled: true

@@ -1,0 +1,13 @@
+schema_version: 1
+name: hardware.plain_with_takeup.no_rotation.farther_tendon_12
+node_name: catheter_mppi
+description: Plain MPPI baseline with response-terminated take-up compensation.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/plain_with_takeup.yaml
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/sparse_points/farther_tendon_12_plain_with_takeup.yaml
+compatibility_aliases:
+  - v175_plain_takeup_hardware_no_rotation.yaml

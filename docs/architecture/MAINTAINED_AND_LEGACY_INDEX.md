@@ -55,8 +55,8 @@ become a runtime default.
   artifact manifest; maintained runtime consumers use canonical bundle paths.
 - Existing ROS console entry-point names remain stable while `automation` is
   split.
-- Versioned hardware and experiment YAML names remain addressable until
-  semantic configuration composition is introduced.
+- Versioned hardware and experiment YAML names remain addressable as
+  compatibility aliases for the semantic stacks introduced in Phase 2.
 - Historical absolute paths in audit/session manifests are immutable evidence,
   not templates for new code.
 

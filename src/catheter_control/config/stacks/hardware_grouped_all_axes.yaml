@@ -1,0 +1,12 @@
+schema_version: 1
+name: hardware.grouped.all_axes
+node_name: catheter_mppi
+description: Grouped all-axis hardware controller without an attached task.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/grouped.yaml
+  platform: platform/hardware_v175_all_axes.yaml
+  performance: performance/gpu_512.yaml
+compatibility_aliases:
+  - v175_grouped_hardware.yaml

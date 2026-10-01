@@ -1,0 +1,13 @@
+schema_version: 1
+name: hardware.plain.no_rotation.farther_tendon_12
+node_name: catheter_mppi
+description: Plain v171 MPPI baseline without take-up compensation.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/plain.yaml
+  platform: platform/hardware_v171_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/sparse_points/farther_tendon_12_plain.yaml
+compatibility_aliases:
+  - v171_plain_hardware_no_rotation.yaml

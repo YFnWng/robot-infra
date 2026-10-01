@@ -1,6 +1,7 @@
 """Launch the isolated exact-model catheter MPPI simulation."""
 from datetime import datetime
 import fcntl
+import json
 import os
 from pathlib import Path
 
@@ -13,6 +14,9 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import yaml
+
+from catheter_control.configuration import (
+    ACTIVE_CONTROLLER_PARAMETERS, locate_stack, resolve_stack)
 
 
 SIM_RECORD_TOPICS = [
@@ -154,6 +158,20 @@ def _setup(context, *_args, **_kwargs):
             raise ValueError(f"{name} must be a list of {length} numbers")
         return [float(item) for item in parsed]
 
+    stack_config = value("stack_config").strip()
+    resolved_configuration = None
+    controller_profile_parameters = {}
+    if stack_config:
+        config_root = Path(
+            get_package_share_directory("catheter_control")) / "config"
+        resolved_configuration = resolve_stack(
+            locate_stack(stack_config, config_root),
+            config_root=config_root,
+            allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+            expected_node_name="sim_catheter_mppi")
+        controller_profile_parameters = dict(
+            resolved_configuration.parameters)
+
     domain_id = os.environ.get("ROS_DOMAIN_ID", "0").strip() or "0"
     if (value("require_nondefault_domain").lower() in ("1", "true", "yes")
             and domain_id == "0"):
@@ -215,11 +233,14 @@ def _setup(context, *_args, **_kwargs):
         "device": value("device"),
         "frame_id": value("frame_id"),
     }
-    plan_rate_hz = float(value("plan_rate_hz"))
+    plan_rate_hz = float(controller_profile_parameters.get(
+        "plan_rate_hz", value("plan_rate_hz")))
     if plan_rate_hz <= 0.0:
         raise ValueError("plan_rate_hz must be positive")
-    horizon_steps = int(value("horizon_steps"))
-    rollout_step_s = float(value("rollout_step_s"))
+    horizon_steps = int(controller_profile_parameters.get(
+        "horizon_steps", value("horizon_steps")))
+    rollout_step_s = float(controller_profile_parameters.get(
+        "rollout_step_s", value("rollout_step_s")))
     # The path server must publish every timestamp the planner can query.
     # Keep its historical samples for estimator-time interpolation, and add a
     # scheduling margin beyond the final rollout target rather than weakening
@@ -464,7 +485,7 @@ def _setup(context, *_args, **_kwargs):
                     value("torch_intraop_threads")),
                 "torch_interop_threads": int(
                     value("torch_interop_threads")),
-            }]),
+            }, controller_profile_parameters]),
         Node(
             package="catheter_control",
             executable="catheter_tip_trajectory",
@@ -530,6 +551,19 @@ def _setup(context, *_args, **_kwargs):
         os.makedirs(root, exist_ok=True)
         output = os.path.join(
             root, datetime.now().strftime("%Y%m%d_%H%M%S_mppi_sim"))
+        manifest = {
+            "schema_version": 1,
+            "bag_output": output,
+            "record_topics": SIM_RECORD_TOPICS,
+            "launch_arguments": dict(sorted(
+                context.launch_configurations.items())),
+            "resolved_configuration": (
+                resolved_configuration.as_manifest()
+                if resolved_configuration is not None else None),
+        }
+        with open(output + "_manifest.json", "x", encoding="utf-8") as stream:
+            json.dump(manifest, stream, indent=2, sort_keys=True)
+            stream.write("\n")
         actions.append(LogInfo(msg=f"simulation bag -> {output}"))
         actions.append(ExecuteProcess(
             cmd=["ros2", "bag", "record", "--include-hidden-topics",
@@ -540,7 +574,7 @@ def _setup(context, *_args, **_kwargs):
 
 def generate_launch_description():
     share = get_package_share_directory("catheter_control")
-    rviz_config = os.path.join(share, "config", "mppi_sim.rviz")
+    rviz_config = os.path.join(share, "config", "rviz", "simulation.rviz")
     return LaunchDescription([
         DeclareLaunchArgument(
             "cr_meta_lnn_root",
@@ -551,6 +585,11 @@ def generate_launch_description():
             default_value=os.environ.get(
                 "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")),
         DeclareLaunchArgument("v171_distal_checkpoint", default_value=""),
+        DeclareLaunchArgument(
+            "stack_config", default_value="",
+            description=(
+                "Semantic stack name under config/stacks or an explicit "
+                "stack YAML path.")),
         DeclareLaunchArgument("jacobian_initialization_json", default_value=""),
         DeclareLaunchArgument(
             "interface_transmission_checkpoint", default_value="",

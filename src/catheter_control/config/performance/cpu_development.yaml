@@ -1,0 +1,8 @@
+/**:
+  ros__parameters:
+    device: cpu
+    samples: 32
+    planning_deadline_s: 0.06
+    estimator_catchup_timeout_s: 0.35
+    plan_rate_hz: 15.0
+    command_rate_hz: 100.0

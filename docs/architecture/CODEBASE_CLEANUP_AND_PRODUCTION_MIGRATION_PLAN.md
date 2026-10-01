@@ -334,6 +334,13 @@ Separate controller, platform, performance, experiment, and RViz settings; add
 deterministic merge and validation; record resolved configuration; introduce
 semantic names and compatibility aliases.
 
+Status: complete for the active controller variants. Semantic stacks compose
+controller, platform, and performance layers in a fixed order; task and RViz
+references occupy canonical directories. The resolver rejects unknown,
+duplicate, escaping, or output-interlock settings. Hardware and simulation
+session manifests record the resolved stack, and versioned filenames remain
+compatibility aliases.
+
 ### Phase 3 -- Python internal modularization
 
 Split the controller composition node, beliefs/state machines, applications,

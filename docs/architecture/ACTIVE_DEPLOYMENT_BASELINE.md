@@ -49,6 +49,15 @@ manifest declares reviewed legacy paths, and its fail-closed alias materializer
 creates relative symlinks for historical reproduction tools without duplicating
 artifact bytes.
 
+## Configuration boundary
+
+Active launches accept reviewed semantic stack names from
+`catheter_control/config/stacks`. Controller, platform, and performance
+parameters are merged deterministically; experiment and RViz files are
+recorded references. Versioned YAML filenames remain compatibility aliases,
+and `command_output_enabled` remains an explicit launch-only interlock. See
+[`catheter_control/config/README.md`](../../src/catheter_control/config/README.md).
+
 ## Runtime boundaries
 
 - Learned mechanics, estimator state, rewind/replay, and rollouts belong in

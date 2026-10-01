@@ -14,6 +14,10 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import Parameter
 
+from catheter_control.configuration import (
+    ACTIVE_CONTROLLER_PARAMETERS, load_ros_parameters, locate_stack,
+    resolve_stack)
+
 
 RECORD_TOPICS = [
     "/teleop/control",
@@ -95,29 +99,8 @@ def _reject_profile_output_interlock(path, label):
 
 
 def _profile_parameters(path, node_name="catheter_mppi"):
-    """Resolve the parameters a ROS YAML contributes to one named node.
-
-    Exact node selectors outrank wildcard selectors in ROS 2.  Computing the
-    same merge here makes the session manifest describe the effective runtime
-    configuration instead of the launch defaults that existed before profile
-    overlays were applied.
-    """
-    resolved = Path(path).expanduser().resolve()
-    with resolved.open("r", encoding="utf-8") as stream:
-        content = yaml.safe_load(stream) or {}
-    if not isinstance(content, dict):
-        raise RuntimeError(f"ROS parameter profile is not a mapping: {resolved}")
-
-    merged = {}
-    selectors = ("/**", node_name, f"/{node_name}")
-    for selector in selectors:
-        entry = content.get(selector, {})
-        if not isinstance(entry, dict):
-            continue
-        values = entry.get("ros__parameters", {})
-        if isinstance(values, dict):
-            merged.update(values)
-    return merged
+    """Resolve wildcard and exact ROS parameter selectors."""
+    return load_ros_parameters(path, node_name)
 
 
 def _setup(context, *_args, **_kwargs):
@@ -294,29 +277,42 @@ def _setup(context, *_args, **_kwargs):
             "maximum_planner_deadline_misses": int(
                 value("maximum_planner_deadline_misses")),
         }
+    stack_config = value("stack_config").strip()
     controller_config = value("controller_config").strip()
+    performance_config = value("performance_config").strip()
+    if stack_config and (controller_config or performance_config):
+        raise RuntimeError(
+            "stack_config cannot be combined with legacy controller_config "
+            "or performance_config overlays")
+    resolved_configuration = None
     node_parameters = [parameters]
+    if stack_config:
+        config_root = Path(
+            get_package_share_directory("catheter_control")) / "config"
+        stack_path = locate_stack(stack_config, config_root)
+        resolved_configuration = resolve_stack(
+            stack_path, config_root=config_root,
+            allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+            expected_node_name="catheter_mppi")
+        node_parameters.append(dict(resolved_configuration.parameters))
     if controller_config:
         node_parameters.append(_reject_profile_output_interlock(
             controller_config, "controller_config"))
-    performance_config = value("performance_config").strip()
     if performance_config:
         if command_output_enabled:
             raise RuntimeError(
                 "command_output_enabled=true cannot be combined with a "
-                "performance_config shadow overlay")
+                "legacy performance_config shadow overlay")
         node_parameters.append(_reject_profile_output_interlock(
             performance_config, "performance_config"))
-    # This direct ROS parameter rule is the hardware-output interlock. Launch
-    # dictionaries become wildcard ``/**`` parameter files; an exact
-    # ``catheter_mppi:`` entry in a profile outranks that wildcard regardless
-    # of file order. A direct ``-p`` rule avoids that selector-precedence trap:
-    # profiles cannot silently enable output, and their conservative false
-    # cannot hide an explicit launch request. Performance overlays remain
-    # shadow-only through the guard above.
+    # This direct ROS parameter rule is the hardware-output interlock. No YAML
+    # layer may control it, and the final direct rule cannot be outranked by an
+    # exact node selector.
     node_parameters.append(Parameter(
         "command_output_enabled", command_output_enabled, value_type=bool))
     effective_parameters = dict(parameters)
+    if resolved_configuration is not None:
+        effective_parameters.update(resolved_configuration.parameters)
     if controller_config:
         effective_parameters.update(_profile_parameters(controller_config))
     if performance_config:
@@ -376,6 +372,9 @@ def _setup(context, *_args, **_kwargs):
             "record_topics": RECORD_TOPICS,
             "controller_parameters": effective_parameters,
             "controller_launch_defaults": parameters,
+            "resolved_configuration": (
+                resolved_configuration.as_manifest()
+                if resolved_configuration is not None else None),
             "controller_config": (
                 _artifact_manifest(controller_config)
                 if controller_config else None),
@@ -432,6 +431,11 @@ def generate_launch_description():
             description=(
                 "Optional insertion-conditioned allocation fitted around "
                 "frozen v171 distal tendon history.")),
+        DeclareLaunchArgument(
+            "stack_config", default_value="",
+            description=(
+                "Semantic stack name under config/stacks or an explicit "
+                "stack YAML path. Cannot be combined with legacy overlays.")),
         DeclareLaunchArgument(
             "controller_config", default_value="",
             description=(

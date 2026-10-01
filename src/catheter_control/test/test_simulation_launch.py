@@ -233,3 +233,14 @@ def test_hardware_controller_requires_all_commanded_axes_engaged():
     assert "self.raw_response_during_interface_takeup = np.zeros(3, dtype=bool)" in controller
     assert "self.takeup_response_free_mask = np.ones(3, dtype=bool)" in controller
     assert "distal_confirmation_enabled=True" in controller
+
+
+def test_semantic_stacks_are_resolved_and_recorded_by_both_launches():
+    simulation = LAUNCH.read_text(encoding="utf-8")
+    hardware = CONTROL_LAUNCH.read_text(encoding="utf-8")
+    for source in (simulation, hardware):
+        assert '"stack_config", default_value=""' in source
+        assert "resolve_stack(" in source
+        assert "resolved_configuration.as_manifest()" in source
+    assert "controller_profile_parameters" in simulation
+    assert "stack_config cannot be combined with legacy" in hardware

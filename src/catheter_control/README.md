@@ -19,9 +19,9 @@ firmware coupling, and integer-RPM quantization before the model rollout.
 When a response-confirmed direction lease exists, the batch is stratified over
 the Cartesian product of two proposal modes per shaft: unconstrained (U) or
 continue/zero (C). Mode winners are complete scored trajectories; the planner
-never zeros or splices a chosen plan after rollout. The reviewed causal-v2
-hardware profile uses one 1024-sample CUDA batch over four 40 ms steps. The
-executable-plan budget remains 60 ms, below the 66.7 ms planner period. Only
+never zeros or splices a chosen plan after rollout. The qualified grouped hardware stack uses one 512-sample CUDA batch over four
+controller steps; point-reaching rollouts use the reviewed 0.20 s coarse
+step. The executable-plan budget remains 60 ms, below the 66.7 ms planner period. Only
 the first six-axis logical velocity in a valid result is intended for eventual
 execution; axes 4--6 are always zero in this minimal controller.
 
@@ -76,7 +76,12 @@ shape from immediately relaxing toward stale history on the next zero-command
 prediction. Diagnostics expose `model_history_equilibrium_correction` and
 `model_history_reconciliation_last_delta`.
 
-Reviewed parameter profiles can be applied after the launch defaults with
+Reviewed semantic configurations are selected with
+`stack_config:=hardware_grouped_no_rotation_farther_tendon_12`. The stack
+resolves controller, platform, and performance layers in a fixed order, rejects
+unknown or multiply-owned parameters, and records the complete result in the
+session manifest. See [`config/README.md`](config/README.md). Legacy replay
+profiles can still be applied with
 `controller_config:=/absolute/path/to/profile.yaml`. The causal-v2 calibration
 is installed as `config/causal_v2_shadow.yaml`; it deliberately keeps both
 hardware command output and adaptation disabled. Reversal holdoff can be set

@@ -1,0 +1,69 @@
+# Baseline A experiment: exact Cartesian targets recorded from the successful
+# grouped 12 mm tendon run, executed by plain MPPI plus response-terminated
+# take-up compensation. Each target begins with guarded [20,0,0] encoder home;
+# physical history is preserved.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_trajectory
+marker_topic: /shape_tracking/markers
+position_topic: /device/state
+status_topic: /catheter_mppi/status
+safety_topic: /manager/safety_status
+control_topic: /teleop/control
+event_topic: /teleop/event
+planned_control_topic: /catheter_mppi/planned_control
+manager_control_topic: /manager/control
+source_name: autonomy
+
+target_timeout_s: 30.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+
+plant_reset:
+  mode: history_preserving
+
+home:
+  # Reach the tendon lower boundary before translating the chassis. This
+  # prevents the boundary's deliberate all-axis stop from interrupting the
+  # insertion leg of the final [20,0,0] home transaction.
+  decoupled_tendon_prehome: true
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  joint_tolerance: [0.10, 0.50, 0.10, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.75
+
+required_controller_status:
+  command_output_enabled: true
+  marker_estimator: ukf
+  backlash_compensation_enabled: true
+  takeup_transaction_enabled: true
+  backlash_model_encoder_input: estimated_transmitted
+  model_adaptation_enabled: false
+  engaged_gain_enabled: true
+  mppi_engaged_gain_scenarios: true
+  mppi_grouped_mode_sampling: false
+  mppi_best_candidate_guard: false
+  mppi_takeup_risk_cost_weight: 0
+  reversal_mode_selector: plain_mppi
+  mppi_samples: 512
+  mppi_point_rollout_step_s: 0.2
+  mppi_point_rollout_coarse_steps: true
+  mppi_point_prediction_tail_steps: 0
+  controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]
+
+rotation_guard:
+  enabled: true
+  axis: 1
+  tolerance: 1.0e-9
+
+generator:
+  # Exact targets recorded from the successful grouped-controller session
+  # 20260929_104353_mppi_demo. Both baselines execute the same Cartesian task.
+  type: absolute_targets_m
+  targets_m:
+    - [0.024685867130756378, 0.020163964480161667, 0.08448133617639542]
+    - [0.03320372849702835, 0.02986534871160984, 0.06324673444032669]
+    - [0.031191052868962288, 0.02978038229048252, 0.0510878749191761]
+    - [0.031725503504276276, 0.029091984033584595, 0.050746046006679535]

@@ -1,0 +1,6 @@
+/**:
+  ros__parameters:
+    marker_estimator: ukf
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_joint_local_distal_v174.json
+    interface_transmission_checkpoint: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_interface_transmission_v175.pt
+    controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]

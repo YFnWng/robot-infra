@@ -1,0 +1,54 @@
+/**:
+  ros__parameters:
+    adaptation_enabled: false
+    backlash_width_rad: [0.0, 0.0, 0.0]
+    backlash_width_positive_rad: [0.0, 0.0, 0.0]
+    backlash_width_negative_rad: [0.0, 0.0, 0.0]
+    backlash_takeup_velocity: [1.0, 2.5, 0.5]
+    backlash_engagement_confirmation_observations: 3
+    backlash_provisional_rejection_observations: 2
+    backlash_minimum_distal_bending_increment: 0.05
+    engaged_gain_minimum: 0.1
+    engaged_gain_maximum: 2.0
+    engaged_gain_prior_mean: [1.0, 1.0]
+    engaged_gain_prior_log_std: 0.7
+    engaged_gain_reversal_log_std: 0.8
+    engaged_gain_process_log_std_sqrt_s: 0.05
+    engaged_gain_observation_std: 0.08
+    engaged_gain_minimum_nominal_increment: 0.02
+    engaged_gain_huber_sigma: 3.0
+    engaged_gain_maximum_normalized_innovation: 8.0
+    engaged_gain_contradiction_log_std: 0.7
+    engaged_gain_confidence_log_width: 0.5
+    engaged_gain_minimum_updates: 2
+    engaged_gain_credible_sigma: 1.645
+    estimator_filter_initial_covariance: 0.25
+    estimator_filter_process_std_sqrt_s: 1.0
+    estimator_initial_roll_hypotheses: 24
+    estimator_history_reconciliation_enabled: true
+    estimator_history_reconciliation_maximum_shift: 120.0
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    mppi_point_rollout_step_s: 0.2
+    mppi_point_rollout_coarse_steps: true
+    mppi_point_prediction_tail_steps: 0
+    mppi_point_prediction_tail_step_s: 0.12
+    mppi_engaged_gain_risk_beta: 0.5
+    mppi_engaged_gain_cvar_alpha: 0.67
+    mppi_engaged_gain_maximum_first_step_shift: 8.0
+    mppi_engaged_gain_learning_velocity_scale: 0.5
+    mppi_capture_radius_mm: 2.5
+    mppi_capture_minimum_terminal_improvement_mm: 0.25
+    mppi_capture_hold_s: 0.3
+    mppi_capture_response_minimum_prediction_mm: 0.25
+    mppi_capture_response_minimum_ratio: 0.5
+    mppi_takeup_confirmation_time_s: 0.1
+    mppi_takeup_limit_reserve_scale: 1.0
+    mppi_transmission_aware_rollout: false
+    takeup_confirmation_hold_timeout_s: 1.0
+    reversal_scheduler_required_plans: 3
+    reversal_scheduler_minimum_absolute_cost_improvement: 5.0
+    reversal_scheduler_minimum_fractional_cost_improvement: 0.0
+    reversal_scheduler_minimum_terminal_error_improvement_mm: 0.25
+    reversal_scheduler_minimum_accepted_observations: 3
+    reversal_scheduler_cooldown_s: 1.0

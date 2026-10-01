@@ -1,0 +1,7 @@
+/**:
+  ros__parameters:
+    device: cuda
+    samples: 1024
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    planning_deadline_s: 0.06
