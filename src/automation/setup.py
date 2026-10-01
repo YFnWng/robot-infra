@@ -26,6 +26,11 @@ setup(
             "state_estimator = automation.estimation.node:main",
             "em_bridge = automation.collection.em_bridge:main",
             "collection = automation.collection.node:main",
+            "causal_runtime_identity = "
+            "automation.collection.runtime_identity:main",
+            "causal_session_check = automation.collection.session_check:main",
+            "causal_stationary_analysis = "
+            "automation.collection.stationary_analysis:main",
             "marker_tracking = automation.marker_tracking.node:main",
             "marker_udp_receiver = "
             "automation.marker_tracking.udp_receiver:main",

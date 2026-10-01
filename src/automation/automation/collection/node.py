@@ -20,18 +20,25 @@ Safety
 from __future__ import annotations
 
 import json
+import math
 
 from control_interface.msg import (
-    ControlStream, DeviceEvent, DeviceStream, ManagerEvent)
+    CausalExperimentTrace, ControlStream, DeviceEvent, DeviceStream,
+    ManagerEvent)
 from control_interface.srv import DeviceCmd
+from diagnostic_msgs.msg import DiagnosticArray
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy)
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from .identification import IdentificationConfig, IdentificationGenerator
+from .causal_experiment import (
+    CausalExperimentConfig, CausalExperimentGenerator,
+    resolve_tolerance_qualified_start)
 
 # Joint order matches teleop/config/params.yaml
 JOINTS = [
@@ -101,7 +108,7 @@ class CollectionNode(Node):
         self.declare_parameter("source_name", "autonomy")
         self.declare_parameter("rate_hz", 100.0)
         self.declare_parameter("duration_s", 10.0)
-        self.declare_parameter("mode", "constant")  # constant | sinusoidal | identification
+        self.declare_parameter("mode", "constant")
         self.declare_parameter("target", "catheter")        # catheter | sheath
         self.declare_parameter("joint_min_speeds", DEFAULT_MIN_SPEEDS)
         self.declare_parameter("joint_max_speeds", DEFAULT_MAX_SPEEDS)
@@ -140,6 +147,52 @@ class CollectionNode(Node):
         self.declare_parameter("identification_slow_fraction", 0.30)
         self.declare_parameter("identification_medium_fraction", 0.70)
         self.declare_parameter("identification_max_duration_s", 600.0)
+        # Causal proximal experiment. These values are intentionally modest
+        # and remain subject to the selected catheter's hard limits.
+        self.declare_parameter("causal_schedule", "full")
+        self.declare_parameter("causal_amplitudes", [6.0, 75.0, 5.5])
+        self.declare_parameter(
+            "causal_minimum_amplitudes", [5.0, 65.0, 4.75])
+        self.declare_parameter("causal_margins", [15.0, 20.0, 1.0])
+        self.declare_parameter("causal_slow_speeds", [2.0, 7.0, 2.0])
+        self.declare_parameter("causal_fast_speeds", [5.0, 20.0, 4.0])
+        self.declare_parameter("causal_repeats", 3)
+        self.declare_parameter("causal_static_s", 15.0)
+        self.declare_parameter("causal_endpoint_dwell_s", 2.0)
+        self.declare_parameter("causal_between_episode_s", 1.0)
+        self.declare_parameter("causal_rotation_relax_s", 4.0)
+        self.declare_parameter("causal_timing_leads_ms", [20.0, 40.0, 80.0])
+        self.declare_parameter("causal_timing_direction", 1)
+        self.declare_parameter("causal_bend_bias_position", 7.5)
+        self.declare_parameter("causal_insertion_center_position", 20.0)
+        self.declare_parameter(
+            "causal_insertion_plateaus",
+            [0.0, 40.0 / 3.0, 80.0 / 3.0, 40.0])
+        self.declare_parameter("causal_insertion_plateau_visits", 2)
+        self.declare_parameter("causal_insertion_plateau_dwell_s", 3.0)
+        self.declare_parameter("causal_tendon_sweep_limits", [0.0, 15.0])
+        self.declare_parameter("causal_allow_insertion_centering", False)
+        self.declare_parameter("causal_max_duration_s", 950.0)
+        self.declare_parameter("causal_require_estimator", True)
+        # Keep the estimator status contract available for the independent
+        # controller-disarmed/adaptation-disabled interlocks, while allowing
+        # camera/SVO-first experiments to treat online marker/UKF quality as
+        # diagnostic only.  The default remains fail-closed for the existing
+        # causal schedules.
+        self.declare_parameter("causal_require_estimator_tracking", True)
+        self.declare_parameter("causal_estimator_status_topic",
+                               "/catheter_mppi/status")
+        self.declare_parameter("causal_estimator_max_age_s", 0.5)
+        self.declare_parameter("causal_minimum_accepted_observations", 8)
+        self.declare_parameter("causal_maximum_marker_rejections", 3)
+        self.declare_parameter("causal_require_controller_disarmed", True)
+        self.declare_parameter("causal_require_adaptation_disabled", True)
+        # Isolation runs use a repeatable interior operating point. This is an
+        # ordinary manager-mediated position transaction, never an encoder
+        # zero operation. The causal launch enables it only for actuating runs.
+        self.declare_parameter("causal_initialize_before_run", False)
+        self.declare_parameter("causal_initial_position", [20.0, 0.0, 0.0])
+        self.declare_parameter("causal_initialization_timeout_s", 30.0)
         # per-catheter pos + vel limits from YAML (overrides the joint_lower/upper
         # and joint_max_speeds params when limits_file is set)
         self.declare_parameter("limits_file", "")
@@ -222,6 +275,14 @@ class CollectionNode(Node):
             self.get_parameter('return_position_mode_delay_s').value)
         self._validate_position_return_parameters()
 
+        self._causal_initialize_before_run = bool(
+            self.get_parameter("causal_initialize_before_run").value)
+        self._causal_initial_position = np.asarray(
+            self.get_parameter("causal_initial_position").value, dtype=float)
+        self._causal_initialization_timeout_s = float(
+            self.get_parameter("causal_initialization_timeout_s").value)
+        self._validate_causal_initialization_parameters()
+
         # per-catheter limits (6-joint pos_lower/upper + vel_max) override the
         # joint_lower/upper and joint_max_speeds params if a limits_file is given.
         self._pos_lower6, self._pos_upper6, _vel_min6, _vel_max6 = (
@@ -236,10 +297,22 @@ class CollectionNode(Node):
         if self._target not in TARGET_JOINTS:
             raise ValueError(f"target must be catheter|sheath, got {self._target}")
         self._target_idx = TARGET_JOINTS[self._target]
-        if self._mode not in ("constant", "sinusoidal", "identification"):
+        if self._mode not in (
+                "constant", "sinusoidal", "identification", "causal"):
             raise ValueError(f"unknown mode '{self._mode}'")
-        if self._mode == "identification" and self._target != "catheter":
-            raise ValueError("identification mode currently supports target=catheter")
+        if self._mode in ("identification", "causal") and self._target != "catheter":
+            raise ValueError(
+                f"{self._mode} mode currently supports target=catheter")
+        self._causal_contract = None
+        if self._mode == "causal":
+            # The experiment records the exact projection used by MPPI and
+            # mirrored from firmware. Import lazily so ordinary automation
+            # collection modes do not depend on the learned-control package.
+            from catheter_control.hardware_contract import (
+                load_hardware_contract)
+            self._causal_contract = load_hardware_contract(
+                str(self.get_parameter("limits_file").value),
+                str(self.get_parameter("catheter").value))
 
         self._gen = None
         self._shortest_delta = None
@@ -247,14 +320,32 @@ class CollectionNode(Node):
         self._floor_reference_offset = np.zeros(6)
         self._h = 1.0 / self._rate
         self._episode_index = -1
+        self._causal_episode_start_timestamp_ns = 0
+        self._causal_episode_start_position = [math.nan] * 6
+        self._causal_episode_start_encoder = [math.nan] * 6
         if self._mode == "sinusoidal":
             self._build_generator()
 
-        self._control_pub = self.create_publisher(ControlStream, "/teleop/control", 10)
+        motion_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self._control_pub = self.create_publisher(
+            ControlStream, "/teleop/control", motion_qos)
         self._event_pub = self.create_publisher(ManagerEvent, "/teleop/event", 10)
         self._marker_pub = self.create_publisher(
             String, "/collection/events", collection_marker_qos())
+        trace_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=20,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE)
+        self._causal_trace_pub = self.create_publisher(
+            CausalExperimentTrace, "/collection/causal_trace", trace_qos)
         self._device_client = self.create_client(DeviceCmd, "/device/command")
+        self._abort_service = self.create_service(
+            Trigger, "/collection/abort", self._abort_cb)
 
         # Latest device state (firmware reports predicate 'P'/'V'/'E' + 6 values),
         # captured so the run_start marker records the initial joint configuration.
@@ -264,9 +355,15 @@ class CollectionNode(Node):
         self._pos_history = []         # (receipt stamp_ns, length-6 data)
         self._enc_history = []
         self._enc_seen = False
+        self._causal_estimator_status = None
+        self._causal_estimator_status_receipt_ns = None
         self.create_subscription(DeviceStream, "/device/state", self._state_cb, 10)
         self.create_subscription(
             DeviceEvent, "/device/event", self._device_event_cb, 10)
+        self.create_subscription(
+            DiagnosticArray,
+            str(self.get_parameter("causal_estimator_status_topic").value),
+            self._causal_estimator_status_cb, 10)
 
         self._t0 = None
         self._done = False
@@ -275,6 +372,7 @@ class CollectionNode(Node):
         self._return_status = "not_started"
         self._return_elapsed_s = None
         self._start_pos = None         # pose captured at run_start (return target)
+        self._causal_plan_start = None  # exact-limit planning origin
         self._return_target_pos = None
         self._return_position_speeds = None
         self._return_within_since_ns = None
@@ -289,12 +387,38 @@ class CollectionNode(Node):
         self._preflight_timer = None
         self._preflight_deadline_ns = None
         self._preflight_last_error = "feedback qualification has not started"
+        self._initializing = False
+        self._initialization_complete = False
+        self._initialization_timer = None
+        self._initialization_t0 = None
+        self._initialization_target_pos = None
+        self._initialization_position_speeds = None
+        self._initialization_within_since_ns = None
+        self._initialization_mode_ready_ns = None
         self.should_exit = False
 
         # Enable after a short delay so publishers finish discovery.
         self._start_timer = self.create_timer(0.5, self._start)
 
     # -- lifecycle -------------------------------------------------------- #
+    def _abort_cb(self, _request, response):
+        """Stop without an automatic return move; safe in every phase."""
+        if self._done:
+            response.success = False
+            response.message = "collection is already finished"
+            return response
+        if self._t0 is None:
+            self._abort_preflight("abort requested by operator")
+        else:
+            self._run_status = "operator_aborted"
+            self._returning = False
+            self._return_status = "aborted_by_operator"
+            self._marker("operator_abort")
+            self._finish()
+        response.success = True
+        response.message = "stop initiated"
+        return response
+
     def _start(self) -> None:
         self._start_timer.cancel()
         if not self._device_client.wait_for_service(timeout_sec=1.0):
@@ -341,7 +465,12 @@ class CollectionNode(Node):
             self.get_logger().info(
                 f"feedback preflight passed: {self._preflight_stability_s:.2f}s "
                 "stationary POS/ENC window")
-            self._begin_run()
+            if (self._mode == "causal"
+                    and self._causal_initialize_before_run
+                    and not self._initialization_complete):
+                self._begin_causal_initialization()
+            else:
+                self._begin_run()
             return
         self._preflight_last_error = error
         if now_ns >= self._preflight_deadline_ns:
@@ -350,6 +479,11 @@ class CollectionNode(Node):
 
     def _feedback_preflight_error(self, now_ns: int) -> str | None:
         """Return why feedback is not motion-safe yet, otherwise ``None``."""
+        if getattr(self, "_mode", None) == "causal":
+            estimator_error = self._causal_estimator_error(
+                now_ns, require_clean=True)
+            if estimator_error is not None:
+                return estimator_error
         if self._last_pos is None:
             return "missing POS feedback"
         if self._preflight_require_enc and self._last_enc is None:
@@ -385,11 +519,17 @@ class CollectionNode(Node):
             for joint in self._target_idx:
                 lower = self._pos_lower6[joint]
                 upper = self._pos_upper6[joint]
-                if (pos[joint] < lower - self._preflight_limit_tolerance
-                        or pos[joint] > upper + self._preflight_limit_tolerance):
+                tolerance = self._preflight_limit_tolerance
+                causal_contract = getattr(self, "_causal_contract", None)
+                if causal_contract is not None:
+                    tolerance = float(
+                        causal_contract.feedback_limit_tolerance[joint])
+                if (pos[joint] < lower - tolerance
+                        or pos[joint] > upper + tolerance):
                     return (
                         f"{JOINTS[joint]} position {pos[joint]:.6g} outside "
-                        f"[{lower:.6g}, {upper:.6g}]")
+                        f"[{lower:.6g}, {upper:.6g}] with feedback "
+                        f"tolerance {tolerance:.6g}")
 
         stability_ns = int(self._preflight_stability_s * 1e9)
         pos_window = CollectionNode._recent_stability_window(
@@ -442,6 +582,7 @@ class CollectionNode(Node):
     def _abort_preflight(self, reason: str, status: dict | None = None) -> None:
         if self._preflight_timer is not None:
             self._preflight_timer.cancel()
+        self._stop_causal_initialization_motion()
         self._done = True
         self._run_status = "preflight_failed"
         self._marker(
@@ -453,16 +594,165 @@ class CollectionNode(Node):
         if self._shutdown_on_done:
             self.should_exit = True
 
+    def _begin_causal_initialization(self) -> None:
+        """Move the selected catheter joints to the reviewed run origin.
+
+        This uses the manager-mediated absolute-position path. Feedback must
+        pass a second stationary preflight at the destination before the
+        generator is constructed, preventing an isolation run from silently
+        inheriting a transient or off-target initialization state.
+        """
+        if not self._start_motor:
+            self._abort_preflight(
+                "causal initialization requires start_motor:=true")
+            return
+        if self._last_pos is None:
+            self._abort_preflight(
+                "causal initialization has no POS feedback")
+            return
+
+        target = np.asarray(self._last_pos, dtype=float).copy()
+        target[self._target_idx] = self._causal_initial_position
+        if self._pos_lower6 is not None:
+            for joint in self._target_idx:
+                if not (self._pos_lower6[joint] <= target[joint]
+                        <= self._pos_upper6[joint]):
+                    self._abort_preflight(
+                        f"causal initialization target for {JOINTS[joint]} "
+                        f"is outside [{self._pos_lower6[joint]:.6g}, "
+                        f"{self._pos_upper6[joint]:.6g}]")
+                    return
+
+        self._initializing = True
+        self._initialization_t0 = self.get_clock().now()
+        self._initialization_target_pos = target
+        self._initialization_position_speeds = np.zeros(6)
+        speeds = np.maximum(
+            self._min_speeds,
+            self._return_position_speed_factor * self._max_speeds)
+        self._initialization_position_speeds[self._target_idx] = speeds[
+            self._target_idx]
+        self._initialization_within_since_ns = None
+        self._position_status = None
+        self._position_complete_seen = False
+        self._marker(
+            "initialization_start",
+            start_position=[float(self._last_pos[j]) for j in self._target_idx],
+            target_position=[float(target[j]) for j in self._target_idx],
+            tolerance=[float(self._return_tolerances[j])
+                       for j in self._target_idx],
+            speed_limits=[float(
+                self._initialization_position_speeds[j])
+                for j in self._target_idx],
+            control_mode="position")
+        self.get_logger().info(
+            "initializing causal experiment joints %s to %s with position "
+            "control" % (
+                self._target_idx,
+                [round(float(target[j]), 3) for j in self._target_idx]))
+        self._send_event(ManagerEvent.MODE, text=chr(ManagerEvent.JOINT_POS))
+        self._initialization_mode_ready_ns = int(
+            self.get_clock().now().nanoseconds
+            + self._return_position_mode_delay_s * 1e9)
+        self._initialization_timer = self.create_timer(
+            1.0 / self._rate, self._causal_initialization_tick)
+
+    def _initialization_position_done(self, now_ns: int) -> bool:
+        if self._last_pos is None:
+            self._initialization_within_since_ns = None
+            return False
+        within = all(
+            abs(self._initialization_target_pos[joint]
+                - self._last_pos[joint]) <= self._return_tolerances[joint]
+            for joint in self._target_idx)
+        if not within:
+            self._initialization_within_since_ns = None
+            return False
+        if self._initialization_within_since_ns is None:
+            self._initialization_within_since_ns = now_ns
+            return False
+        return (
+            now_ns - self._initialization_within_since_ns
+            >= int(self._return_position_settle_s * 1e9))
+
+    def _stop_causal_initialization_motion(self) -> None:
+        if self._initialization_timer is not None:
+            self._initialization_timer.cancel()
+            self._initialization_timer = None
+        if self._initializing:
+            self._send_event(ManagerEvent.STOP_MOTOR)
+            self._send_event(ManagerEvent.MODE, text=chr(ManagerEvent.NONE))
+        self._initializing = False
+
+    def _causal_initialization_tick(self) -> None:
+        if self._done or not self._initializing:
+            return
+        now = self.get_clock().now()
+        elapsed = (now - self._initialization_t0).nanoseconds * 1e-9
+        if self._position_status in (
+                ManagerEvent.POSITION_TIMED_OUT,
+                ManagerEvent.POSITION_REJECTED):
+            status = (
+                "firmware_timed_out"
+                if self._position_status == ManagerEvent.POSITION_TIMED_OUT
+                else "firmware_rejected")
+            self._marker(
+                "initialization_failed", status=status,
+                final_position=(None if self._last_pos is None else
+                                [float(self._last_pos[j])
+                                 for j in self._target_idx]))
+            self._abort_preflight(
+                f"causal initialization {status}", self._fault_status)
+            return
+        if self._initialization_position_done(now.nanoseconds):
+            final = [float(self._last_pos[j]) for j in self._target_idx]
+            error = [
+                float(self._initialization_target_pos[j] - self._last_pos[j])
+                for j in self._target_idx]
+            self._marker(
+                "initialization_complete", status="succeeded",
+                elapsed_s=float(elapsed), final_position=final,
+                error_target_minus_final=error)
+            self.get_logger().info(
+                f"causal initialization complete: position={final} "
+                f"error={error}")
+            self._stop_causal_initialization_motion()
+            self._initialization_complete = True
+            # Re-qualify fresh stationary feedback and estimator health at the
+            # initialized configuration before recording run_start.
+            self._preflight_deadline_ns = int(
+                now.nanoseconds + self._preflight_timeout_s * 1e9)
+            self._preflight_timer = self.create_timer(
+                0.05, self._preflight_feedback_tick)
+            self._preflight_feedback_tick()
+            return
+        if elapsed > self._causal_initialization_timeout_s:
+            final = (None if self._last_pos is None else
+                     [float(self._last_pos[j]) for j in self._target_idx])
+            self._marker(
+                "initialization_failed", status="timed_out",
+                elapsed_s=float(elapsed), final_position=final)
+            self._abort_preflight(
+                "causal initialization timed out", self._fault_status)
+            return
+        if now.nanoseconds >= self._initialization_mode_ready_ns:
+            self._publish_position(
+                self._initialization_target_pos,
+                self._initialization_position_speeds)
+
     def _begin_run(self) -> None:
         if self._preflight_timer is not None:
             self._preflight_timer.cancel()
         self._start_pos = list(self._last_pos) if self._last_pos is not None else None
-        if self._mode == "identification":
+        if self._mode in ("identification", "causal"):
             try:
-                self._build_identification_generator()
+                if self._mode == "identification":
+                    self._build_identification_generator()
+                else:
+                    self._build_causal_generator()
             except Exception as exc:
                 self._abort_preflight(
-                    f"identification trajectory validation failed: {exc}",
+                    f"{self._mode} trajectory validation failed: {exc}",
                     self._fault_status)
                 return
         if self.get_parameter("auto_enable").value:
@@ -472,7 +762,8 @@ class CollectionNode(Node):
             self._send_event(ManagerEvent.START_MOTOR)
             self.get_logger().warn("START_MOTOR sent — hardware may move")
         generator_metadata = (
-            self._gen.metadata if self._mode == "identification" else None)
+            self._gen.metadata
+            if self._mode in ("identification", "causal") else None)
         self._marker("run_start", mode=self._mode, target=self._target,
                      seed=int(self.get_parameter("seed").value),
                      floor_tracking={
@@ -482,6 +773,9 @@ class CollectionNode(Node):
                          "exit_time_s": self._floor_tracking_exit_time_s,
                      },
                      start_state=self._state_snapshot(),
+                     causal_plan_start=(
+                         None if self._causal_plan_start is None else
+                         self._causal_plan_start.tolist()),
                      generator=generator_metadata)
         self._initialize_floor_tracking()
         self._run_status = "running"
@@ -517,6 +811,32 @@ class CollectionNode(Node):
             return
         self._update_episode_markers(t)
         vel = self._trajectory_velocity(t)
+        if self._mode == "causal":
+            gate_error = self._causal_estimator_error(
+                self.get_clock().now().nanoseconds)
+            if gate_error is not None:
+                self._run_status = "causal_estimator_abort"
+                self._returning = False
+                self._return_status = "aborted_estimator_gate"
+                self.get_logger().error(
+                    f"causal experiment stopped: {gate_error}")
+                self._marker("causal_estimator_abort", reason=gate_error)
+                self._finish()
+                return
+            vel[self._target_idx] = self._gen.enforce_basis(
+                t, vel[self._target_idx])
+            command_error = self._timing_command_error(t, vel)
+            if command_error is not None:
+                self._run_status = "causal_command_topology_abort"
+                self._returning = False
+                self._return_status = "aborted_command_topology"
+                self.get_logger().error(
+                    f"causal experiment stopped: {command_error}")
+                self._marker(
+                    "causal_command_topology_abort", reason=command_error)
+                self._finish()
+                return
+            self._publish_causal_trace(t, vel)
         self._publish_velocity(vel)
 
     # -- return to start -------------------------------------------------- #
@@ -934,9 +1254,93 @@ class CollectionNode(Node):
             f"resolved={self._gen.amplitudes.tolist()} "
             f"episodes={len(self._gen.episodes)} seed={config.seed}")
 
+    def _build_causal_generator(self) -> None:
+        """Resolve the causal basis experiment from fresh measured POS."""
+        if self._start_pos is None:
+            raise ValueError("fresh POS feedback is required")
+        idx = self._target_idx
+        if self._pos_lower6 is not None:
+            lower = self._pos_lower6[idx]
+            upper = self._pos_upper6[idx]
+        else:
+            lower = np.asarray(
+                self.get_parameter("joint_lower").value, dtype=float)
+            upper = np.asarray(
+                self.get_parameter("joint_upper").value, dtype=float)
+        config = CausalExperimentConfig(
+            schedule=str(self.get_parameter("causal_schedule").value),
+            amplitudes=tuple(self.get_parameter("causal_amplitudes").value),
+            minimum_amplitudes=tuple(self.get_parameter(
+                "causal_minimum_amplitudes").value),
+            margins=tuple(self.get_parameter("causal_margins").value),
+            slow_speeds=tuple(self.get_parameter(
+                "causal_slow_speeds").value),
+            fast_speeds=tuple(self.get_parameter(
+                "causal_fast_speeds").value),
+            repeats=int(self.get_parameter("causal_repeats").value),
+            static_s=float(self.get_parameter("causal_static_s").value),
+            endpoint_dwell_s=float(self.get_parameter(
+                "causal_endpoint_dwell_s").value),
+            between_episode_s=float(self.get_parameter(
+                "causal_between_episode_s").value),
+            rotation_relax_s=float(self.get_parameter(
+                "causal_rotation_relax_s").value),
+            timing_leads_ms=tuple(self.get_parameter(
+                "causal_timing_leads_ms").value),
+            timing_direction=int(self.get_parameter(
+                "causal_timing_direction").value),
+            bend_bias_position=float(self.get_parameter(
+                "causal_bend_bias_position").value),
+            insertion_center_position=float(self.get_parameter(
+                "causal_insertion_center_position").value),
+            insertion_plateaus=tuple(self.get_parameter(
+                "causal_insertion_plateaus").value),
+            insertion_plateau_visits=int(self.get_parameter(
+                "causal_insertion_plateau_visits").value),
+            insertion_plateau_dwell_s=float(self.get_parameter(
+                "causal_insertion_plateau_dwell_s").value),
+            tendon_sweep_limits=tuple(self.get_parameter(
+                "causal_tendon_sweep_limits").value),
+            allow_insertion_centering=bool(self.get_parameter(
+                "causal_allow_insertion_centering").value),
+            max_duration_s=float(self.get_parameter(
+                "causal_max_duration_s").value),
+        )
+        measured_start = np.asarray(self._start_pos, dtype=float)[idx]
+        tolerance = self._causal_contract.feedback_limit_tolerance[idx]
+        self._causal_plan_start = resolve_tolerance_qualified_start(
+            measured_start, lower, upper, tolerance)
+        adjustment = self._causal_plan_start - measured_start
+        if np.any(adjustment != 0.0):
+            self.get_logger().warn(
+                "resolved tolerance-qualified measured run start onto exact "
+                "command limits: measured=%s plan=%s adjustment=%s" % (
+                    measured_start.tolist(),
+                    self._causal_plan_start.tolist(), adjustment.tolist()))
+        self._gen = CausalExperimentGenerator(
+            start_position=self._causal_plan_start,
+            lower_limits=lower, upper_limits=upper,
+            minimum_speeds=self._min_speeds[idx],
+            maximum_speeds=self._max_speeds[idx], dt=self._h,
+            config=config)
+        self._duration = self._gen.duration
+        self._episode_index = -1
+        self.get_logger().info(
+            "causal experiment generator: schedule=%s duration=%.3fs "
+            "half_excursions=%s peak_to_peak=%s center=%s "
+            "bend_bias=%.3f speeds=%s/%s episodes=%d" % (
+                self._gen.schedule, self._duration,
+                self._gen.amplitudes.tolist(),
+                (2.0 * self._gen.amplitudes).tolist(),
+                self._gen.experiment_center.tolist(),
+                config.bend_bias_position,
+                self._gen.slow_speeds.tolist(),
+                self._gen.fast_speeds.tolist(),
+                len(self._gen.episodes)))
+
     def _update_episode_markers(self, t: float, finishing: bool = False) -> None:
         """Publish every crossed episode boundary exactly once."""
-        if self._mode != "identification" or self._gen is None:
+        if self._mode not in ("identification", "causal") or self._gen is None:
             return
         target_index = len(self._gen.episodes) if finishing else (
             self._gen.episode_index(t) + 1)
@@ -947,20 +1351,61 @@ class CollectionNode(Node):
                     "episode_end", index=self._episode_index,
                     name=previous.name,
                     planned_end_s=previous.start_s + previous.duration_s)
+                self.get_logger().info(
+                    "episode %d/%d END %s" % (
+                        self._episode_index + 1, len(self._gen.episodes),
+                        previous.name))
             self._episode_index += 1
             if self._episode_index < len(self._gen.episodes):
                 current = self._gen.episodes[self._episode_index]
+                if self._mode == "causal":
+                    self._causal_episode_start_timestamp_ns = int(
+                        self.get_clock().now().nanoseconds)
+                    self._causal_episode_start_position = (
+                        [math.nan] * 6 if self._last_pos is None else
+                        [float(value) for value in self._last_pos])
+                    self._causal_episode_start_encoder = (
+                        [math.nan] * 6 if self._last_enc is None else
+                        [float(value) for value in self._last_enc["data"]])
                 self._marker(
                     "episode_start", index=self._episode_index,
                     name=current.name, planned_start_s=current.start_s,
                     planned_duration_s=current.duration_s,
+                    excitation_basis=getattr(
+                        current, "excitation_basis", "unspecified"),
+                    speed_tier=getattr(current, "speed_tier", "unspecified"),
+                    repetition=int(getattr(current, "repetition", 0)),
+                    insertion_plateau_mm=getattr(
+                        current, "insertion_plateau_mm", None),
+                    branch_order=getattr(current, "branch_order", None),
                     command_speed_limits=(
-                        current.maximum_command_speed_limits.tolist()))
+                        current.maximum_command_speed_limits.tolist()),
+                    **({} if self._mode != "causal" else {
+                        "start_timestamp_ns": (
+                            self._causal_episode_start_timestamp_ns),
+                        "start_logical_position": (
+                            self._causal_episode_start_position),
+                        "start_raw_encoder_counts": (
+                            self._causal_episode_start_encoder),
+                    }))
+                self.get_logger().info(
+                    "episode %d/%d START %s basis=%s speed=%s "
+                    "repetition=%d duration=%.3fs" % (
+                        self._episode_index + 1, len(self._gen.episodes),
+                        current.name,
+                        getattr(current, "excitation_basis", "unspecified"),
+                        getattr(current, "speed_tier", "unspecified"),
+                        int(getattr(current, "repetition", 0)),
+                        current.duration_s))
         if finishing and self._episode_index == len(self._gen.episodes) - 1:
             previous = self._gen.episodes[self._episode_index]
             self._marker(
                 "episode_end", index=self._episode_index, name=previous.name,
                 planned_end_s=previous.start_s + previous.duration_s)
+            self.get_logger().info(
+                "episode %d/%d END %s" % (
+                    self._episode_index + 1, len(self._gen.episodes),
+                    previous.name))
             self._episode_index += 1
 
     def _velocity(self, t: float) -> np.ndarray:
@@ -975,7 +1420,7 @@ class CollectionNode(Node):
             q0 = self._gen.step(t)
             q1 = self._gen.step(t + self._h)
             v[self._target_idx] = self._shortest_delta(q0, q1) / self._h
-        elif self._mode == "identification":
+        elif self._mode in ("identification", "causal"):
             v[self._target_idx] = self._gen.relative_velocity(t)
         else:
             raise ValueError(f"unknown mode '{self._mode}'")
@@ -985,7 +1430,8 @@ class CollectionNode(Node):
         """Reset tracking and rebase the generator at the measured start pose."""
         self._floor_tracking_direction[:] = 0
         self._floor_reference_offset[:] = 0.0
-        if (self._mode not in ("sinusoidal", "identification") or self._gen is None
+        if (self._mode not in ("sinusoidal", "identification", "causal")
+                or self._gen is None
                 or self._last_pos is None):
             return
         q0 = np.asarray(self._gen.step(0.0), dtype=float)
@@ -998,21 +1444,34 @@ class CollectionNode(Node):
         """Return the rebased, position-limited six-joint reference."""
         reference = np.asarray(self._last_pos, dtype=float).copy()
         generated = np.asarray(self._gen.step(t), dtype=float)
-        if self._mode == "identification":
+        if self._mode == "causal":
+            reference[self._target_idx] = (
+                self._causal_plan_start + generated)
+        elif self._mode == "identification":
             reference[self._target_idx] = (
                 np.asarray(self._start_pos, dtype=float)[self._target_idx]
                 + generated)
         else:
             reference[self._target_idx] = (
                 generated + self._floor_reference_offset[self._target_idx])
-        if self._pos_lower6 is not None and self._mode != "identification":
+        if (self._pos_lower6 is not None
+                and self._mode not in ("identification", "causal")):
             reference = np.clip(reference, self._pos_lower6, self._pos_upper6)
         return reference
 
     def _trajectory_velocity(self, t: float) -> np.ndarray:
         """Generate a bounded command, using floor-aware tracking when needed."""
         feedforward = self._velocity(t)
-        if (self._mode not in ("sinusoidal", "identification")
+        if (self._mode == "causal" and self._gen is not None
+                and self._gen.active_episode(t).is_timing_episode):
+            # Phase 3 is generated as constant reliable-speed pulses in the
+            # two physical shafts. Applying a floor per *logical* coordinate
+            # here would cancel raw shaft 0 whenever logical insertion and
+            # bending receive the same floor. Preserve the raw construction;
+            # the per-episode ceiling and the manager-equivalent validation in
+            # _timing_command_error retain safety authority.
+            return self._apply_identification_speed_ceiling(t, feedforward)
+        if (self._mode not in ("sinusoidal", "identification", "causal")
                 or not self._floor_tracking_enabled
                 or not np.any(self._min_speeds[self._target_idx] > 0.0)):
             bounded = self._apply_velocity_bounds(feedforward)
@@ -1034,15 +1493,51 @@ class CollectionNode(Node):
         tracked = self._floor_aware_velocity(feedforward, reference, measured)
         return self._apply_identification_speed_ceiling(t, tracked)
 
+    def _timing_command_error(self, t: float, velocity) -> str | None:
+        """Fail closed if Phase-3 raw-shaft intent would be transformed.
+
+        The manager still performs its normal logical speed and position
+        projection.  This pre-publication check mirrors that projection and
+        accepts a timing sample only when it leaves both physical shaft
+        commands unchanged.  It does not bypass or weaken any manager gate.
+        """
+        if self._gen is None:
+            return None
+        expected = self._gen.timing_raw_velocity(t)
+        if expected is None:
+            return None
+        command = np.asarray(velocity, dtype=float)
+        if command.shape != (6,) or not np.all(np.isfinite(command)):
+            return "phase-3 command is not a finite six-axis vector"
+        actual = np.asarray(
+            self._causal_contract.logical_to_motor_axis_velocity(command),
+            dtype=float)[[0, 2]]
+        if not np.allclose(actual, expected, rtol=0.0, atol=1e-9):
+            return (
+                "phase-3 raw command differs from generator: "
+                f"expected={expected.tolist()} actual={actual.tolist()}")
+        if self._last_pos is None or len(self._last_pos) != 6:
+            return "phase-3 command projection lacks POS feedback"
+        projected_logical = self._causal_contract.project_logical_velocity(
+            command, self._last_pos)
+        projected = np.asarray(
+            self._causal_contract.logical_to_motor_axis_velocity(
+                projected_logical), dtype=float)[[0, 2]]
+        if not np.allclose(projected, expected, rtol=0.0, atol=1e-9):
+            return (
+                "manager projection would change phase-3 raw command: "
+                f"expected={expected.tolist()} projected={projected.tolist()}")
+        return None
+
     def _apply_identification_speed_ceiling(
             self, t: float, velocity) -> np.ndarray:
         """Keep feedback correction inside the active experiment's budget."""
         bounded = np.asarray(velocity, dtype=float).copy()
-        if self._mode != "identification" or self._gen is None:
+        if self._mode not in ("identification", "causal") or self._gen is None:
             return bounded
         limits = np.asarray(self._gen.command_speed_limits(t), dtype=float)
         if limits.shape != (3,) or np.any(limits < 0.0):
-            raise ValueError("identification command speed limits are invalid")
+            raise ValueError("experiment command speed limits are invalid")
         for local_index, joint in enumerate(self._target_idx):
             limit = limits[local_index]
             bounded[joint] = float(np.clip(bounded[joint], -limit, limit))
@@ -1144,6 +1639,17 @@ class CollectionNode(Node):
             raise ValueError(
                 'return_position_mode_delay_s must be non-negative')
 
+    def _validate_causal_initialization_parameters(self) -> None:
+        """Validate the fixed operating-point initialization contract."""
+        if (self._causal_initial_position.shape != (3,)
+                or not np.all(np.isfinite(self._causal_initial_position))):
+            raise ValueError(
+                "causal_initial_position must contain 3 finite values")
+        if (not np.isfinite(self._causal_initialization_timeout_s)
+                or self._causal_initialization_timeout_s <= 0.0):
+            raise ValueError(
+                "causal_initialization_timeout_s must be positive")
+
     def _validate_preflight_parameters(self) -> None:
         """Validate feedback qualification thresholds."""
         if self._preflight_timeout_s <= 0.0:
@@ -1180,6 +1686,85 @@ class CollectionNode(Node):
         return bounded
 
     # -- state ----------------------------------------------------------- #
+    def _causal_estimator_status_cb(self, message: DiagnosticArray) -> None:
+        """Cache the compact controller/UKF health contract for preflight."""
+        selected = next((status for status in message.status
+                         if status.name == "catheter_control/mppi"), None)
+        if selected is None:
+            return
+        values = {item.key: item.value for item in selected.values}
+        try:
+            accepted = int(values.get("accepted_observations", "0"))
+            rejected = int(values.get("consecutive_rejections", "0"))
+        except ValueError:
+            return
+        self._causal_estimator_status = {
+            "controller_state": selected.message,
+            "armed": values.get("armed", "False").lower() == "true",
+            "estimator_health": values.get(
+                "estimator_health", "UNAVAILABLE"),
+            "accepted_observations": accepted,
+            "consecutive_rejections": rejected,
+            "marker_diagnostic": values.get(
+                "marker_diagnostic", "UNAVAILABLE"),
+            "marker_update_reason": values.get(
+                "marker_update_reason", "none"),
+            "adaptation_enabled": values.get(
+                "model_adaptation_enabled", "False").lower() == "true",
+        }
+        self._causal_estimator_status_receipt_ns = (
+            self.get_clock().now().nanoseconds)
+
+    def _causal_estimator_error(
+            self, now_ns: int, require_clean: bool = False) -> str | None:
+        if not bool(self.get_parameter("causal_require_estimator").value):
+            return None
+        if self._causal_estimator_status is None:
+            return "missing catheter estimator status"
+        receipt = self._causal_estimator_status_receipt_ns
+        maximum_age_s = float(
+            self.get_parameter("causal_estimator_max_age_s").value)
+        age_s = math.inf if receipt is None else (now_ns - receipt) * 1e-9
+        if age_s < 0.0 or age_s > maximum_age_s:
+            return f"stale catheter estimator status ({age_s:.3f}s)"
+        status = self._causal_estimator_status
+        if (bool(self.get_parameter(
+                "causal_require_controller_disarmed").value)
+                and status["armed"]):
+            return "catheter controller is armed"
+        if (bool(self.get_parameter(
+                "causal_require_adaptation_disabled").value)
+                and status["adaptation_enabled"]):
+            return "online Jacobian adaptation is enabled"
+        if not bool(self.get_parameter(
+                "causal_require_estimator_tracking").value):
+            return None
+        if (require_clean and status["estimator_health"] != "TRACKING"):
+            return (
+                "catheter estimator is not TRACKING: "
+                f"{status['estimator_health']}")
+        if status["estimator_health"] not in ("TRACKING", "DEGRADED"):
+            return (
+                "catheter estimator is unavailable: "
+                f"{status['estimator_health']}")
+        required = int(self.get_parameter(
+            "causal_minimum_accepted_observations").value)
+        if status["accepted_observations"] < required:
+            return (
+                "insufficient accepted marker observations: "
+                f"{status['accepted_observations']} < {required}")
+        maximum_rejections = int(self.get_parameter(
+            "causal_maximum_marker_rejections").value)
+        if status["consecutive_rejections"] >= maximum_rejections:
+            return (
+                "repeated marker rejection: "
+                f"{status['consecutive_rejections']} >= {maximum_rejections}")
+        if require_clean and status["marker_diagnostic"] != "TRACKING":
+            return (
+                "marker diagnostic is not TRACKING: "
+                f"{status['marker_diagnostic']}")
+        return None
+
     def _state_cb(self, msg: DeviceStream) -> None:
         now_ns = self.get_clock().now().nanoseconds
         snap = {
@@ -1197,6 +1782,65 @@ class CollectionNode(Node):
             self._last_enc = snap                     # raw encoder counts
             self._enc_history.append((now_ns, snap["data"]))
             self._prune_preflight_history(now_ns)
+
+    def _publish_causal_trace(self, t: float, command) -> None:
+        """Publish a compact synchronous trace beside the native-rate bag."""
+        episode = self._gen.active_episode(t)
+        message = CausalExperimentTrace()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self._source
+        message.episode_index = int(self._gen.episode_index(t))
+        message.episode_name = episode.name
+        message.excitation_basis = episode.excitation_basis
+        message.speed_tier = episode.speed_tier
+        message.repetition = int(episode.repetition)
+        message.experiment_elapsed_s = float(t)
+        message.episode_elapsed_s = float(t - episode.start_s)
+        message.intended_command_timestamp_ns = int(
+            self._t0.nanoseconds + round(float(t) * 1e9))
+        message.episode_start_timestamp_ns = int(
+            self._causal_episode_start_timestamp_ns)
+        axis_mask = np.zeros(6, dtype=bool)
+        axis_mask[self._target_idx] = (
+            episode.maximum_command_speed_limits > 0.0)
+        message.command_axis_mask = axis_mask.tolist()
+        message.episode_start_logical_position = list(
+            self._causal_episode_start_position)
+        message.episode_start_raw_encoder_counts = list(
+            self._causal_episode_start_encoder)
+        message.requested_logical_velocity = [
+            float(value) for value in self._velocity(t)]
+        message.commanded_logical_velocity = [
+            float(value) for value in command]
+        projection = self._causal_contract.project_velocity(
+            command, self._last_pos)
+        message.requested_motor_axis_velocity = (
+            projection.requested_motor_axis_velocity.tolist())
+        message.predicted_motor_rpm = [
+            int(value) for value in projection.motor_rpm]
+        message.predicted_motor_radians_per_second = (
+            projection.motor_radians_per_second.tolist())
+        message.predicted_realized_logical_velocity = (
+            projection.realized_logical_velocity.tolist())
+        message.reference_logical_position = [
+            float(value) for value in self._trajectory_reference(t)]
+        if self._last_pos is None:
+            message.measured_logical_position = [math.nan] * 6
+            message.measured_position_receipt_timestamp_ns = 0
+        else:
+            message.measured_logical_position = [
+                float(value) for value in self._last_pos]
+            message.measured_position_receipt_timestamp_ns = int(
+                self._pos_history[-1][0]) if self._pos_history else 0
+        if self._last_enc is None:
+            message.raw_encoder_counts = [math.nan] * 6
+            message.raw_encoder_receipt_timestamp_ns = 0
+        else:
+            message.raw_encoder_counts = [
+                float(value) for value in self._last_enc["data"]]
+            message.raw_encoder_receipt_timestamp_ns = int(
+                self._last_enc["stamp_ns"])
+        self._causal_trace_pub.publish(message)
 
     def _prune_preflight_history(self, now_ns: int) -> None:
         """Retain enough recent feedback for qualification without growing."""

@@ -5,6 +5,7 @@ import pytest
 
 from automation.collection.node import (
     CollectionNode, collection_marker_qos, parse_fault_status)
+from automation.collection.session_check import _critical_suffixes
 from control_interface.msg import DeviceEvent, ManagerEvent
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
 
@@ -34,6 +35,7 @@ def test_identification_episode_markers_survive_skipped_timer_boundaries():
     fake = SimpleNamespace(
         _mode="identification", _gen=generator, _episode_index=-1,
         _marker=lambda event, **fields: markers.append((event, fields)),
+        get_logger=lambda: SimpleNamespace(info=lambda _message: None),
     )
 
     CollectionNode._update_episode_markers(fake, 0.0)
@@ -73,6 +75,60 @@ def test_identification_dwell_forces_exact_zero_command():
         fake, 5.0, np.array([-2.0, 7.0, 1.0, 0.0, 0.0, 0.0]))
     assert np.allclose(result, 0.0)
     assert np.all(fake._floor_tracking_direction == 0)
+
+
+class TimingContract:
+    @staticmethod
+    def logical_to_motor_axis_velocity(logical):
+        motor = np.asarray(logical, dtype=float).copy()
+        motor[0] -= motor[2]
+        return motor
+
+    @staticmethod
+    def project_logical_velocity(logical, _position):
+        return np.asarray(logical, dtype=float).copy()
+
+
+def test_phase_3_bypasses_logical_speed_floor():
+    episode = SimpleNamespace(is_timing_episode=True)
+    fake = SimpleNamespace(
+        _mode="causal",
+        _gen=SimpleNamespace(
+            active_episode=lambda _t: episode,
+            command_speed_limits=lambda _t: np.array([4.0, 0.0, 2.0])),
+        _target_idx=[0, 1, 2],
+        _floor_tracking_direction=np.zeros(6, dtype=np.int8),
+        _velocity=lambda _t: np.array([4.0, 0.0, 2.0, 0.0, 0.0, 0.0]),
+        _apply_identification_speed_ceiling=lambda t, value: (
+            CollectionNode._apply_identification_speed_ceiling(
+                fake, t, value)),
+        _apply_velocity_bounds=lambda _value: pytest.fail(
+            "logical speed floor must not run for Phase 3"),
+    )
+    result = CollectionNode._trajectory_velocity(fake, 1.0)
+    assert np.allclose(result, [4.0, 0.0, 2.0, 0.0, 0.0, 0.0])
+    assert np.allclose([result[0] - result[2], result[2]], [2.0, 2.0])
+
+
+def test_phase_3_command_validation_rejects_projection_changes():
+    expected = np.array([2.0, 2.0])
+    generator = SimpleNamespace(timing_raw_velocity=lambda _t: expected)
+    command = np.array([4.0, 0.0, 2.0, 0.0, 0.0, 0.0])
+    fake = SimpleNamespace(
+        _gen=generator, _causal_contract=TimingContract(),
+        _last_pos=np.zeros(6))
+    assert CollectionNode._timing_command_error(fake, 0.0, command) is None
+
+    class DistortingContract(TimingContract):
+        @staticmethod
+        def project_logical_velocity(logical, _position):
+            projected = np.asarray(logical, dtype=float).copy()
+            projected[0] = projected[2]
+            return projected
+
+    fake._causal_contract = DistortingContract()
+    assert "manager projection would change" in (
+        CollectionNode._timing_command_error(fake, 0.0, command))
 
 
 def preflight_feedback(**overrides):
@@ -159,6 +215,86 @@ def test_collection_velocity_bounds_preserve_zero_and_lift_nonzero_speed():
     assert out.tolist() == [2.0, 0.0, -1.0, 0.0, 0.0, 0.0]
 
 
+def causal_estimator_gate(**status_overrides):
+    parameters = {
+        "causal_require_estimator": True,
+        "causal_require_estimator_tracking": True,
+        "causal_estimator_max_age_s": 0.5,
+        "causal_require_controller_disarmed": True,
+        "causal_require_adaptation_disabled": True,
+        "causal_minimum_accepted_observations": 8,
+        "causal_maximum_marker_rejections": 3,
+    }
+    status = {
+        "armed": False,
+        "adaptation_enabled": False,
+        "estimator_health": "TRACKING",
+        "accepted_observations": 20,
+        "consecutive_rejections": 0,
+        "marker_diagnostic": "TRACKING",
+    }
+    status.update(status_overrides)
+    return SimpleNamespace(
+        _causal_estimator_status=status,
+        _causal_estimator_status_receipt_ns=1_900_000_000,
+        get_parameter=lambda name: SimpleNamespace(value=parameters[name]),
+    )
+
+
+def test_causal_estimator_gate_requires_disarmed_frozen_tracking_ukf():
+    clean = causal_estimator_gate()
+    assert CollectionNode._causal_estimator_error(
+        clean, 2_000_000_000, require_clean=True) is None
+    armed = causal_estimator_gate(armed=True)
+    assert "armed" in CollectionNode._causal_estimator_error(
+        armed, 2_000_000_000, require_clean=True)
+    adapting = causal_estimator_gate(adaptation_enabled=True)
+    assert "adaptation" in CollectionNode._causal_estimator_error(
+        adapting, 2_000_000_000, require_clean=True)
+
+
+def test_causal_runtime_gate_allows_one_transient_rejection_only():
+    transient = causal_estimator_gate(
+        estimator_health="DEGRADED", consecutive_rejections=1,
+        marker_diagnostic="CROSS_RIG_DISAGREEMENT")
+    assert CollectionNode._causal_estimator_error(
+        transient, 2_000_000_000, require_clean=False) is None
+    repeated = causal_estimator_gate(
+        estimator_health="DEGRADED", consecutive_rejections=3)
+    assert "repeated marker" in CollectionNode._causal_estimator_error(
+        repeated, 2_000_000_000, require_clean=False)
+
+
+def test_causal_offline_shape_mode_keeps_controller_interlocks_only():
+    offline = causal_estimator_gate(
+        estimator_health="UNINITIALIZED", accepted_observations=0,
+        consecutive_rejections=99, marker_diagnostic="MARKER_OUTLIER")
+    offline.get_parameter = lambda name: SimpleNamespace(value={
+        "causal_require_estimator": True,
+        "causal_require_estimator_tracking": False,
+        "causal_estimator_max_age_s": 0.5,
+        "causal_require_controller_disarmed": True,
+        "causal_require_adaptation_disabled": True,
+        "causal_minimum_accepted_observations": 8,
+        "causal_maximum_marker_rejections": 3,
+    }[name])
+    assert CollectionNode._causal_estimator_error(
+        offline, 2_000_000_000, require_clean=True) is None
+
+    offline._causal_estimator_status["armed"] = True
+    assert "armed" in CollectionNode._causal_estimator_error(
+        offline, 2_000_000_000, require_clean=True)
+
+
+def test_offline_shape_session_does_not_require_accepted_online_estimates():
+    suffixes = _critical_suffixes({
+        "parameters": {"causal_require_estimator_tracking": False}})
+    assert "/shape_tracking/marker_status" in suffixes
+    assert "/catheter_mppi/status" in suffixes
+    assert "/shape_tracking/markers" not in suffixes
+    assert "/catheter_mppi/estimator_trace" not in suffixes
+
+
 def test_position_return_target_can_select_encoder_zero():
     fake = SimpleNamespace(
         _last_pos=[5.0, 20.0, 2.0, 4.0, 5.0, 6.0],
@@ -239,6 +375,114 @@ def test_position_return_stops_velocity_before_mode_switch():
     assert fake._return_target_pos[:3].tolist() == [0.0, 0.0, 0.0]
     assert fake._return_position_speeds[:3].tolist() == [5.0, 20.0, 1.0]
     assert fake._position_mode_ready_ns == 1_100_000_000
+
+
+def test_causal_initialization_uses_guarded_position_transaction():
+    events = []
+    markers = []
+    clock_value = SimpleNamespace(nanoseconds=1_000_000_000)
+    timer = SimpleNamespace(cancel=lambda: None)
+    fake = SimpleNamespace(
+        _start_motor=True,
+        _last_pos=[10.0, 0.0, 4.5, 0.0, 0.0, 0.0],
+        _target_idx=[0, 1, 2],
+        _causal_initial_position=np.array([20.0, 0.0, 0.0]),
+        _pos_lower6=np.array([0.0, -180.0, 0.0, 0.0, -180.0, -360.0]),
+        _pos_upper6=np.array([40.0, 180.0, 15.0, 80.0, 180.0, 360.0]),
+        _min_speeds=np.array([2.0, 7.0, 1.0, 0.0, 0.0, 0.0]),
+        _max_speeds=np.array([10.0, 40.0, 4.0, 4.0, 25.0, 25.0]),
+        _return_position_speed_factor=0.5,
+        _return_position_mode_delay_s=0.1,
+        _return_tolerances=np.array([0.1, 0.5, 0.05, 0.1, 0.5, 0.5]),
+        _rate=100.0,
+        _position_status=None,
+        _position_complete_seen=False,
+        _initialization_timer=None,
+        _send_event=lambda predicate, text='': events.append((predicate, text)),
+        _marker=lambda event, **fields: markers.append((event, fields)),
+        get_clock=lambda: SimpleNamespace(now=lambda: clock_value),
+        get_logger=lambda: SimpleNamespace(
+            info=lambda message: None, warn=lambda message: None),
+        create_timer=lambda _period, _callback: timer,
+        _causal_initialization_tick=lambda: None,
+    )
+
+    CollectionNode._begin_causal_initialization(fake)
+
+    assert fake._initializing
+    assert fake._initialization_target_pos.tolist() == [
+        20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert fake._initialization_position_speeds[:3].tolist() == [
+        5.0, 20.0, 2.0]
+    assert events == [(ManagerEvent.MODE, chr(ManagerEvent.JOINT_POS))]
+    assert markers[0][0] == "initialization_start"
+    assert markers[0][1]["start_position"] == [10.0, 0.0, 4.5]
+    assert markers[0][1]["target_position"] == [20.0, 0.0, 0.0]
+
+
+def test_causal_initialization_requires_actuating_run():
+    failures = []
+    fake = SimpleNamespace(
+        _start_motor=False,
+        _abort_preflight=lambda reason, status=None: failures.append(reason),
+    )
+    CollectionNode._begin_causal_initialization(fake)
+    assert failures == ["causal initialization requires start_motor:=true"]
+
+
+def test_causal_initialization_requalifies_before_run_start():
+    class FakeTime:
+        def __init__(self, nanoseconds):
+            self.nanoseconds = nanoseconds
+
+        def __sub__(self, other):
+            return SimpleNamespace(
+                nanoseconds=self.nanoseconds-other.nanoseconds)
+
+    events = []
+    markers = []
+    requalifications = []
+    timer = SimpleNamespace(cancel=lambda: None)
+    fake = SimpleNamespace(
+        _done=False,
+        _initializing=True,
+        _initialization_timer=timer,
+        _initialization_t0=FakeTime(0),
+        _initialization_target_pos=np.array([20.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        _initialization_position_speeds=np.ones(6),
+        _initialization_within_since_ns=700_000_000,
+        _initialization_mode_ready_ns=100_000_000,
+        _initialization_complete=False,
+        _last_pos=[20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        _target_idx=[0, 1, 2],
+        _return_tolerances=np.array([0.1, 0.5, 0.05, 0.1, 0.5, 0.5]),
+        _return_position_settle_s=0.2,
+        _position_status=None,
+        _preflight_timeout_s=3.0,
+        _preflight_timer=None,
+        _send_event=lambda predicate, text='': events.append((predicate, text)),
+        _marker=lambda event, **fields: markers.append((event, fields)),
+        _preflight_feedback_tick=lambda: requalifications.append(True),
+        _publish_position=lambda target, speed: None,
+        create_timer=lambda _period, _callback: timer,
+        get_clock=lambda: SimpleNamespace(now=lambda: FakeTime(1_000_000_000)),
+        get_logger=lambda: SimpleNamespace(info=lambda message: None),
+    )
+    fake._initialization_position_done = lambda now_ns: (
+        CollectionNode._initialization_position_done(fake, now_ns))
+    fake._stop_causal_initialization_motion = lambda: (
+        CollectionNode._stop_causal_initialization_motion(fake))
+
+    CollectionNode._causal_initialization_tick(fake)
+
+    assert fake._initialization_complete
+    assert not fake._initializing
+    assert [predicate for predicate, _ in events] == [
+        ManagerEvent.STOP_MOTOR, ManagerEvent.MODE]
+    assert events[1][1] == chr(ManagerEvent.NONE)
+    assert markers[0][0] == "initialization_complete"
+    assert requalifications == [True]
+    assert fake._preflight_deadline_ns == 4_000_000_000
 
 
 def floor_tracker():
