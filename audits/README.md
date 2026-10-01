@@ -3,6 +3,8 @@
 This tree keeps maintained Markdown conclusions, architecture diagrams,
 compact tabular summaries, and reusable audit source code.
 
+See [TOOLING.md](TOOLING.md) for the supported audit tools and safety boundary.
+
 Generated measurement arrays, plots, and machine-readable evaluation output
 belong under the external catheter session root rather than in Git.
 
