@@ -1087,7 +1087,7 @@ def test_backlash_belief_tracks_directional_interval_and_checkpoint():
         minimum_width_gain=0.5,
         maximum_width_gain=1.5))
     estimator.advance_motor([0.0, 0.0, 0.0])
-    snapshot = estimator.advance_motor([0.2, 0.0, 0.0])
+    estimator.advance_motor([0.2, 0.0, 0.0])
     state = estimator.snapshot()
     assert state.remaining_rad[0] == pytest.approx(0.8)
     assert state.remaining_lower_rad[0] == pytest.approx(0.3)

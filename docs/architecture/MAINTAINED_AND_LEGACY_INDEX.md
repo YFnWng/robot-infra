@@ -9,17 +9,18 @@ active deployment boundary; it does not mean scientifically invalid.
 
 - `src/control_interface`: ROS contracts, manager, serial transport, limits,
   freshness, qualification, and safety tests.
-- `src/catheter_control/catheter_control`: active controller composition,
-  MPPI, belief states, estimator integration, task servers, and simulation.
+- `src/catheter_control/catheter_control/node.py` and the canonical
+  `orchestration`, `planning`, `transmission`, `safety`, `simulation`, and
+  `applications` subpackages: active controller runtime.
 - `src/catheter_control/launch/control.launch.py`: hardware controller launch;
   command output defaults to disabled.
 - `src/catheter_control/launch/simulation.launch.py`: isolated `/sim` stack.
 - `src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml`: the
   qualified controller profile for the recorded scope.
-- `src/automation/automation/four_ring_marker_publisher.py`: active online
-  marker observation publisher pending the perception-package split.
-- `src/automation/automation/collection`, causal experiment tools, and runtime
-  identity tools: maintained experiment infrastructure pending package split.
+- `src/automation/automation/perception`: active online marker and legacy
+  state-estimation adapters pending a ROS perception-package split.
+- `src/automation/automation/experiments` and `supervision`: maintained
+  experiment, collection, identity, and qualification infrastructure.
 - `tools/maintenance` and `audits/ros-realtime`: reproducible inventory,
   closure, replay, and audit tooling.
 
@@ -55,6 +56,9 @@ become a runtime default.
   artifact manifest; maintained runtime consumers use canonical bundle paths.
 - Existing ROS console entry-point names remain stable while `automation` is
   split.
+- Pre-Phase-3 `catheter_control` root modules and `automation.collection`,
+  `automation.estimation`, and `automation.marker_tracking` modules are thin
+  import/CLI compatibility shims; new code imports canonical subpackages.
 - Versioned hardware and experiment YAML names remain addressable as
   compatibility aliases for the semantic stacks introduced in Phase 2.
 - Historical absolute paths in audit/session manifests are immutable evidence,

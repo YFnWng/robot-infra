@@ -54,31 +54,31 @@ def _run_in_venv(module: str):
     if module == "catheter_control.node":
         from .node import main
     elif module == "catheter_control.validation":
-        from .validation import main
+        from .safety.validation import main
     elif module == "catheter_control.sim_device":
-        from .sim_device import main
+        from .simulation.sim_device import main
     elif module == "catheter_control.sim_perception":
-        from .sim_perception import main
+        from .simulation.sim_perception import main
     elif module == "catheter_control.sim_visualizer":
-        from .sim_visualizer import main
+        from .simulation.sim_visualizer import main
     elif module == "catheter_control.sim_target":
-        from .sim_target import main
+        from .simulation.sim_target import main
     elif module == "catheter_control.sim_scenario":
-        from .sim_scenario import main
+        from .simulation.sim_scenario import main
     elif module == "catheter_control.target_offset":
-        from .target_offset import main
+        from .applications.target_offset import main
     elif module == "catheter_control.trajectory_action":
-        from .trajectory_action import main
+        from .applications.trajectory_action import main
     elif module == "catheter_control.trajectory_file":
-        from .trajectory_file import main
+        from .applications.trajectory_file import main
     elif module == "catheter_control.sparse_point_experiment":
-        from .sparse_point_experiment import main
+        from .applications.sparse_point_experiment import main
     elif module == "catheter_control.path_action":
-        from .path_action import main
+        from .applications.path_action import main
     elif module == "catheter_control.path_file":
-        from .path_file import main
+        from .applications.path_file import main
     elif module == "catheter_control.camera_overlay":
-        from .camera_overlay import main
+        from .applications.camera_overlay import main
     else:  # pragma: no cover - only fixed entry points call this helper.
         raise ValueError(f"unsupported catheter-control module: {module}")
     return main()

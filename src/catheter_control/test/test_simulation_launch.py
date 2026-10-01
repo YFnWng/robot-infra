@@ -127,7 +127,7 @@ def test_simulated_truth_compute_is_isolated_from_controller_device():
 
 def test_v175_interface_transmission_routes_to_truth_and_controller_once():
     launch = LAUNCH.read_text(encoding="utf-8")
-    perception = (LAUNCH.parents[1]/"catheter_control"/"sim_perception.py"
+    perception = (LAUNCH.parents[1]/"catheter_control"/"simulation"/"sim_perception.py"
                   ).read_text(encoding="utf-8")
     controller = (LAUNCH.parents[1]/"catheter_control"/"node.py"
                   ).read_text(encoding="utf-8")
@@ -140,7 +140,7 @@ def test_v175_interface_transmission_routes_to_truth_and_controller_once():
 
 def test_insertion_tendon_allocation_routes_to_truth_and_controller():
     launch = LAUNCH.read_text(encoding="utf-8")
-    perception = (LAUNCH.parents[1]/"catheter_control"/"sim_perception.py"
+    perception = (LAUNCH.parents[1]/"catheter_control"/"simulation"/"sim_perception.py"
                   ).read_text(encoding="utf-8")
     controller = (LAUNCH.parents[1]/"catheter_control"/"node.py"
                   ).read_text(encoding="utf-8")

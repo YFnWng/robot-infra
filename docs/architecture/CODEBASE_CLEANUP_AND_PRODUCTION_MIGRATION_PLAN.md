@@ -347,6 +347,14 @@ Split the controller composition node, beliefs/state machines, applications,
 and simulation. Split `automation` responsibilities behind compatibility entry
 points. Do not change behavior.
 
+Status: complete. `catheter_control` now has canonical `orchestration`,
+`planning`, `transmission`, `safety`, `simulation`, and `applications`
+packages. `automation` now has canonical `perception`, `experiments`, and
+`supervision` packages. Existing import paths, console-command names, and
+`python -m` paths remain compatibility shims. Package-boundary tests prevent
+canonical implementations from depending back on those shims. See
+[Python runtime package layout](PYTHON_RUNTIME_PACKAGE_LAYOUT.md).
+
 ### Phase 4 -- C++ ROS shell and shadow deployment
 
 Define language-neutral snapshots and results, implement the C++ shell, run

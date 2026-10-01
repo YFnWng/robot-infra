@@ -121,6 +121,23 @@ def test_stack_rejects_path_escape(tmp_path):
         )
 
 
+def test_stack_accepts_colcon_style_package_data_symlink(tmp_path):
+    source = tmp_path / "source"
+    install = tmp_path / "install"
+    _write(
+        source / "controller.yaml",
+        {"catheter_mppi": {"ros__parameters": {"samples": 32}}},
+    )
+    install.mkdir()
+    (install / "controller.yaml").symlink_to(source / "controller.yaml")
+    resolved = resolve_stack(
+        _stack(install, {"controller": "controller.yaml"}),
+        config_root=install,
+        allowed_parameters={"samples"},
+    )
+    assert resolved.parameters == {"samples": 32}
+
+
 def test_manifest_contains_resolved_sources_and_references():
     resolved = resolve_stack(
         locate_stack(

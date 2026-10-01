@@ -23,17 +23,17 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
-            "state_estimator = automation.estimation.node:main",
-            "em_bridge = automation.collection.em_bridge:main",
-            "collection = automation.collection.node:main",
+            "state_estimator = automation.perception.state_estimator:main",
+            "em_bridge = automation.perception.em_bridge:main",
+            "collection = automation.experiments.collection:main",
             "causal_runtime_identity = "
-            "automation.collection.runtime_identity:main",
-            "causal_session_check = automation.collection.session_check:main",
+            "automation.supervision.runtime_identity:main",
+            "causal_session_check = automation.supervision.session_check:main",
             "causal_stationary_analysis = "
-            "automation.collection.stationary_analysis:main",
-            "marker_tracking = automation.marker_tracking.node:main",
+            "automation.supervision.stationary_analysis:main",
+            "marker_tracking = automation.perception.marker_tracking:main",
             "marker_udp_receiver = "
-            "automation.marker_tracking.udp_receiver:main",
+            "automation.perception.marker_udp_receiver:main",
         ],
     },
 )

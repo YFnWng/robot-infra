@@ -4,12 +4,10 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import replace
-from functools import wraps
 import json
 import math
 import os
 from pathlib import Path
-import sys
 import threading
 import time
 
@@ -32,107 +30,29 @@ from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 import torch
 
-from .causal_schedule import CausalMarkerSchedule
-from .backlash import (
+from .orchestration.causal_schedule import CausalMarkerSchedule
+from .transmission.backlash import (
     BacklashConfig, BacklashFeedforwardCompensator,
     BacklashStateEstimator, TakeupTransactionArbiter)
-from .compute_device import (
+from .orchestration.compute_device import (
     compute_device_diagnostics, resolve_compute_device)
-from .engaged_gain import EngagedGainConfig
-from .hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
-from .lifecycle import (
+from .orchestration.diagnostics import instrument_timer
+from .orchestration.estimator_owner import marker_measurement, stamp_ns
+from .orchestration.runtime import load_runtime
+from .transmission.engaged_gain import EngagedGainConfig
+from .safety.hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
+from .safety.lifecycle import (
     ControllerState, FreshnessLimits, GateInputs, paired_source_skew_s,
     readiness, recoverable_encoder_processing_lag)
-from .mppi import CatheterMppi, MppiConfig
-from .path_tracking import ReferenceHorizon
-from .reversal_scheduler import (
+from .planning.mppi import CatheterMppi, MppiConfig
+from .planning.path_tracking import ReferenceHorizon
+from .transmission.reversal_scheduler import (
     ReversalDirectionScheduler, ReversalSchedulerConfig)
-from .timing import PeriodicTimerProbe, TimingWindows
-from .tracking import TipForecastMonitor, tip_tracking_error_mm
+from .orchestration.timing import PeriodicTimerProbe, TimingWindows
+from .planning.tracking import TipForecastMonitor, tip_tracking_error_mm
 
 
 SOURCE_NAME = "catheter_mppi"
-
-
-def _instrument_timer(name):
-    """Measure timer release lateness and complete callback duration."""
-    def decorate(callback):
-        @wraps(callback)
-        def measured(self, *args, **kwargs):
-            started = self._steady()
-            probe = self._timer_probes.get(name)
-            if probe is not None:
-                self._timing.record_seconds(
-                    f"{name}_timer_lateness", probe.observe(started))
-            try:
-                return callback(self, *args, **kwargs)
-            finally:
-                self._timing.record_seconds(
-                    f"{name}_callback_duration", self._steady()-started)
-        return measured
-    return decorate
-
-
-def _stamp_ns(header) -> int:
-    return (int(header.stamp.sec)*1_000_000_000
-            + int(header.stamp.nanosec))
-
-
-def _load_runtime(cr_meta_root: str, cr_common_root: str):
-    meta = Path(cr_meta_root).expanduser().resolve()
-    common = Path(cr_common_root).expanduser().resolve()
-    if not (meta / "deployment" / "v171_streaming_runtime.py").is_file():
-        raise ValueError(f"invalid cr_meta_lnn_root: {meta}")
-    if not (common / "cr_common" / "__init__.py").is_file():
-        raise ValueError(f"invalid cr_common_root: {common}")
-    for path in (meta.parent, common):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
-    from cr_meta_lnn.deployment import V171StreamingCatheterRuntime
-    return V171StreamingCatheterRuntime
-
-
-def _channel_map(message: PointCloud) -> dict[str, np.ndarray]:
-    return {
-        str(channel.name): np.asarray(channel.values, dtype=np.float64)
-        for channel in message.channels
-    }
-
-
-def marker_measurement(message: PointCloud, required_frame: str):
-    """Validate and reorder one marker point cloud by marker ID."""
-    if message.header.frame_id != required_frame:
-        raise ValueError("marker_frame_mismatch")
-    if len(message.points) != 4:
-        raise ValueError("marker_count")
-    channels = _channel_map(message)
-    required = (
-        "marker_id", "confidence", "reprojection_error_px",
-        "source_rig_count")
-    if any(name not in channels or channels[name].shape != (4,)
-           for name in required):
-        raise ValueError("marker_quality_channels")
-    marker_id = channels["marker_id"]
-    if (not np.all(np.isfinite(marker_id))
-            or sorted(int(value) for value in marker_id) != [0, 1, 2, 3]
-            or not np.allclose(marker_id, np.round(marker_id))):
-        raise ValueError("marker_ids")
-    order = np.argsort(marker_id.astype(int))
-    points = np.asarray(
-        [[point.x, point.y, point.z] for point in message.points],
-        dtype=np.float64)[order]
-    quality = {
-        name: channels[name][order]
-        for name in required if name != "marker_id"
-    }
-    if (not np.all(np.isfinite(points))
-            or any(not np.all(np.isfinite(value))
-                   for value in quality.values())):
-        raise ValueError("nonfinite_marker_measurement")
-    timestamp_ns = _stamp_ns(message.header)
-    if timestamp_ns <= 0:
-        raise ValueError("invalid_marker_timestamp")
-    return timestamp_ns, points, quality
 
 
 class CatheterControlNode(Node):
@@ -288,7 +208,7 @@ class CatheterControlNode(Node):
         self.compute_device = resolve_compute_device(
             str(self.get_parameter("device").value))
 
-        runtime_type = _load_runtime(
+        runtime_type = load_runtime(
             str(self.get_parameter("cr_meta_lnn_root").value),
             str(self.get_parameter("cr_common_root").value))
         self.runtime = runtime_type(
@@ -1032,11 +952,11 @@ class CatheterControlNode(Node):
         return response
 
     def _message_time_ns(self, message) -> int:
-        timestamp = _stamp_ns(message.header)
+        timestamp = stamp_ns(message.header)
         return timestamp if timestamp > 0 else self._now_ns()
 
     def _record_header_age(self, name: str, message):
-        timestamp_ns = _stamp_ns(message.header)
+        timestamp_ns = stamp_ns(message.header)
         if timestamp_ns > 0:
             self._timing.record_seconds(
                 f"{name}_callback_header_age",
@@ -1411,7 +1331,7 @@ class CatheterControlNode(Node):
             else None)
         return True
 
-    @_instrument_timer("estimator")
+    @instrument_timer("estimator")
     def _estimator_tick(self):
         # This callback is the only owner of mutable runtime state. Catch up to
         # the newest encoder before considering a marker, then drain once more
@@ -1498,7 +1418,7 @@ class CatheterControlNode(Node):
             reference = ReferenceHorizon(
                 path_id=str(message.path_id),
                 sequence=int(message.sequence),
-                source_timestamp_ns=_stamp_ns(message.header),
+                source_timestamp_ns=stamp_ns(message.header),
                 received_at_s=self._steady(),
                 sample_period_s=float(message.sample_period_s),
                 positions_m=positions,
@@ -1805,7 +1725,7 @@ class CatheterControlNode(Node):
             self.last_effective_command.fill(0.0)
         return released, transaction_state
 
-    @_instrument_timer("plan")
+    @instrument_timer("plan")
     def _plan_tick(self):
         callback_started = self._steady()
         if not self._plan_lock.acquire(blocking=False):
@@ -2115,7 +2035,7 @@ class CatheterControlNode(Node):
         finally:
             self._plan_lock.release()
 
-    @_instrument_timer("heartbeat")
+    @instrument_timer("heartbeat")
     def _heartbeat_tick(self):
         # A timer must never consume an executor thread while waiting behind a
         # recurrent sensor update. Skipping one tick is fail-safe; when output

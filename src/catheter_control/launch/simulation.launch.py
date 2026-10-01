@@ -15,7 +15,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import yaml
 
-from catheter_control.configuration import (
+from catheter_control.orchestration.configuration import (
     ACTIVE_CONTROLLER_PARAMETERS, locate_stack, resolve_stack)
 
 

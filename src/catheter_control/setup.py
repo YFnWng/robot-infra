@@ -59,7 +59,7 @@ setup(
             ("catheter_camera_overlay = "
              "catheter_control.bootstrap:catheter_camera_overlay"),
             ("catheter_rviz_record = "
-             "catheter_control.rviz_record:main"),
+             "catheter_control.applications.rviz_record:main"),
         ],
     },
 )

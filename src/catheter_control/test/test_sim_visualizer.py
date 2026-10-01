@@ -10,7 +10,7 @@ from catheter_control.rviz_record import _window_id
 
 
 VISUALIZER_SOURCE = (Path(__file__).resolve().parents[1]
-                     / "catheter_control" / "sim_visualizer.py")
+                     / "catheter_control" / "simulation" / "sim_visualizer.py")
 
 
 def test_base_axes_use_conventional_xyz_colors_and_scale():

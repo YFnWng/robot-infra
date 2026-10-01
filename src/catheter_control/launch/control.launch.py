@@ -14,7 +14,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import Parameter
 
-from catheter_control.configuration import (
+from catheter_control.orchestration.configuration import (
     ACTIVE_CONTROLLER_PARAMETERS, load_ros_parameters, locate_stack,
     resolve_stack)
 
