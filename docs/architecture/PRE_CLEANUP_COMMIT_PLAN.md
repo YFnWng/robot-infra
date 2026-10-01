@@ -18,6 +18,9 @@ whole-file sweep.
 | R8 — reproducible audit tooling | complete: `3e320be` | exact staged snapshot compiled; 6 focused tests and 10 non-actuating CLI checks passed |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 | M3 — supported training/reproduction pipelines | complete: `19bd41b`, `26de1fd`, `5b866d1` | exact snapshots passed 85 v171/v174, 7 v175, and 41 engagement/gain tests; reproduction CLIs loaded non-actuatingly |
+| M4 — research history preservation | complete: archive branch `archive/pre-cleanup-research-20261001` | archived the pre-cleanup research tree without changing the active branch |
+| M5 — artifact manifests and hygiene | complete: `ae8752b` | three deployed artifacts hash-verified; focused manifest/deployment tests passed |
+| Cross-repository clean-source gate | complete: `catheter-stack-pre-cleanup-20261001` | clean ROS build; 492 ROS, 50 model, 13 Jacobian, and 223 tracking tests; exact timing replay; four-target simulation smoke; one optional `ros2_igtl_bridge` test unavailable |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
 v150 runtime remains untouched in research history rather than being exposed by
@@ -296,3 +299,7 @@ After R1–R8 and M1–M5 are reviewed:
 5. full simulation smoke test;
 6. verify no hardware output is enabled by any default profile;
 7. create one shared baseline identifier across the repositories.
+
+Completed on 2026-10-01 as `catheter-stack-pre-cleanup-20261001`. Detailed
+evidence and the optional OpenIGTLink test limitation are recorded in
+[`cross-repository-clean-source-gate-20261001.md`](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md).

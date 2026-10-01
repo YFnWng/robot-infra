@@ -393,6 +393,8 @@ callback scheduling, QoS, ROS interface semantics, or manager/firmware safety.
 - [x] Generate and review the first inventory snapshot.
 - [x] Resolve the active production dependency closure.
 - [x] Capture artifact hashes and resolved controller parameters.
-- [ ] Commit untracked production files in logical repository-specific groups.
-- [ ] Establish and tag the reproducible pre-cleanup baseline.
+- [x] Commit untracked production files in logical repository-specific groups.
+- [x] Establish and tag the reproducible pre-cleanup baseline as
+  `catheter-stack-pre-cleanup-20261001` (see the
+  [clean-source gate report](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)).
 - [ ] Begin artifact relocation only after checksum and consumer review.
