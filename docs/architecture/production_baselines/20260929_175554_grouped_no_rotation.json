@@ -77,7 +77,7 @@
       "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d"
     }
   },
-  "generated_at_utc": "2026-10-01T15:49:19.789200+00:00",
+  "generated_at_utc": "2026-10-01T15:59:48.387467+00:00",
   "python_import_closure": {
     "conservative": true,
     "entry_modules": {
@@ -1164,7 +1164,7 @@
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/config/catheter_limits.yaml",
         "bytes": 3502,
         "exists": true,
-        "git_status": "M src/automation/config/catheter_limits.yaml",
+        "git_status": "",
         "path": "robot-infra/src/automation/config/catheter_limits.yaml",
         "reasons": [
           "source hardware limits"
@@ -1239,7 +1239,7 @@
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/__init__.py",
         "bytes": 1857,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/__init__.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/__init__.py",
         "reasons": [
           "parent package of catheter_control.backlash",
@@ -1265,13 +1265,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/__init__.py",
         "role": "python_import_closure",
         "sha256": "542464efd47b4193e229eceb15718d77370ae400a234ec0dd6eda3e91738bc57",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/backlash.py",
         "bytes": 67444,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/backlash.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/backlash.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1280,13 +1280,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/backlash.py",
         "role": "python_import_closure",
         "sha256": "8bdcd5fbe0d17536f3057ec329c8d55be3497fb39e4e42229cf7d8eb33341628",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/bootstrap.py",
         "bytes": 5624,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/bootstrap.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/bootstrap.py",
         "reasons": [
           "selected console-script bootstrap"
@@ -1295,13 +1295,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/bootstrap.py",
         "role": "runtime_metadata",
         "sha256": "3d93aac15990d1ac966791b7087a3635bdc4cae98a41dcbe7335ca8c543004b8",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/causal_schedule.py",
         "bytes": 1712,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/causal_schedule.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/causal_schedule.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1310,13 +1310,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/causal_schedule.py",
         "role": "python_import_closure",
         "sha256": "c80b5079be5ffb35a606599ba1a72d93b47368ef4eacf07f5ef7f063ec48f3fa",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/compute_device.py",
         "bytes": 2886,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/compute_device.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/compute_device.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1325,13 +1325,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/compute_device.py",
         "role": "python_import_closure",
         "sha256": "f4013b8c6f454680024d8d0e8359be411ef760ee59509151a78f693171c0cadf",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/engaged_gain.py",
         "bytes": 12865,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/engaged_gain.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/engaged_gain.py",
         "reasons": [
           "imported by catheter_control.backlash",
@@ -1341,13 +1341,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/engaged_gain.py",
         "role": "python_import_closure",
         "sha256": "48a99894ac79f1a5a22b29544463932f6fad7126cf8c16d1bf256ac0e390ef69",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/hardware_contract.py",
         "bytes": 27635,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/hardware_contract.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/hardware_contract.py",
         "reasons": [
           "imported by catheter_control.mppi",
@@ -1357,13 +1357,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/hardware_contract.py",
         "role": "python_import_closure",
         "sha256": "5b522c3fe46f32e7d11e2e87a6bb64520a5d87b32bdc335152758f107412fb88",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/lifecycle.py",
         "bytes": 6249,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/lifecycle.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/lifecycle.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1372,13 +1372,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/lifecycle.py",
         "role": "python_import_closure",
         "sha256": "7cbd9ccef73857ad19ea57b2cf4ca31b9810253cf4e675ec6766c1157bf86043",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/mppi.py",
         "bytes": 93431,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/mppi.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/mppi.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1387,13 +1387,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/mppi.py",
         "role": "python_import_closure",
         "sha256": "00648098ef98d7dd1203dfe0b4d33d26aca2a64afcf58477881350a77fb5d352",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/node.py",
         "bytes": 171930,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/node.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/node.py",
         "reasons": [
           "hardware catheter_mppi controller"
@@ -1402,13 +1402,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/node.py",
         "role": "python_import_closure",
         "sha256": "abdb2b9f776c20dc6c1d1e77c4226eba8b374dd852f5486995efb9c4be34664e",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/path_action.py",
         "bytes": 20783,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/path_action.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/path_action.py",
         "reasons": [
           "path action node launched with controller"
@@ -1417,13 +1417,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/path_action.py",
         "role": "python_import_closure",
         "sha256": "a1d19ce741875a50d51357333f8932b21d9f7098cdfb0c3b5634e9295af186f9",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/path_tracking.py",
         "bytes": 19449,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/path_tracking.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/path_tracking.py",
         "reasons": [
           "imported by catheter_control.node",
@@ -1433,13 +1433,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/path_tracking.py",
         "role": "python_import_closure",
         "sha256": "4d0d12781390b0c22c6dbb70a5ac4f0d6276465a2f85c3393304225822b8b03b",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/reversal_scheduler.py",
         "bytes": 10815,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/reversal_scheduler.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/reversal_scheduler.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1448,13 +1448,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/reversal_scheduler.py",
         "role": "python_import_closure",
         "sha256": "cb7a0c0c3a5124ac284dc3395040baba76925c2fcb5e19efcb16ec7b9b9baabd",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/sparse_point_experiment.py",
         "bytes": 40963,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/sparse_point_experiment.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/sparse_point_experiment.py",
         "reasons": [
           "observed sparse-point task client"
@@ -1463,13 +1463,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/sparse_point_experiment.py",
         "role": "python_import_closure",
         "sha256": "4e0f551236320481c0d0d1e9e8538df5c371081bad3fe4dc2df14b276277ab83",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/target_offset.py",
         "bytes": 8408,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/target_offset.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/target_offset.py",
         "reasons": [
           "imported by catheter_control.path_action",
@@ -1481,13 +1481,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/target_offset.py",
         "role": "python_import_closure",
         "sha256": "71479aebcb95f0dbe20c2139e5cfa5ce94b36712d6a3be00ac4c15f4d77b3069",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/timing.py",
         "bytes": 3492,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/timing.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/timing.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1496,13 +1496,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/timing.py",
         "role": "python_import_closure",
         "sha256": "7ad23a89e1b2b29f41b8510e2eaecd2045a63e5cd802f9fdf30fa36023f0ce0d",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/tracking.py",
         "bytes": 8204,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/tracking.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/tracking.py",
         "reasons": [
           "imported by catheter_control.node"
@@ -1511,13 +1511,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/tracking.py",
         "role": "python_import_closure",
         "sha256": "96c70040e8c88cb25820f10ec13c41802ca719faae045ba822376274c139af3a",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/trajectory.py",
         "bytes": 4526,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/trajectory.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/trajectory.py",
         "reasons": [
           "imported by catheter_control.trajectory_action"
@@ -1526,13 +1526,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/trajectory.py",
         "role": "python_import_closure",
         "sha256": "2709a3749f749c5eefaa08345e56a54d2bd82ebbb05b1a382fa157cb1dbbcad9",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/trajectory_action.py",
         "bytes": 13708,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/trajectory_action.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/trajectory_action.py",
         "reasons": [
           "trajectory action node launched with controller"
@@ -1541,13 +1541,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/trajectory_action.py",
         "role": "python_import_closure",
         "sha256": "3056f95434b6f8f0d818c03927a12b5fbfbb632de93b995af0a916cd70ffa254",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/trajectory_file.py",
         "bytes": 13337,
         "exists": true,
-        "git_status": "?? src/catheter_control/catheter_control/trajectory_file.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/catheter_control/trajectory_file.py",
         "reasons": [
           "imported by catheter_control.sparse_point_experiment"
@@ -1556,13 +1556,13 @@
         "repository_relative_path": "src/catheter_control/catheter_control/trajectory_file.py",
         "role": "python_import_closure",
         "sha256": "fa85595080799808d3ef38cff0bb8cb3148425d613deaf9fcbcd8c62f5e3d287",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
         "bytes": 4434,
         "exists": true,
-        "git_status": "?? src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
         "reasons": [
           "resolved controller profile"
@@ -1571,13 +1571,13 @@
         "repository_relative_path": "src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
         "role": "runtime_metadata",
         "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/launch/control.launch.py",
         "bytes": 30156,
         "exists": true,
-        "git_status": "?? src/catheter_control/launch/control.launch.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/launch/control.launch.py",
         "reasons": [
           "hardware launch"
@@ -1586,13 +1586,13 @@
         "repository_relative_path": "src/catheter_control/launch/control.launch.py",
         "role": "runtime_metadata",
         "sha256": "fd13f32ce40383cdd9192b44eafeba82ce0e4bbcbce97251d90566983c902877",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/package.xml",
         "bytes": 1191,
         "exists": true,
-        "git_status": "?? src/catheter_control/package.xml",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/package.xml",
         "reasons": [
           "ROS package metadata"
@@ -1601,13 +1601,13 @@
         "repository_relative_path": "src/catheter_control/package.xml",
         "role": "runtime_metadata",
         "sha256": "95e0f289bb94da73e1d8f6cac6dc5a6e65264c785b0094bfd7b4e080843873c2",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/resource/catheter_control",
         "bytes": 1,
         "exists": true,
-        "git_status": "?? src/catheter_control/resource/catheter_control",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/resource/catheter_control",
         "reasons": [
           "ament resource"
@@ -1616,13 +1616,13 @@
         "repository_relative_path": "src/catheter_control/resource/catheter_control",
         "role": "runtime_metadata",
         "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/setup.cfg",
         "bytes": 101,
         "exists": true,
-        "git_status": "?? src/catheter_control/setup.cfg",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/setup.cfg",
         "reasons": [
           "ROS Python installation"
@@ -1631,13 +1631,13 @@
         "repository_relative_path": "src/catheter_control/setup.cfg",
         "role": "runtime_metadata",
         "sha256": "4eb92b3129cb9c8a5b7edd63bc39a791c98ad3e206abfe6d8579113e2a1f1f74",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/setup.py",
         "bytes": 2332,
         "exists": true,
-        "git_status": "?? src/catheter_control/setup.py",
+        "git_status": "",
         "path": "robot-infra/src/catheter_control/setup.py",
         "reasons": [
           "ROS Python entry points"
@@ -1646,7 +1646,7 @@
         "repository_relative_path": "src/catheter_control/setup.py",
         "role": "runtime_metadata",
         "sha256": "a544df8d23655200015bb959fda1c2e808d9231607f38f57a20737a1ec08b1fc",
-        "tracked": false
+        "tracked": true
       },
       {
         "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/CMakeLists.txt",
@@ -1997,11 +1997,11 @@
   "repositories": [
     {
       "branch": "main",
-      "commit": "f3640b6690164a8e86551bfb0ea8e2651b3dd413",
+      "commit": "ed7d78cb3dbd7558784a4bb3c7e155390aca9216",
       "dirty": true,
       "is_git_repository": true,
       "path": "/home/chen-lab/Yifan/robot-infra",
-      "status_entry_count": 53
+      "status_entry_count": 51
     },
     {
       "branch": "main",

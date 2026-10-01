@@ -10,6 +10,7 @@ whole-file sweep.
 | Slice | Status | Verification |
 | --- | --- | --- |
 | R1 — ROS control interfaces | complete: `f3640b6` | isolated index snapshot built; XML/CMake lint passed; package-wide Python lint still reports pre-existing manager/serial style debt |
+| R2 + R3 — controller package, launch and profiles | complete: `ed7d78c` | isolated index snapshot built both ROS packages; 302 tests passed; 15 installed console entry points resolved |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
@@ -41,7 +42,7 @@ Scope:
 
 Gate: interface generation and dependent Python import tests.
 
-### R2 — catheter controller implementation
+### R2 — catheter controller implementation (complete with R3)
 
 Scope:
 
@@ -56,7 +57,7 @@ entry points that target absent modules.
 
 Gate: all `catheter_control` unit tests and package build.
 
-### R3 — launch and reviewed controller profiles
+### R3 — launch and reviewed controller profiles (complete with R2)
 
 Scope:
 
@@ -71,6 +72,19 @@ layering is a later behavior-preserving migration.
 
 Gate: launch tests, effective-parameter manifest tests, and command-output
 interlock tests.
+
+R2/R3 were committed together because package tests and installation depend on
+the launch files and profiles. The existing shared `catheter_limits.yaml` was
+included as a required runtime/test dependency; its values were preserved.
+Manager/transport implementations and firmware remain separate review slices.
+Only a redundant blank line at the end of one test was removed.
+
+Verification used an exported Git index snapshot under `/tmp`, with ROS Humble
+interfaces generated there and the supported `cr-venv` Python interpreter.
+Its site-packages must precede system Python packages when adding
+`/usr/lib/python3/dist-packages` for ROS launch dependencies: otherwise system
+NumPy shadows the supported NumPy 2.x environment. Pytest plugin autoload was
+disabled for this unit-suite run. No controller or device was started.
 
 ### R4 — perception and experiment automation
 

@@ -55,7 +55,7 @@ The conservative source closure contains 111 files:
 | `control` | 9 |
 | `cr-common` | 3 |
 
-Of these files, 84 are tracked and 27 are untracked. There are no unresolved
+Of these files, 110 are tracked and one is untracked. There are no unresolved
 local Python imports in the static scan.
 
 The closure includes:
@@ -103,6 +103,12 @@ identity. The task YAML for this historical run is intentionally not guessed.
 ## Baseline status
 
 This is a content-hash closure, not yet a clean-clone baseline. All five source
-repositories remain dirty, and 27 closure files are still untracked.
+repositories remain dirty. The remaining untracked closure file is
+`control_interface_py/command_freshness.py`, scheduled for the manager/serial
+safety slice. R2/R3 were preserved in commit `ed7d78c`: an isolated source
+snapshot built the ROS packages and passed 302 controller tests. Other
+repositories are still supplied by the existing workspace for those tests,
+so this does not yet qualify a clean clone of the complete multi-repository
+stack.
 The manifest is sufficient to review and stage production files, but not to tag
 a reproducible release until those files are committed and replay-tested.
