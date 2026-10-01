@@ -9,6 +9,7 @@ from std_srvs.srv import Trigger
 from control_interface.msg import ControlStream, \
     DeviceStream, ManagerStream, DeviceEvent, ManagerEvent
 from control_interface.srv import DeviceCmd
+from control_interface_py.command_freshness import validate_command_stamp
 
 from collections import defaultdict, deque
 import math
@@ -101,7 +102,8 @@ class ControlManager(Node):
         self.active_source = None
         self.last_input_time = defaultdict(lambda: 0.0)
 
-        self.declare_parameter("allowed_sources", ["slicer", "autonomy"])
+        self.declare_parameter(
+            "allowed_sources", ["slicer", "autonomy", "catheter_mppi"])
         self.allowed_sources = set(
             self.get_parameter("allowed_sources").value)
         self.declare_parameter('allow_debug_commands', False)
@@ -114,6 +116,17 @@ class ControlManager(Node):
             self.get_parameter("source_timeout_s").value)
         if self.SOURCE_TIMEOUT <= 0.0:
             raise ValueError("source_timeout_s must be positive")
+        self.declare_parameter("command_max_age_s", 0.10)
+        self.declare_parameter("command_future_tolerance_s", 0.05)
+        self.COMMAND_MAX_AGE = float(
+            self.get_parameter("command_max_age_s").value)
+        self.COMMAND_FUTURE_TOLERANCE = float(
+            self.get_parameter("command_future_tolerance_s").value)
+        if self.COMMAND_MAX_AGE <= 0.0 \
+                or self.COMMAND_FUTURE_TOLERANCE < 0.0:
+            raise ValueError(
+                "command age must be positive and future tolerance non-negative")
+        self._last_command_stamp_ns = defaultdict(lambda: 0)
 
         # Exclusive-control arbitration: a "priority" source (the automation
         # pipeline) claims exclusive control so manual teleop can't override its
@@ -121,7 +134,8 @@ class ControlManager(Node):
         # from its first event until it releases with MODE=NONE, or until it goes
         # silent longer than LOCK_TIMEOUT (crash safety). A STOP_MOTOR from any
         # source is always honoured.
-        self.declare_parameter("priority_sources", ["autonomy"])
+        self.declare_parameter(
+            "priority_sources", ["autonomy", "catheter_mppi"])
         self.priority_sources = set(self.get_parameter("priority_sources").value)
         self.locked_source = None
         self.LOCK_TIMEOUT = 1.0
@@ -137,7 +151,7 @@ class ControlManager(Node):
         self.declare_parameter("require_limits", True)
         self.declare_parameter("position_guard_horizon_s", 0.05)
         (self._pos_lower, self._pos_upper, self._vel_min,
-         self._vel_max) = self._load_limits()
+         self._vel_max, self._feedback_limit_tolerance) = self._load_limits()
         self._position_guard_horizon_s = float(
             self.get_parameter("position_guard_horizon_s").value)
         if self._position_guard_horizon_s <= 0.0:
@@ -155,6 +169,8 @@ class ControlManager(Node):
         self._last_safety_status = None
         self._transport_ready = False
         self._driver_power_qualified = False
+        self._limit_recovery_active = False
+        self._limit_recovery_cancelled = False
         self._shutdown_started = False
         self._qualification_lock = threading.Lock()
         self._pos_history = deque(maxlen=2000)
@@ -177,12 +193,41 @@ class ControlManager(Node):
                 self.QUALIFICATION_POS_TOLERANCE,
                 self.QUALIFICATION_ENC_TOLERANCE) <= 0.0:
             raise ValueError('driver-power qualification parameters must be positive')
+        self.declare_parameter('limit_recovery_max_violation', 0.25)
+        self.declare_parameter('limit_recovery_interior_margin', 0.10)
+        self.declare_parameter('limit_recovery_timeout_s', 0.50)
+        self.declare_parameter('limit_recovery_command_rate_hz', 100.0)
+        self.declare_parameter('limit_recovery_outward_tolerance', 0.02)
+        self.LIMIT_RECOVERY_MAX_VIOLATION = float(
+            self.get_parameter('limit_recovery_max_violation').value)
+        self.LIMIT_RECOVERY_INTERIOR_MARGIN = float(
+            self.get_parameter('limit_recovery_interior_margin').value)
+        self.LIMIT_RECOVERY_TIMEOUT = float(
+            self.get_parameter('limit_recovery_timeout_s').value)
+        self.LIMIT_RECOVERY_COMMAND_RATE = float(
+            self.get_parameter('limit_recovery_command_rate_hz').value)
+        self.LIMIT_RECOVERY_OUTWARD_TOLERANCE = float(
+            self.get_parameter('limit_recovery_outward_tolerance').value)
+        if min(
+                self.LIMIT_RECOVERY_MAX_VIOLATION,
+                self.LIMIT_RECOVERY_INTERIOR_MARGIN,
+                self.LIMIT_RECOVERY_TIMEOUT,
+                self.LIMIT_RECOVERY_COMMAND_RATE,
+                self.LIMIT_RECOVERY_OUTWARD_TOLERANCE) <= 0.0:
+            raise ValueError('limit-recovery parameters must be positive')
+        axis_zero_span = self._pos_upper[0] - self._pos_lower[0]
+        if self.LIMIT_RECOVERY_INTERIOR_MARGIN >= axis_zero_span:
+            raise ValueError(
+                'limit_recovery_interior_margin must be below axis-0 span')
         self.qualification_group = ReentrantCallbackGroup()
         self.device_client_group = ReentrantCallbackGroup()
 
         # subscriptions
+        motion_qos = QoSProfile(depth=1)
+        motion_qos.reliability = ReliabilityPolicy.RELIABLE
+        motion_qos.durability = DurabilityPolicy.VOLATILE
         self.teleop_sub = self.create_subscription(
-            ControlStream, '/teleop/control', self.teleop_callback, 10)
+            ControlStream, '/teleop/control', self.teleop_callback, motion_qos)
         self.teleop_sub
 
         self.teleop_event_sub = self.create_subscription(
@@ -206,7 +251,7 @@ class ControlManager(Node):
 
         # publishers
         self.control_pub = self.create_publisher(
-            DeviceStream, '/manager/control', 10)
+            DeviceStream, '/manager/control', motion_qos)
         
         self.state_pub = self.create_publisher(
             ManagerStream, '/manager/state', 10)
@@ -223,6 +268,10 @@ class ControlManager(Node):
             Trigger, '/manager/qualify_driver_power',
             self.qualify_driver_power,
             callback_group=self.qualification_group)
+        self.limit_recovery_service = self.create_service(
+            Trigger, '/manager/recover_catheter_linear_limit',
+            self.recover_catheter_linear_limit,
+            callback_group=self.qualification_group)
         self.device_client = self.create_client(
             DeviceCmd, '/device/command',
             callback_group=self.device_client_group)
@@ -236,6 +285,10 @@ class ControlManager(Node):
             0.05, self._source_watchdog_tick)
         self.feedback_watchdog_timer = self.create_timer(
             0.05, self._feedback_watchdog_tick)
+        # A transient-local status gives late joiners the latest state; this
+        # heartbeat additionally lets autonomous sources require freshness.
+        self.safety_heartbeat_timer = self.create_timer(
+            0.2, lambda: self._publish_safety_status(force=True))
         self._publish_safety_status(force=True)
 
     # def deadman_cb(self, msg):
@@ -266,11 +319,40 @@ class ControlManager(Node):
         else:
             return
 
-        if self._motion_inhibit_reason():
+        # Zero velocity is always a safe preemption and therefore is allowed to
+        # pass even if delayed. Every command that can initiate or sustain
+        # motion must retain a fresh, strictly increasing source timestamp.
+        is_zero_velocity = (
+            self.control_mode == ManagerEvent.JOINT_VEL
+            and all(value == 0.0 for value in msg.joint_vel))
+        accepted, stamp_reason, source_stamp_ns = validate_command_stamp(
+            msg,
+            now_ns=self.get_clock().now().nanoseconds,
+            last_stamp_ns=self._last_command_stamp_ns[src],
+            maximum_age_s=self.COMMAND_MAX_AGE,
+            future_tolerance_s=self.COMMAND_FUTURE_TOLERANCE,
+        )
+        if not accepted and not is_zero_velocity:
+            self.get_logger().warn(
+                f"ignored command from {src!r}: {stamp_reason}")
+            return
+
+        if self._motion_inhibit_reason() and not is_zero_velocity:
             self._publish_safety_status()
             return
 
-        self.last_input_time[src] = time.monotonic()
+        if accepted:
+            self.last_input_time[src] = time.monotonic()
+            self._last_command_stamp_ns[src] = source_stamp_ns
+
+        if is_zero_velocity:
+            out = DeviceStream()
+            out.header.stamp = msg.header.stamp
+            out.header.frame_id = src
+            out.predicate = DeviceStream.VEL
+            out.data = [0.0] * 6
+            self.control_pub.publish(out)
+            return
 
         if self.deadman or \
             self.estop or \
@@ -289,8 +371,10 @@ class ControlManager(Node):
             return
 
         out = DeviceStream()
-        out.header.stamp = self.get_clock().now().to_msg()
-        # out.header.frame_id = msg.header.frame_id
+        # Preserve source time across the safety relay. Re-stamping here would
+        # make a delayed DDS sample appear fresh to the serial bridge.
+        out.header.stamp = msg.header.stamp
+        out.header.frame_id = src
 
         if self.control_mode == ManagerEvent.JOINT_VEL:
             out.predicate = DeviceStream.VEL
@@ -328,6 +412,7 @@ class ControlManager(Node):
 
         out = DeviceStream()
         out.header.stamp = self.get_clock().now().to_msg()
+        out.header.frame_id = 'manager'
         out.predicate = DeviceStream.VEL
         out.data = [0.0] * 6
         self.control_pub.publish(out)
@@ -359,6 +444,7 @@ class ControlManager(Node):
         # STOP is always accepted, even while another source holds the lock or
         # a device fault is latched.
         if msg.predicate == ManagerEvent.STOP_MOTOR:
+            self._limit_recovery_cancelled = True
             self._command_zero_velocity()
             self.active_source = None
             self.control_mode = ManagerEvent.NONE
@@ -386,6 +472,7 @@ class ControlManager(Node):
             return
 
         if msg.predicate == ManagerEvent.CONNECTION:
+            self._limit_recovery_cancelled = True
             self._command_zero_velocity()
             self.active_source = None
             self.control_mode = ManagerEvent.NONE
@@ -395,18 +482,12 @@ class ControlManager(Node):
             return
 
         if msg.predicate == ManagerEvent.SET_ZERO:
-            reason = self._motion_inhibit_reason()
-            if reason:
-                self._reject_event(msg, f'SET_ZERO_INHIBITED:{reason}')
-                return
-            if (self.control_mode != ManagerEvent.NONE
-                    or self.active_source is not None):
-                self._reject_event(msg, 'SET_ZERO_REQUIRES_MODE_NONE')
-                return
-            if not self._feedback_is_stable():
-                self._reject_event(
-                    msg, 'SET_ZERO_REQUIRES_STATIONARY_FEEDBACK')
-                return
+            # The installed encoder zero is the learned model's calibration
+            # reference. It must never be changed through the production
+            # manager path. The device service independently enforces the same
+            # invariant so bypassing this manager cannot transmit it either.
+            self._reject_event(msg, 'SET_ZERO_FORBIDDEN')
+            return
 
         if (self._fault_latched and msg.predicate not in (
                 ManagerEvent.RESET_FAULT, ManagerEvent.FAULT_STATUS,
@@ -541,6 +622,18 @@ class ControlManager(Node):
             self._last_pos = list(msg.data)          # cache for limit gating
             self._last_pos_time = now
             self._pos_history.append((now, tuple(msg.data)))
+            if not self._position_feedback_is_plausible():
+                # A previously qualified stream must not silently become ready
+                # again if an impossible sample later disappears. Require the
+                # explicit power-qualification procedure after recovery.
+                self._driver_power_qualified = False
+                if self.active_source is not None:
+                    self._command_zero_velocity()
+                    self.active_source = None
+                    self.control_mode = ManagerEvent.NONE
+                    self.get_logger().error(
+                        'position feedback left configured hard limits during '
+                        'motion; manager inhibited')
         elif msg.predicate == DeviceStream.ENC:
             if len(msg.data) != 6 or not all(
                     math.isfinite(value) for value in msg.data):
@@ -561,13 +654,51 @@ class ControlManager(Node):
         return all(stamp is not None and now - stamp <= self.FEEDBACK_TIMEOUT
                    for stamp in stamps)
 
+    def _position_feedback_is_plausible(self):
+        """Validate feedback against limits plus a measurement-only tolerance.
+
+        Position commands remain clamped to the exact configured limits.  The
+        tolerance only prevents encoder quantization at an exact boundary from
+        creating a qualification/recovery deadlock.
+        """
+        if self._pos_lower is None or self._pos_upper is None:
+            return False
+        return (self._last_pos is not None
+                and len(self._last_pos) == 6
+                and all(math.isfinite(value)
+                        and lower - tolerance <= value <= upper + tolerance
+                        for value, lower, upper, tolerance in zip(
+                            self._last_pos, self._pos_lower, self._pos_upper,
+                            self._feedback_limit_tolerance)))
+
+    def _position_feedback_violation(self):
+        """Return a compact diagnostic for the first invalid position axis."""
+        if (self._pos_lower is None or self._pos_upper is None
+                or self._last_pos is None or len(self._last_pos) != 6):
+            return 'position feedback or configured limits unavailable'
+        for axis, (value, lower, upper, tolerance) in enumerate(zip(
+                self._last_pos, self._pos_lower, self._pos_upper,
+                self._feedback_limit_tolerance)):
+            if (not math.isfinite(value)
+                    or value < lower - tolerance
+                    or value > upper + tolerance):
+                return (
+                    f'axis {axis} value={value:.9g} outside '
+                    f'[{lower:.9g}, {upper:.9g}] '
+                    f'(feedback tolerance={tolerance:.9g})')
+        return 'none'
+
     def _motion_inhibit_reason(self):
+        if getattr(self, '_limit_recovery_active', False):
+            return 'LIMIT_RECOVERY_IN_PROGRESS'
         if self._fault_latched:
             return self._fault_reason or 'DEVICE_FAULT'
         if not self._transport_ready:
             return 'TRANSPORT_NOT_READY'
         if not self._feedback_is_fresh():
             return 'FEEDBACK_NOT_QUALIFIED'
+        if not self._position_feedback_is_plausible():
+            return 'POSITION_FEEDBACK_OUT_OF_RANGE'
         if not self._driver_power_qualified:
             return 'DRIVER_POWER_NOT_QUALIFIED'
         return ''
@@ -592,6 +723,7 @@ class ControlManager(Node):
         now = time.monotonic()
         return (
             self._feedback_is_fresh(now)
+            and self._position_feedback_is_plausible()
             and self._history_is_stable(
                 self._pos_history, now, self.QUALIFICATION_WINDOW,
                 self.QUALIFICATION_POS_TOLERANCE)
@@ -604,6 +736,11 @@ class ControlManager(Node):
         while time.monotonic() < deadline:
             if not self._transport_ready:
                 return False, 'serial transport became unavailable'
+            if (self._last_pos_time is not None
+                    and not self._position_feedback_is_plausible()):
+                return False, (
+                    'POS feedback is outside configured hard limits: '
+                    f'{self._position_feedback_violation()}')
             if self._feedback_is_stable():
                 return True, ''
             time.sleep(0.02)
@@ -642,6 +779,259 @@ class ControlManager(Node):
                 return False, (
                     f'driver UART probe invalid on axis {axis}: {exc}')
         return True, 'all 6 driver UART probes passed'
+
+    def _limit_recovery_plan(self):
+        """
+        Return the only permitted small out-of-range recovery motion.
+
+        Recovery is deliberately limited to logical catheter insertion
+        (axis 0). It cannot be used as general motion control and never changes
+        encoder zero. Exactly one boundary must be violated, by no more than
+        the configured recovery envelope.
+        """
+        if self._last_pos is None or len(self._last_pos) != 6:
+            raise ValueError('position feedback unavailable')
+        violations = []
+        for axis, (value, lower, upper, tolerance) in enumerate(zip(
+                self._last_pos, self._pos_lower, self._pos_upper,
+                self._feedback_limit_tolerance)):
+            if not math.isfinite(value):
+                raise ValueError(f'axis {axis} position is non-finite')
+            if value < lower - tolerance:
+                violations.append((axis, 'lower', lower - value))
+            elif value > upper + tolerance:
+                violations.append((axis, 'upper', value - upper))
+        if len(violations) != 1:
+            raise ValueError(
+                'recovery requires exactly one out-of-range position axis')
+        axis, boundary, excursion = violations[0]
+        if axis != 0:
+            raise ValueError(
+                f'recovery is restricted to catheter-linear axis 0, got {axis}')
+        if excursion > self.LIMIT_RECOVERY_MAX_VIOLATION:
+            raise ValueError(
+                f'axis 0 violation {excursion:.6g} exceeds bounded recovery '
+                f'envelope {self.LIMIT_RECOVERY_MAX_VIOLATION:.6g}')
+        if boundary == 'upper':
+            direction = -1.0
+            target = self._pos_upper[axis] - (
+                self.LIMIT_RECOVERY_INTERIOR_MARGIN)
+        else:
+            direction = 1.0
+            target = self._pos_lower[axis] + (
+                self.LIMIT_RECOVERY_INTERIOR_MARGIN)
+        speed = direction * self._vel_min[axis]
+        if speed == 0.0:
+            raise ValueError('axis 0 has no configured reliable recovery speed')
+        return axis, boundary, excursion, target, speed
+
+    def _publish_limit_recovery_velocity(self, axis, speed):
+        message = DeviceStream()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = 'manager_limit_recovery'
+        message.predicate = DeviceStream.VEL
+        message.data = [0.0] * 6
+        message.data[axis] = float(speed)
+        self.control_pub.publish(message)
+
+    def _execute_limit_recovery(self, axis, boundary, target, speed):
+        initial = float(self._last_pos[axis])
+        deadline = time.monotonic() + self.LIMIT_RECOVERY_TIMEOUT
+        period = 1.0 / self.LIMIT_RECOVERY_COMMAND_RATE
+        while time.monotonic() < deadline:
+            if self._limit_recovery_cancelled:
+                return False, 'limit recovery cancelled by safety stop'
+            if not self._transport_ready:
+                return False, 'serial transport became unavailable'
+            if not self._feedback_is_fresh():
+                return False, 'POS/ENC feedback became stale'
+            position = self._last_pos
+            if position is None or len(position) != 6 \
+                    or not all(math.isfinite(value) for value in position):
+                return False, 'position feedback became malformed'
+            for other in range(1, 6):
+                if (position[other]
+                        < self._pos_lower[other]
+                        - self._feedback_limit_tolerance[other]
+                        or position[other]
+                        > self._pos_upper[other]
+                        + self._feedback_limit_tolerance[other]):
+                    return False, f'unexpected limit violation on axis {other}'
+            value = float(position[axis])
+            if boundary == 'upper':
+                if value < target - self.LIMIT_RECOVERY_MAX_VIOLATION:
+                    return False, 'axis 0 exceeded bounded inward recovery travel'
+                if value <= target:
+                    return True, value
+                if value > initial + self.LIMIT_RECOVERY_OUTWARD_TOLERANCE:
+                    return False, 'axis 0 moved farther beyond its upper limit'
+            else:
+                if value > target + self.LIMIT_RECOVERY_MAX_VIOLATION:
+                    return False, 'axis 0 exceeded bounded inward recovery travel'
+                if value >= target:
+                    return True, value
+                if value < initial - self.LIMIT_RECOVERY_OUTWARD_TOLERANCE:
+                    return False, 'axis 0 moved farther beyond its lower limit'
+            self._publish_limit_recovery_velocity(axis, speed)
+            time.sleep(period)
+        return False, 'bounded inward recovery timed out'
+
+    def recover_catheter_linear_limit(self, request, response):
+        """Recover one small axis-0 limit excursion without changing zero."""
+        del request
+        if not self._qualification_lock.acquire(blocking=False):
+            response.success = False
+            response.message = 'qualification or limit recovery already in progress'
+            return response
+        self._limit_recovery_active = True
+        self._limit_recovery_cancelled = False
+        self._driver_power_qualified = False
+        self._publish_safety_status(force=True)
+        recovery_ok = False
+        detail = 'limit recovery did not start'
+        try:
+            if (self.control_mode != ManagerEvent.NONE
+                    or self.active_source is not None):
+                detail = 'limit recovery requires mode NONE and no active source'
+                return response
+            if not self._transport_ready:
+                detail = 'serial transport is not ready'
+                return response
+            if not self._feedback_is_fresh():
+                detail = 'fresh POS/ENC feedback is required'
+                return response
+
+            ok, message = self._call_device_sync(ManagerEvent.STOP_MOTOR)
+            if not ok:
+                detail = f'firmware STOP failed: {message}'
+                return response
+
+            restored, reason = self._restore_startup_encoder_fault()
+            if not restored:
+                detail = reason
+                return response
+            if self._fault_latched:
+                detail = (
+                    f'manager fault remains latched: '
+                    f'{self._fault_reason or "DEVICE_FAULT"}')
+                return response
+            # A restoration changes the live position atomically. Allow the
+            # next paired POS/ENC frame to arrive before planning recovery.
+            refresh_deadline = time.monotonic() + self.FEEDBACK_TIMEOUT
+            previous_pos_time = self._last_pos_time
+            while (self._last_pos_time == previous_pos_time
+                   and time.monotonic() < refresh_deadline):
+                time.sleep(0.005)
+            if not self._feedback_is_fresh():
+                detail = 'fresh feedback was not restored after firmware STOP'
+                return response
+
+            try:
+                axis, boundary, excursion, target, speed = (
+                    self._limit_recovery_plan())
+            except ValueError as exc:
+                detail = str(exc)
+                return response
+
+            probes_ok, probe_message = self._probe_all_drivers()
+            if not probes_ok:
+                detail = probe_message
+                return response
+
+            recovery_ok, result = self._execute_limit_recovery(
+                axis, boundary, target, speed)
+            if not recovery_ok:
+                detail = str(result)
+                return response
+            detail = (
+                f'axis 0 recovered inward from {excursion:.6g} beyond the '
+                f'{boundary} limit to {float(result):.6g}')
+            return response
+        except (KeyError, TypeError, ValueError) as exc:
+            detail = f'limit recovery failed: {exc}'
+            return response
+        finally:
+            # A zero command does not depend on service success. STOP adds a
+            # firmware-side disabled-motor barrier before reporting completion.
+            self._command_zero_velocity()
+            stop_ok, stop_message = self._call_device_sync(
+                ManagerEvent.STOP_MOTOR)
+            if recovery_ok and not stop_ok:
+                recovery_ok = False
+                detail = f'post-recovery firmware STOP failed: {stop_message}'
+            if recovery_ok:
+                stable, stable_reason = self._wait_for_stable_feedback()
+                if not stable:
+                    recovery_ok = False
+                    detail = (
+                        f'post-recovery feedback qualification failed: '
+                        f'{stable_reason}')
+            self._limit_recovery_active = False
+            self._limit_recovery_cancelled = True
+            self._driver_power_qualified = False
+            self._publish_safety_status(force=True)
+            response.success = recovery_ok
+            response.message = (
+                detail + '; run /manager/qualify_driver_power before motion'
+                if recovery_ok else detail)
+            self._qualification_lock.release()
+
+    def _restore_startup_encoder_fault(self):
+        """Restore a retained encoder frame before validating live feedback.
+
+        Driver power-up can corrupt the hardware counters and latch the
+        firmware's encoder-integrity guard.  While that latch is set, RESET
+        restores the last atomic frame retained by the firmware.  Qualification
+        permits this one recovery class only while every motor is disabled;
+        every other fault remains fail-closed.
+        """
+        ok, message = self._call_device_sync(ManagerEvent.FAULT_STATUS)
+        if not ok:
+            return False, f'fault-status query failed: {message}'
+        status = parse_fault_status(message)
+        if status['enabled_mask']:
+            return False, (
+                f"firmware motors remain enabled: E="
+                f"{status['enabled_mask']:02X}")
+
+        nonstartup = [
+            axis for axis, fault in enumerate(status['faults'])
+            if fault not in (0, ManagerEvent.FAULT_ENCODER_INTEGRITY)]
+        if nonstartup:
+            return False, (
+                'refusing startup reset; non-encoder faults on axes '
+                f'{nonstartup}: {status["raw"]}')
+
+        encoder_axes = [
+            axis for axis, fault in enumerate(status['faults'])
+            if fault == ManagerEvent.FAULT_ENCODER_INTEGRITY]
+        if not status['latched_mask']:
+            if encoder_axes:
+                return False, (
+                    'firmware reported encoder-integrity faults without a '
+                    f'latched mask: {status["raw"]}')
+            return True, 'firmware fault state clean'
+
+        if not encoder_axes:
+            return False, (
+                'refusing ambiguous startup reset; latched mask has no '
+                f'encoder-integrity fault: {status["raw"]}')
+
+        ok, reset_message = self._call_device_sync(ManagerEvent.RESET_FAULT)
+        if not ok:
+            return False, f'encoder-latch reset failed: {reset_message}'
+        if reset_message != 'OK_ENCODER_RESTORED':
+            return False, (
+                'firmware did not confirm retained encoder restoration: '
+                f'{reset_message}')
+        # This synchronous path does not pass through _on_device_response(),
+        # so clear the matching host latch only after the exact restoration
+        # acknowledgement and the preceding fault-class validation.
+        self._fault_latched = False
+        self._fault_reason = ''
+        return True, (
+            'retained encoder frame restored for axes '
+            f'{encoder_axes}')
 
     def qualify_driver_power(self, request, response):
         """Explicitly qualify a driver power-up before motion is permitted."""
@@ -686,50 +1076,23 @@ class ControlManager(Node):
                 response.message = f'firmware STOP failed: {message}'
                 return response
 
-            stable, reason = self._wait_for_stable_feedback()
-            if not stable:
+            restored, reason = self._restore_startup_encoder_fault()
+            if not restored:
                 response.success = False
                 response.message = reason
                 return response
 
-            ok, message = self._call_device_sync(ManagerEvent.FAULT_STATUS)
-            if not ok:
-                response.success = False
-                response.message = f'fault-status query failed: {message}'
-                return response
-            status = parse_fault_status(message)
-            if status['enabled_mask']:
-                response.success = False
-                response.message = (
-                    f"firmware motors remain enabled: E="
-                    f"{status['enabled_mask']:02X}")
-                return response
-
-            nonstartup = [
-                axis for axis, fault in enumerate(status['faults'])
-                if fault not in (
-                    0, ManagerEvent.FAULT_ENCODER_INTEGRITY)]
-            if nonstartup:
+            # Feedback plausibility belongs after encoder-latch restoration.
+            # If no latch existed this is the ordinary qualification check; if
+            # restoration occurred it validates the retained reference rather
+            # than the corrupted power-on frame.
+            stable, stable_reason = self._wait_for_stable_feedback()
+            if not stable:
                 response.success = False
                 response.message = (
-                    'refusing startup reset; non-encoder faults on axes '
-                    f'{nonstartup}: {status["raw"]}')
+                    f'post-restore feedback qualification failed: '
+                    f'{stable_reason}')
                 return response
-
-            if status['latched_mask']:
-                ok, message = self._call_device_sync(
-                    ManagerEvent.RESET_FAULT)
-                if not ok:
-                    response.success = False
-                    response.message = f'encoder-latch reset failed: {message}'
-                    return response
-
-                stable, reason = self._wait_for_stable_feedback()
-                if not stable:
-                    response.success = False
-                    response.message = (
-                        f'post-reset feedback qualification failed: {reason}')
-                    return response
 
             probes_ok, probe_message = self._probe_all_drivers()
             if not probes_ok:
@@ -775,6 +1138,7 @@ class ControlManager(Node):
         if self._shutdown_started:
             return None
         self._shutdown_started = True
+        self._limit_recovery_cancelled = True
         self._driver_power_qualified = False
         self.active_source = None
         self.locked_source = None
@@ -809,6 +1173,7 @@ class ControlManager(Node):
     def _command_zero_velocity(self):
         out = DeviceStream()
         out.header.stamp = self.get_clock().now().to_msg()
+        out.header.frame_id = 'manager'
         out.predicate = DeviceStream.VEL
         out.data = [0.0] * 6
         self.control_pub.publish(out)
@@ -827,14 +1192,17 @@ class ControlManager(Node):
         self.event_pub.publish(out)
 
     def _feedback_watchdog_tick(self):
-        if self.active_source is None or self._feedback_is_fresh():
+        if (self.active_source is None
+                or (self._feedback_is_fresh()
+                    and self._position_feedback_is_plausible())):
             return
         self._command_zero_velocity()
         self.active_source = None
         self.control_mode = ManagerEvent.NONE
         self._publish_safety_status(force=True)
         self.get_logger().error(
-            'device feedback became stale during motion; manager inhibited')
+            'device feedback became stale or implausible during motion; '
+            'manager inhibited')
 
     def transport_status_callback(self, msg: String):
         ready = msg.data.startswith('SERIAL_READY:')
@@ -858,7 +1226,7 @@ class ControlManager(Node):
             if self.get_parameter("require_limits").value:
                 raise ValueError(
                     'limits_file is required; refusing to start without limits')
-            return None, None, None, None
+            return None, None, None, None, None
         import yaml
         with open(path) as f:
             cfg = yaml.safe_load(f)
@@ -872,7 +1240,9 @@ class ControlManager(Node):
                 ("pos_lower", p["pos_lower"]),
                 ("pos_upper", p["pos_upper"]),
                 ("vel_min", p.get("vel_min", [0.0] * 6)),
-                ("vel_max", p["vel_max"])):
+                ("vel_max", p["vel_max"]),
+                ("feedback_limit_tolerance",
+                 p.get("feedback_limit_tolerance", [0.0] * 6))):
             vals = [float(x) for x in raw]
             if len(vals) != 6:
                 raise ValueError(f"'{k}' for catheter '{name}' must have 6 values")
@@ -883,6 +1253,9 @@ class ControlManager(Node):
             raise ValueError("vel_max values must be positive")
         if any(vmin > vmax for vmin, vmax in zip(out[2], out[3])):
             raise ValueError("vel_min values cannot exceed vel_max")
+        if any(value < 0.0 for value in out[4]):
+            raise ValueError(
+                "feedback_limit_tolerance values must be non-negative")
         self.get_logger().info(
             f"joint-limit clamp ACTIVE: catheter '{name}' from {path}")
         return tuple(out)
@@ -943,14 +1316,20 @@ class ControlManager(Node):
 
     def device_event_callback(self, msg: DeviceEvent):
         confirmed_transition = False
-        if len(msg.data) >= 2 and math.isfinite(msg.data[1]):
+        if (msg.predicate == ManagerEvent.STALL
+                and len(msg.data) >= 2 and math.isfinite(msg.data[1])):
             confirmed_transition = (
                 int(msg.data[1]) == ManagerEvent.MOTION_CONFIRMED)
         confirmed = (msg.text.startswith('MOTION_CONFIRMED:')
                      or confirmed_transition)
+        watchdog_stop = msg.text.startswith('FIRMWARE_WATCHDOG_STOP:')
+        confirmed = confirmed or watchdog_stop
         if confirmed:
+            self._limit_recovery_cancelled = True
             self._fault_latched = True
-            self._fault_reason = msg.text or 'CONFIRMED_DEVICE_FAULT'
+            self._fault_reason = (
+                'FIRMWARE_WATCHDOG_STOP'
+                if watchdog_stop else msg.text or 'CONFIRMED_DEVICE_FAULT')
             self._command_zero_velocity()
             self.active_source = None
             self.control_mode = ManagerEvent.NONE

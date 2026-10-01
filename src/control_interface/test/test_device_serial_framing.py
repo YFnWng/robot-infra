@@ -30,6 +30,17 @@ def test_target_velocity_rejects_text_and_bad_request_id():
         encode_device_command(ManagerEvent.FAULT_STATUS, bytes(15))
 
 
+def test_device_service_never_transmits_set_zero():
+    fake = SimpleNamespace()
+    request = SimpleNamespace(predicate=ManagerEvent.SET_ZERO)
+    response = SimpleNamespace(success=True, response='')
+
+    result = SerialCommunication.handle_device_command(fake, request, response)
+
+    assert result.success is False
+    assert result.response == 'SET_ZERO_FORBIDDEN'
+
+
 def test_protocol_v3_motion_event_exposes_driver_response():
     published = []
     fake = SimpleNamespace(
@@ -52,6 +63,59 @@ def test_protocol_v3_motion_event_exposes_driver_response():
     assert len(published) == 1
     assert list(published[0].data[-7:]) == pytest.approx([
         4, 3, 4, ord('!'), ord('E'), ord('R'), ord('R')])
+
+
+def test_preconnect_firmware_status_reports_identity_without_transport_ready():
+    published = []
+    statuses = []
+    information = []
+    fake = SimpleNamespace(
+        event_pub=SimpleNamespace(publish=published.append),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            to_msg=Time)),
+        get_logger=lambda: SimpleNamespace(info=information.append),
+        firmware_alive=threading.Event(),
+        firmware_identity=None,
+        _logged_firmware_identity=None,
+        rx_ready=threading.Event(),
+        _set_transport_status=statuses.append,
+    )
+    build = b'teensy_tekceleo:bootdiag-v1|built=test'
+    body = bytes([1, 0]) + struct.pack('<I', 1234) + build
+
+    SerialCommunication.handle_device_event(
+        fake, ManagerEvent.FIRMWARE_STATUS, body)
+
+    assert fake.firmware_alive.is_set()
+    assert not fake.rx_ready.is_set()
+    assert fake.firmware_identity == build.decode()
+    assert published[0].text == f'FIRMWARE_ALIVE:{build.decode()}'
+    assert list(published[0].data) == [1.0, 0.0, 1234.0]
+    assert statuses == [
+        f'SERIAL_FIRMWARE_ALIVE_AWAITING_CONNECT:{build.decode()}']
+    assert information
+
+
+def test_firmware_status_exposes_watchdog_stop_flag():
+    published = []
+    fake = SimpleNamespace(
+        event_pub=SimpleNamespace(publish=published.append),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            to_msg=Time)),
+        get_logger=lambda: SimpleNamespace(info=lambda message: None),
+        firmware_alive=threading.Event(),
+        firmware_identity=None,
+        _logged_firmware_identity=None,
+        rx_ready=threading.Event(),
+        _set_transport_status=lambda status: None,
+    )
+    body = bytes([1, 0x05]) + struct.pack('<I', 1500) + b'test-build'
+
+    SerialCommunication.handle_device_event(
+        fake, ManagerEvent.FIRMWARE_STATUS, body)
+
+    assert published[0].text == 'FIRMWARE_WATCHDOG_STOP:test-build'
+    assert published[0].data[1] == 5.0
 
 
 def test_stall_retry_transition_is_named_and_preserves_attempt_number():
@@ -82,6 +146,30 @@ def test_stream_handler_rejects_wrong_payload_size():
     with pytest.raises(ValueError, match='requires 24 bytes'):
         SerialCommunication.handle_device_stream(
             fake, DeviceStream.POS, bytes(20))
+
+
+def test_five_state_limit_snapshot_is_valid():
+    published = []
+    warnings = []
+    fake = SimpleNamespace(
+        event_pub=SimpleNamespace(publish=published.append),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            to_msg=Time)),
+        get_logger=lambda: SimpleNamespace(warn=warnings.append),
+    )
+    states = bytes([
+        ManagerEvent.TRIGGER_N,
+        ManagerEvent.TRIGGER_N,
+        ManagerEvent.TRIGGER_N,
+        ManagerEvent.TRIGGER_C,
+        ManagerEvent.TRIGGER_M,
+    ])
+
+    SerialCommunication.handle_device_event(
+        fake, ManagerEvent.LIMIT, states)
+
+    assert list(published[0].state) == list(states)
+    assert warnings
 
 
 def test_serial_writes_are_atomic_across_threads():
@@ -139,6 +227,8 @@ def test_close_fails_pending_request_and_publishes_status(monkeypatch):
         serial_port=None,
         is_connected=True,
         rx_ready=threading.Event(),
+        firmware_alive=threading.Event(),
+        firmware_identity='test-build',
         pending_lock=threading.Lock(),
         pending={bytes(16): {'future': future, 'deadline': 100.0}},
         _last_transport_status=None,
@@ -179,6 +269,70 @@ def test_control_frame_requires_known_predicate_and_exact_length():
     assert errors
 
 
+def serial_control_fake(now_s=10.0):
+    sent = []
+    transmitted = []
+    warnings = []
+    fake = SimpleNamespace(
+        control_tx_lock=threading.Lock(),
+        _last_control_stamp_ns=0,
+        command_max_age_s=0.1,
+        command_future_tolerance_s=0.05,
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=int(now_s * 1e9))),
+        get_logger=lambda: SimpleNamespace(
+            error=lambda message: None, warn=warnings.append),
+        send_bytes=lambda payload: sent.append(payload) or True,
+        command_tx_pub=SimpleNamespace(publish=transmitted.append),
+    )
+    fake.transmitted = transmitted
+    return fake, sent, warnings
+
+
+def test_serial_bridge_rejects_expired_and_nonmonotonic_motion():
+    fake, sent, warnings = serial_control_fake()
+    fresh = DeviceStream()
+    fresh.header.stamp = Time(sec=10)
+    fresh.predicate = DeviceStream.VEL
+    fresh.data = [1.0] * 6
+    SerialCommunication.on_manager_control(fake, fresh)
+
+    older = DeviceStream()
+    older.header.stamp = Time(sec=9, nanosec=999_000_000)
+    older.predicate = DeviceStream.VEL
+    older.data = [2.0] * 6
+    SerialCommunication.on_manager_control(fake, older)
+
+    assert len(sent) == 1
+    assert len(fake.transmitted) == 1
+    assert list(fake.transmitted[0].data) == pytest.approx([1.0] * 6)
+    assert any('nonmonotonic' in warning for warning in warnings)
+
+    fake._last_control_stamp_ns = 0
+    expired = DeviceStream()
+    expired.header.stamp = Time(sec=9)
+    expired.predicate = DeviceStream.VEL
+    expired.data = [3.0] * 6
+    SerialCommunication.on_manager_control(fake, expired)
+    assert len(sent) == 1
+    assert any('expired' in warning for warning in warnings)
+
+
+def test_serial_bridge_allows_stale_zero_to_preempt_motion():
+    fake, sent, _ = serial_control_fake()
+    fake._last_control_stamp_ns = 10_000_000_000
+    stop = DeviceStream()
+    stop.header.stamp = Time(sec=9)
+    stop.predicate = DeviceStream.VEL
+    stop.data = [0.0] * 6
+
+    SerialCommunication.on_manager_control(fake, stop)
+
+    assert len(sent) == 1
+    assert sent[0][0] == DeviceStream.VEL
+    assert struct.unpack('<6f', sent[0][1:]) == pytest.approx([0.0] * 6)
+
+
 def test_connection_request_is_idempotent_when_transport_is_ready():
     connect_calls = []
     sent = []
@@ -189,7 +343,9 @@ def test_connection_request_is_idempotent_when_transport_is_ready():
         serial_port=SimpleNamespace(
             is_open=True, port='/dev/ttyACM0'),
         rx_ready=ready,
+        firmware_alive=threading.Event(),
         serial_settle_s=0.0,
+        firmware_status_wait_s=0.0,
         handshake_wait_s=0.01,
         connect=lambda port: connect_calls.append(port) or True,
         send_bytes=sent.append,
@@ -216,7 +372,9 @@ def test_connection_without_rx_stays_open_but_not_ready():
         configured_port='/dev/ttyACM0',
         serial_port=None,
         rx_ready=ready,
+        firmware_alive=threading.Event(),
         serial_settle_s=0.0,
+        firmware_status_wait_s=0.0,
         handshake_wait_s=0.001,
         connect=lambda port: True,
         send_bytes=lambda payload: sent.append(payload) or True,

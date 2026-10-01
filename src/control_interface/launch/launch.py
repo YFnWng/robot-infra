@@ -27,6 +27,17 @@ def generate_launch_description():
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("serial_port", default_value="/dev/ttyACM0"),
         DeclareLaunchArgument("feedback_timeout_s", default_value="0.25"),
+        DeclareLaunchArgument("command_max_age_s", default_value="0.10"),
+        DeclareLaunchArgument(
+            "limit_recovery_max_violation", default_value="0.25"),
+        DeclareLaunchArgument(
+            "limit_recovery_interior_margin", default_value="0.10"),
+        DeclareLaunchArgument(
+            "limit_recovery_timeout_s", default_value="0.50"),
+        DeclareLaunchArgument(
+            "limit_recovery_command_rate_hz", default_value="100.0"),
+        DeclareLaunchArgument(
+            "limit_recovery_outward_tolerance", default_value="0.02"),
         Node(
             package='control_interface',
             executable='manager.py',
@@ -37,6 +48,24 @@ def generate_launch_description():
                 "feedback_timeout_s": ParameterValue(
                     LaunchConfiguration("feedback_timeout_s"),
                     value_type=float),
+                "command_max_age_s": ParameterValue(
+                    LaunchConfiguration("command_max_age_s"),
+                    value_type=float),
+                "limit_recovery_max_violation": ParameterValue(
+                    LaunchConfiguration("limit_recovery_max_violation"),
+                    value_type=float),
+                "limit_recovery_interior_margin": ParameterValue(
+                    LaunchConfiguration("limit_recovery_interior_margin"),
+                    value_type=float),
+                "limit_recovery_timeout_s": ParameterValue(
+                    LaunchConfiguration("limit_recovery_timeout_s"),
+                    value_type=float),
+                "limit_recovery_command_rate_hz": ParameterValue(
+                    LaunchConfiguration("limit_recovery_command_rate_hz"),
+                    value_type=float),
+                "limit_recovery_outward_tolerance": ParameterValue(
+                    LaunchConfiguration("limit_recovery_outward_tolerance"),
+                    value_type=float),
             }],
         ),
         Node(
@@ -45,6 +74,9 @@ def generate_launch_description():
             name='device_serial_com',
             parameters=[{
                 "serial_port": LaunchConfiguration("serial_port"),
+                "command_max_age_s": ParameterValue(
+                    LaunchConfiguration("command_max_age_s"),
+                    value_type=float),
             }],
         )
     ])

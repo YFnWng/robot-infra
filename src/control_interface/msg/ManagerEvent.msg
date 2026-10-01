@@ -1,4 +1,5 @@
 uint8 CONNECTION        = 67 # "C"
+uint8 FIRMWARE_STATUS   = 66 # "B" autonomous pre-CONNECT boot diagnostic
 uint8 MODE              = 77 # "M"
 uint8 NONE              = 48 # "0"
 uint8 CARTESIAN_TWIST   = 49 # "1"

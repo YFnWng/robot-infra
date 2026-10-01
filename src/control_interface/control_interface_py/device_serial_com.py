@@ -18,10 +18,12 @@ import serial
 
 from control_interface.msg import DeviceStream, DeviceEvent, ManagerEvent
 from control_interface.srv import DeviceCmd
+from control_interface_py.command_freshness import validate_command_stamp
 
 stream_prefix = [DeviceStream.POS, DeviceStream.VEL, DeviceStream.ENC]
 event_prefix = [
-    ManagerEvent.LIMIT, ManagerEvent.STALL, ManagerEvent.POSITION_STATUS]
+    ManagerEvent.FIRMWARE_STATUS, ManagerEvent.LIMIT, ManagerEvent.STALL,
+    ManagerEvent.POSITION_STATUS]
 response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.MODE, 
                     ManagerEvent.DEBUG,
@@ -66,7 +68,10 @@ class SerialCommunication(Node):
         self.declare_parameter('serial_timeout_s', 0.1)
         self.declare_parameter('connect_retries', 20)
         self.declare_parameter('serial_settle_s', 0.3)
+        self.declare_parameter('firmware_status_wait_s', 1.0)
         self.declare_parameter('handshake_wait_s', 1.0)
+        self.declare_parameter('command_max_age_s', 0.10)
+        self.declare_parameter('command_future_tolerance_s', 0.05)
         self.configured_port = str(self.get_parameter('serial_port').value)
         self.baudrate = int(self.get_parameter('baudrate').value)
         self.serial_timeout_s = float(
@@ -75,10 +80,20 @@ class SerialCommunication(Node):
             self.get_parameter('connect_retries').value)
         self.serial_settle_s = float(
             self.get_parameter('serial_settle_s').value)
+        self.firmware_status_wait_s = float(
+            self.get_parameter('firmware_status_wait_s').value)
         self.handshake_wait_s = float(
             self.get_parameter('handshake_wait_s').value)
+        self.command_max_age_s = float(
+            self.get_parameter('command_max_age_s').value)
+        self.command_future_tolerance_s = float(
+            self.get_parameter('command_future_tolerance_s').value)
         if (self.serial_timeout_s <= 0.0 or self.connect_retries <= 0
-                or self.serial_settle_s < 0.0 or self.handshake_wait_s < 0.0):
+                or self.serial_settle_s < 0.0
+                or self.firmware_status_wait_s < 0.0
+                or self.handshake_wait_s < 0.0
+                or self.command_max_age_s <= 0.0
+                or self.command_future_tolerance_s < 0.0):
             raise ValueError(
                 'serial timeout/retries must be positive and connection '
                 'delays must be non-negative')
@@ -89,10 +104,15 @@ class SerialCommunication(Node):
         self.io_lock = threading.RLock()
         self.connection_lock = threading.RLock()
         self.rx_ready = threading.Event()
+        self.firmware_alive = threading.Event()
+        self.firmware_identity = None
+        self._logged_firmware_identity = None
         self.stop_event = threading.Event()
         self.last_rx_time = None
         self.rx_errors = {}
         self._last_transport_status = None
+        self._last_control_stamp_ns = 0
+        self.control_tx_lock = threading.Lock()
 
         # Services may wait for firmware responses. Keep them out of the same
         # mutually-exclusive callback group as velocity traffic and watchdogs.
@@ -100,14 +120,23 @@ class SerialCommunication(Node):
         self.service_group = ReentrantCallbackGroup()
 
         # ---- ROS interfaces ----
+        motion_qos = QoSProfile(depth=1)
+        motion_qos.reliability = ReliabilityPolicy.RELIABLE
+        motion_qos.durability = DurabilityPolicy.VOLATILE
         self.control_sub = self.create_subscription(
-            DeviceStream, '/manager/control', self.on_manager_control, 10,
+            DeviceStream, '/manager/control', self.on_manager_control, motion_qos,
             callback_group=self.control_group,
         )
 
         self.state_pub = self.create_publisher(
             DeviceStream, '/device/state', 10
         )
+
+        command_trace_qos = QoSProfile(depth=20)
+        command_trace_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        command_trace_qos.durability = DurabilityPolicy.VOLATILE
+        self.command_tx_pub = self.create_publisher(
+            DeviceStream, '/device/command_tx', command_trace_qos)
 
         self.event_pub = self.create_publisher(
             DeviceEvent, '/device/event', 10
@@ -156,6 +185,8 @@ class SerialCommunication(Node):
                 self.is_connected = False
 
             self.rx_ready.clear()
+            self.firmware_alive.clear()
+            self.firmware_identity = None
             self.last_rx_time = None
             for attempt in range(1, self.connect_retries + 1):
                 try:
@@ -185,6 +216,8 @@ class SerialCommunication(Node):
                 self.serial_port = None
                 self.is_connected = False
                 self.rx_ready.clear()
+                self.firmware_alive.clear()
+                self.firmware_identity = None
                 if port and port.is_open:
                     try:
                         port.close()
@@ -233,10 +266,34 @@ class SerialCommunication(Node):
         if not all(math.isfinite(value) for value in msg.data):
             self.get_logger().error('Invalid non-finite manager control frame')
             return
-        prefix = bytes([msg.predicate])
-        data = struct.pack("<" + "f" * len(msg.data),
-                           *[float(x) for x in msg.data])
-        self.send_bytes(prefix + data)
+        is_zero_velocity = (
+            msg.predicate == DeviceStream.VEL
+            and all(value == 0.0 for value in msg.data))
+        transmitted = False
+        with self.control_tx_lock:
+            accepted, reason, source_stamp_ns = validate_command_stamp(
+                msg,
+                now_ns=self.get_clock().now().nanoseconds,
+                last_stamp_ns=self._last_control_stamp_ns,
+                maximum_age_s=self.command_max_age_s,
+                future_tolerance_s=self.command_future_tolerance_s,
+            )
+            if not accepted and not is_zero_velocity:
+                self.get_logger().warn(
+                    f'Rejected manager control frame: {reason}')
+                return
+            prefix = bytes([msg.predicate])
+            data = struct.pack("<" + "f" * len(msg.data),
+                               *[float(x) for x in msg.data])
+            transmitted = self.send_bytes(prefix + data)
+            if transmitted and accepted:
+                self._last_control_stamp_ns = source_stamp_ns
+        if transmitted:
+            trace = DeviceStream()
+            trace.header = msg.header
+            trace.predicate = msg.predicate
+            trace.data = list(msg.data)
+            self.command_tx_pub.publish(trace)
 
     # ============================================================
     # RX LOOP
@@ -361,15 +418,52 @@ class SerialCommunication(Node):
         self.state_pub.publish(msg)
 
     def handle_device_event(self, prefix: int, body: bytes):
-        if len(body) < 6:
+        if prefix == ManagerEvent.FIRMWARE_STATUS:
+            if len(body) < 7:
+                raise ValueError(
+                    'firmware status requires schema, flags, uptime, and build')
+            schema, flags = body[:2]
+            uptime_ms = struct.unpack_from('<I', body, 2)[0]
+            build = body[6:].decode('ascii', errors='replace').strip()
+            if schema != 1 or not build:
+                raise ValueError(
+                    f'unsupported firmware status schema/build: {schema}')
+            msg = DeviceEvent()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.predicate = prefix
+            msg.text = (
+                f'FIRMWARE_WATCHDOG_STOP:{build}'
+                if flags & 0x04 else f'FIRMWARE_ALIVE:{build}')
+            msg.data = [float(schema), float(flags), float(uptime_ms)]
+            self.firmware_identity = build
+            self.firmware_alive.set()
+            if not self.rx_ready.is_set():
+                self._set_transport_status(
+                    f'SERIAL_FIRMWARE_ALIVE_AWAITING_CONNECT:{build}')
+            if build != self._logged_firmware_identity:
+                self._logged_firmware_identity = build
+                self.get_logger().info(
+                    f'firmware boot diagnostic received: {build}')
+            self.event_pub.publish(msg)
+            return
+
+        # LIMIT reports five physical limit states (three linear switches and
+        # the catheter/sheath bend limits). Other legacy events begin with six
+        # per-axis state bytes. Keep these wire contracts predicate-specific:
+        # CONNECT emits a LIMIT snapshot immediately after its firmware-status
+        # frame, so treating every event as six-axis made a healthy startup
+        # look like serial corruption.
+        state_width = 5 if prefix == ManagerEvent.LIMIT else 6
+        if len(body) < state_width:
             raise ValueError(
-                f'event predicate={prefix} requires at least 6 state bytes')
+                f'event predicate={prefix} requires at least '
+                f'{state_width} state bytes')
         msg = DeviceEvent()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.predicate = prefix
-        # Legacy LIMIT/STALL payloads contain only the six axis-state bytes.
-        # Motion-monitor protocol v1 appends structured diagnostics.
-        msg.state = list(body[:6])
+        # Legacy LIMIT/STALL payloads begin with their state bytes.
+        # Motion-monitor protocol v1 appends structured diagnostics to STALL.
+        msg.state = list(body[:state_width])
         if prefix == ManagerEvent.POSITION_STATUS and len(body) == 27:
             version, status, mask, *errors = struct.unpack('<BBB6f', body)
             names = {
@@ -471,6 +565,13 @@ class SerialCommunication(Node):
 
     def handle_device_command(self, request, response):
 
+        # Encoder zero is the learned model's installed calibration reference.
+        # No ROS service path may transmit a command that changes it.
+        if request.predicate == ManagerEvent.SET_ZERO:
+            response.success = False
+            response.response = 'SET_ZERO_FORBIDDEN'
+            return response
+
         if request.predicate == ManagerEvent.CONNECTION:
             command = request.cmd.strip()
             if command.lower() in ('disconnect', 'close', 'off'):
@@ -492,10 +593,16 @@ class SerialCommunication(Node):
                 return response
             if not self.rx_ready.is_set():
                 # Opening the Teensy's USB serial endpoint can reset it. Preserve
-                # the proven settle interval before sending the one-byte stream
-                # enable command, otherwise that command can be lost at startup.
-                if not was_open and self.serial_settle_s:
-                    time.sleep(self.serial_settle_s)
+                # a legacy settle interval, then wait for the diagnostic build's
+                # driver-independent main-loop heartbeat before CONNECT. Older
+                # firmware remains compatible and simply consumes this timeout.
+                if not was_open:
+                    if self.serial_settle_s:
+                        time.sleep(self.serial_settle_s)
+                    if (hasattr(self, 'firmware_alive')
+                            and self.firmware_status_wait_s):
+                        self.firmware_alive.wait(
+                            timeout=self.firmware_status_wait_s)
                 if not self.send_bytes(bytes([request.predicate])):
                     response.success = False
                     response.response = 'Serial opened but handshake TX failed'
@@ -505,11 +612,23 @@ class SerialCommunication(Node):
                     # the port open, but do not declare it ready: the manager's
                     # transport gate continues to inhibit all motion until a
                     # complete valid firmware frame arrives.
-                    self._set_transport_status(
-                        f'SERIAL_AWAITING_RX:{target}')
+                    firmware_alive = (
+                        self.firmware_alive.is_set()
+                        if hasattr(self, 'firmware_alive') else False)
+                    identity = getattr(self, 'firmware_identity', None)
+                    if firmware_alive:
+                        self._set_transport_status(
+                            'SERIAL_FIRMWARE_ALIVE_AWAITING_CONNECT:'
+                            f'{identity or "unknown"}')
+                        detail = (
+                            'firmware alive but CONNECT not established: '
+                            f'{identity or "unknown"}')
+                    else:
+                        self._set_transport_status(
+                            f'SERIAL_AWAITING_RX:{target}')
+                        detail = f'awaiting valid device frame: {target}'
                     response.success = True
-                    response.response = (
-                        f'Serial open; awaiting valid device frame: {target}')
+                    response.response = f'Serial open; {detail}'
                     return response
             response.success = True
             response.response = f"Serial ready: {target}"
