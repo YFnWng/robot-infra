@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = "automation"
@@ -9,8 +11,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/launch",
-         ["launch/estimator.launch.py", "launch/collection.launch.py"]),
+        (f"share/{package_name}/launch", glob("launch/*.launch.py")),
         (f"share/{package_name}/config",
          ["config/live_coil_estimation.yaml", "config/catheter_limits.yaml"]),
     ],
