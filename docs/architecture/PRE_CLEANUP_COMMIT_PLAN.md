@@ -17,6 +17,7 @@ whole-file sweep.
 | R7 — maintained docs and audit summaries | complete: `29618f0` | 99 Markdown files passed relative-link validation; staged diff contained only text/vector documentation artifacts |
 | R8 — reproducible audit tooling | complete: `3e320be` | exact staged snapshot compiled; 6 focused tests and 10 non-actuating CLI checks passed |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
+| M3 — supported training/reproduction pipelines | complete: `19bd41b`, `26de1fd`, `5b866d1` | exact snapshots passed 85 v171/v174, 7 v175, and 41 engagement/gain tests; reproduction CLIs loaded non-actuatingly |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
 v150 runtime remains untouched in research history rather than being exposed by
@@ -213,11 +214,21 @@ interface transmission, plus their focused tests.
 
 Do not mix training-pipeline experiments into this commit.
 
-### M3 — supported training/reproduction pipelines
+### M3 — supported training/reproduction pipelines (complete)
 
-Commit only pipelines required to reproduce the selected v171/v174/v175
-artifacts and current supported engagement/gain work. Move reusable functions
-out of scripts in later commits; first preserve the working state.
+The preserved production reproduction closure contains the v171 standalone EM
+trainer, v172 posterior inference, v173 Jacobian diagnostic, and v174 composed
+rollout, together with their imported model/training modules and mathematical
+handoff. The active v175 motor-to-interface transmission trainer is a separate
+commit. Current engagement-label, engaged-distal, and v171 belief-lambda
+pipelines are preserved as research reproduction paths and are not deployed
+command authority.
+
+Exact Git-index snapshots were checked with declared artifacts copied into a
+temporary tree: 85 focused v171/v174 tests, 7 v175 transmission tests, and 41
+engagement/gain tests passed. Four production reproduction wrappers, eight
+engagement/gain CLIs, and two wrapper syntax checks passed. No checkpoint,
+evaluation array, image, video, or hardware action was committed or run.
 
 ### M4 — research history preservation
 

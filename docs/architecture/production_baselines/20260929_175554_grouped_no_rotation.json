@@ -77,7 +77,7 @@
       "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d"
     }
   },
-  "generated_at_utc": "2026-10-01T18:00:01.794399+00:00",
+  "generated_at_utc": "2026-10-01T18:21:08.025977+00:00",
   "python_import_closure": {
     "conservative": true,
     "entry_modules": {
@@ -1997,7 +1997,7 @@
   "repositories": [
     {
       "branch": "main",
-      "commit": "3e320be083e73f6fb4a1aad74ca810cf9da970a8",
+      "commit": "df979544b2c6eaa2f90ed86d6c9d522d3a4e1bce",
       "dirty": true,
       "is_git_repository": true,
       "path": "/home/chen-lab/Yifan/robot-infra",
@@ -2005,11 +2005,11 @@
     },
     {
       "branch": "main",
-      "commit": "4b210cd3f3554d87920c61a11d83b4a94acc0248",
+      "commit": "5b866d15dabc3c9d490e26a10707846969104187",
       "dirty": true,
       "is_git_repository": true,
       "path": "/home/chen-lab/Yifan/cr_meta_lnn",
-      "status_entry_count": 477
+      "status_entry_count": 398
     },
     {
       "branch": "main",
