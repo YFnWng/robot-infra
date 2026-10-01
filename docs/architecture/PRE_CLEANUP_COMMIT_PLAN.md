@@ -14,6 +14,7 @@ whole-file sweep.
 | R4 — perception and experiment automation | complete: `72335b4`, `438f379` | marker slice: 4 tests passed; experiment slice: 75 tests passed; both exact index snapshots built all three dependent ROS packages |
 | R5 — manager and serial safety | complete: `bc242f7` | exact index snapshot built `control_interface`; all 70 manager/transport safety tests passed |
 | R6 — firmware safety | complete: `20f2930` | exact index snapshot passed all 8 C++ host regressions and 2 firmware source-contract tests; no flash performed |
+| R7 — maintained docs and audit summaries | complete: `29618f0` | 99 Markdown files passed relative-link validation; staged diff contained only text/vector documentation artifacts |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
@@ -154,11 +155,28 @@ source-contract tests covering forbidden encoder zeroing and the disabled
 recovery seed. No Teensy toolchain was installed, so the full sketch was not
 compiled; no firmware was flashed and no hardware link was opened.
 
-### R7 — maintained docs and audit summaries
+### R7 — maintained docs and audit summaries (complete)
 
-Commit Markdown conclusions and small tables. Relocate NPZ/large plot evidence
-to external session directories before removing source-tree copies. Generated
-presentation work directories are not source.
+The maintained plans, conclusions, architecture diagrams, and small tabular
+summaries are now versioned. Fourteen generated audit artifacts (eight JSON,
+four PNG, and two NPZ files; 6.6 MB total) were moved, without deletion, to:
+
+```text
+/media/chen-lab/84BABCB7BABCA6D81/Yifan/catheter_sessions/
+  repository_cleanup_archive_20261001/robot-infra/
+```
+
+The archive preserves the repository-relative paths and includes a
+`SHA256SUMS` manifest. `audits/README.md` records the recovery procedure and
+the ignore policy prevents regenerated JSON, NPZ, PNG, cache, presentation,
+and editor-backup output from returning to the source tree. Audit-analysis
+Python tools remain uncommitted for a later reproducibility-code review rather
+than being folded into this documentation-only slice.
+
+Verification checked whitespace, validated relative links in all 99 staged
+Markdown files, and confirmed that the commit contained only Markdown, CSV,
+YAML, DOT/SVG, README, and ignore-policy files. No hardware or runtime process
+was started.
 
 ## `cr_meta_lnn`
 
