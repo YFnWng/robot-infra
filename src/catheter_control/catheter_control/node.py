@@ -697,11 +697,13 @@ class CatheterControlNode(Node):
         self.declare_parameter("cr_common_root", common)
         self.declare_parameter(
             "v171_distal_checkpoint",
-            str(Path(root) / "checkpoints"
+            str(Path(root) / "artifacts" / "deployed"
+                / "20260929_175554_grouped_no_rotation"
                 / "real_distal_first_order_v171_multistep_map_em.pt"))
         self.declare_parameter(
             "jacobian_initialization_json",
-            str(Path(root) / "evaluation"
+            str(Path(root) / "artifacts" / "deployed"
+                / "20260929_175554_grouped_no_rotation"
                 / "real_joint_local_distal_v174.json"))
         self.declare_parameter("interface_transmission_checkpoint", "")
         self.declare_parameter("distal_tendon_allocation_checkpoint", "")

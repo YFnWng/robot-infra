@@ -1,5 +1,9 @@
 # Active full-stack runtime closure — 2026-09-29 qualification
 
+> Historical evidence: this closure was captured before the clean-source gate.
+> Use [the active deployment baseline](ACTIVE_DEPLOYMENT_BASELINE.md) for the
+> current authoritative source and artifact boundary.
+
 This closure is anchored to the successful hardware session:
 
 ```text

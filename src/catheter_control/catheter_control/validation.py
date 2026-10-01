@@ -402,9 +402,11 @@ def _parser():
     parser.add_argument("--cr-meta-lnn-root", default=str(meta))
     parser.add_argument("--cr-common-root", default=str(root/"cr-common"))
     parser.add_argument("--v171-distal-checkpoint", default=str(
-        meta/"checkpoints/real_distal_first_order_v171_multistep_map_em.pt"))
+        meta/"artifacts/deployed/20260929_175554_grouped_no_rotation"/
+        "real_distal_first_order_v171_multistep_map_em.pt"))
     parser.add_argument("--jacobian-initialization-json", default=str(
-        meta/"evaluation/real_joint_local_distal_v174.json"))
+        meta/"artifacts/deployed/20260929_175554_grouped_no_rotation"/
+        "real_joint_local_distal_v174.json"))
     parser.add_argument("--distal-tendon-allocation-checkpoint", default="")
     parser.add_argument("--limits-file", default=str(
         root/"robot-infra/src/automation/config/catheter_limits.yaml"))

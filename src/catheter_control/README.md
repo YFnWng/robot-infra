@@ -554,7 +554,7 @@ apply the same deadzone twice and launch rejects it.
 ```bash
 export ROS_DOMAIN_ID=43
 ros2 launch catheter_control simulation.launch.py \
-  interface_transmission_checkpoint:=/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_interface_transmission_v175.pt \
+  interface_transmission_checkpoint:=/home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_interface_transmission_v175.pt \
   backlash_compensation_enabled:=true \
   takeup_transaction_enabled:=true \
   mppi_variant:=grouped \

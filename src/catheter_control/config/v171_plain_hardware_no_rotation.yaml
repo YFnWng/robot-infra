@@ -5,7 +5,7 @@ catheter_mppi:
     # artifact, backlash belief, feedforward compensation, or atomic take-up
     # transaction participates.
     marker_estimator: ukf
-    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_joint_local_distal_v174.json
     interface_transmission_checkpoint: ""
     adaptation_enabled: false
 

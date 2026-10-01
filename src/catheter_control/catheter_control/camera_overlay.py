@@ -224,7 +224,8 @@ class CameraOverlayNode(Node):
             self.get_parameter("v171_distal_checkpoint").value)
         if not checkpoint:
             checkpoint = str(
-                Path(meta_root)/"checkpoints"/
+                Path(meta_root)/"artifacts"/"deployed"/
+                "20260929_175554_grouped_no_rotation"/
                 "real_distal_first_order_v171_multistep_map_em.pt")
         registration_file = str(
             self.get_parameter("registration_file").value)

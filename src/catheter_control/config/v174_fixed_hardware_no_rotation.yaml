@@ -5,7 +5,7 @@ catheter_mppi:
     # match causal_v2_fixed_hardware.yaml so Jacobian selection is the only
     # intended model difference.
     marker_estimator: ukf
-    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json
+    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_joint_local_distal_v174.json
     adaptation_enabled: false
     # Rotation-disabled two-DOF isolation. Joint order is insertion, rotation,
     # tendon, sheath insertion/rotation/bend.

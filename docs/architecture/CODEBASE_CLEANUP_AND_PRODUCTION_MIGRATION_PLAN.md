@@ -323,6 +323,11 @@ Tighten cache/generated-file ignores without hiding manifests; compare `.orig`
 backups before removal; relocate artifacts after checksum verification; create
 one authoritative deployment baseline; add a legacy index; document ownership.
 
+Status: complete. The authoritative baseline, ownership map, legacy index,
+recoverable `.orig` archive, canonical deployed-artifact bundle, and
+fail-closed compatibility aliases are in place. Maintained runtime consumers
+use canonical paths; historical scripts may use manifest-declared aliases.
+
 ### Phase 2 -- configuration normalization
 
 Separate controller, platform, performance, experiment, and RViz settings; add
@@ -397,4 +402,5 @@ callback scheduling, QoS, ROS interface semantics, or manager/firmware safety.
 - [x] Establish and tag the reproducible pre-cleanup baseline as
   `catheter-stack-pre-cleanup-20261001` (see the
   [clean-source gate report](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)).
-- [ ] Begin artifact relocation only after checksum and consumer review.
+- [x] Relocate qualified artifacts after checksum and consumer review; retain
+  manifest-declared compatibility aliases.

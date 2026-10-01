@@ -126,10 +126,13 @@ def _setup(context, *_args, **_kwargs):
 
     meta_root = value("cr_meta_lnn_root")
     distal_checkpoint = value("v171_distal_checkpoint") or os.path.join(
-        meta_root, "checkpoints",
+        meta_root, "artifacts", "deployed",
+        "20260929_175554_grouped_no_rotation",
         "real_distal_first_order_v171_multistep_map_em.pt")
     jacobian_json = value("jacobian_initialization_json") or os.path.join(
-        meta_root, "evaluation", "real_joint_local_distal_v174.json")
+        meta_root, "artifacts", "deployed",
+        "20260929_175554_grouped_no_rotation",
+        "real_joint_local_distal_v174.json")
     interface_transmission_checkpoint = value(
         "interface_transmission_checkpoint")
     distal_tendon_allocation_checkpoint = value(
