@@ -230,12 +230,37 @@ engagement/gain tests passed. Four production reproduction wrappers, eight
 engagement/gain CLIs, and two wrapper syntax checks passed. No checkpoint,
 evaluation array, image, video, or hardware action was committed or run.
 
-### M4 — research history preservation
+### M4 — research history preservation (complete)
 
-The remaining untracked source and plans need explicit classification. Preserve
-valuable historical pipelines on a dedicated pre-cleanup research-history
-branch or tag before deleting them from the active branch. This requires user
-review because the current tracked modifications include unrelated model work.
+The remaining research source and plans are preserved in `cr_meta_lnn` at:
+
+```text
+archive/pre-cleanup-research-20261001
+e6a5c9bf3ed64391d282632b7bd66a4b4a49dcff
+```
+
+The archive commit is a child of the active-branch M3 closure
+`5b866d15dabc3c9d490e26a10707846969104187`. It captures 392 previously
+untracked source/config/test/document files and four modified tracked research
+files. A branch-only `RESEARCH_HISTORY_ARCHIVE.md` records the boundary.
+
+The archive was built with an alternate Git index. No branch checkout,
+worktree rewrite, deletion, checkpoint copy, or hardware action occurred.
+Generated and ignored checkpoints, datasets, caches, evaluation arrays,
+figures, and videos were excluded, as were
+`tests/test_v171_deployment.py.orig` and the live `.gitignore` hygiene edit.
+
+Validation of the exact archive snapshot found:
+
+- all 372 Python files compiled;
+- all 324 shell scripts passed `bash -n`;
+- the two focused modified-model test modules reported 64 passed and one
+  pre-existing CUDA device-placement failure in
+  `test_window_latents_follow_trajectory_device`.
+
+The active branch still contains the uncommitted research files. Removal from
+that branch remains a separately reviewed cleanup operation; M4 only guarantees
+recoverability first.
 
 ### M5 — artifact manifests and hygiene
 
