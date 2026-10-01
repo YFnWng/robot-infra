@@ -1,0 +1,31 @@
+# One causal timing row emitted when the MPPI planner finishes a cycle.
+# Header stamp is the trace publication time. Source timestamps remain in ns.
+std_msgs/Header header
+int64 estimator_state_timestamp_ns
+int64 accepted_marker_timestamp_ns
+float64 marker_source_age_ms
+float64 accepted_marker_commit_age_ms
+float64 position_commit_age_ms
+float64 encoder_commit_age_ms
+float64 planner_snapshot_age_ms
+float64 planner_callback_elapsed_ms
+float64 planner_elapsed_ms
+float64 sample_projection_ms
+float64 rollout_ms
+float64 cost_weighting_ms
+float64 update_projection_ms
+float64 estimator_callback_latest_ms
+float64 estimator_timer_lateness_latest_ms
+float64 marker_pending_age_latest_ms
+float64 marker_owner_duration_latest_ms
+float64 marker_rewind_ms
+float64 marker_correction_ms
+float64 marker_replay_ms
+float64 marker_total_ms
+uint64 accepted_observations
+uint32 consecutive_rejections
+uint32 consecutive_deadline_misses
+bool plan_valid
+string plan_reason
+string controller_state
+string controller_reason

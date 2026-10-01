@@ -1,0 +1,24 @@
+# Absolute tip waypoints in header.frame_id. Lengths of waypoints and
+# waypoint_timeouts_s must match. Each waypoint advances when reached or when
+# its own timeout expires.
+std_msgs/Header header
+geometry_msgs/Point[] waypoints
+float64[] waypoint_timeouts_s
+float64 tolerance_mm
+float64 settle_time_s
+bool auto_arm
+---
+# True when every scheduled waypoint was processed. A waypoint timeout is an
+# intentional transition and is reported separately below.
+bool success
+string message
+uint32 reached_waypoints
+uint32 timed_out_waypoints
+float64 final_error_mm
+---
+uint32 waypoint_index
+uint32 waypoint_count
+float64 elapsed_s
+float64 remaining_s
+float64 tracking_error_mm
+bool within_tolerance

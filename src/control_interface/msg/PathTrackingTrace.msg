@@ -1,0 +1,18 @@
+# Per-update evidence for continuous catheter tip-path tracking.
+std_msgs/Header header
+string path_id
+uint64 sequence
+float64 progress_m
+float64 total_length_m
+float64 nominal_speed_m_s
+float64 governed_speed_scale
+geometry_msgs/Point reference_point
+geometry_msgs/Vector3 tangent
+geometry_msgs/Point measured_tip
+geometry_msgs/Point closest_path_point
+float64 reference_error_mm
+float64 closest_path_error_mm
+float64 along_track_error_mm
+float64 cross_track_error_mm
+string governor_state
+string controller_state

@@ -1,0 +1,34 @@
+# Continuously track an absolute Cartesian tip path in header.frame_id.
+std_msgs/Header header
+geometry_msgs/Point[] path_knots
+float64 nominal_speed_mm_s
+float64 total_timeout_s
+float64 final_tolerance_mm
+float64 final_settle_time_s
+float64 soft_error_mm
+float64 pause_error_mm
+float64 resume_error_mm
+float64 hard_error_mm
+bool auto_arm
+---
+bool success
+string message
+float64 final_error_mm
+float64 rms_closest_path_error_mm
+float64 p95_closest_path_error_mm
+float64 completed_arc_length_m
+---
+string path_id
+float64 progress
+float64 arc_length_m
+float64 total_length_m
+float64 elapsed_s
+float64 phase_lag_s
+geometry_msgs/Point reference_point
+geometry_msgs/Vector3 tangent
+float64 reference_error_mm
+float64 closest_path_error_mm
+float64 along_track_error_mm
+float64 cross_track_error_mm
+string governor_state
+string controller_state

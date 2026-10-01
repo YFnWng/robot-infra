@@ -13,6 +13,7 @@ find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 
 find_package(rosidl_default_generators REQUIRED)
 
@@ -23,8 +24,17 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ManagerEvent.msg"
   "msg/DeviceStream.msg"
   "msg/DeviceEvent.msg"
+  "msg/MppiResponseTrace.msg"
+  "msg/ControlCycleTiming.msg"
+  "msg/CausalExperimentTrace.msg"
+  "msg/EstimatorStateTrace.msg"
+  "msg/TipReferenceHorizon.msg"
+  "msg/PathTrackingTrace.msg"
+  "action/TrackTipTrajectory.action"
+  "action/TrackTipPath.action"
   "srv/DeviceCmd.srv"
-  DEPENDENCIES std_msgs geometry_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
+  "srv/GenerateSparseTargets.srv"
+  DEPENDENCIES std_msgs geometry_msgs action_msgs
 )
 
 # Export runtime dependency for generated Python/C++ interfaces

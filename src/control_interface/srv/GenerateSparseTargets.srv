@@ -1,0 +1,16 @@
+# Flattened N x 3 post-engagement logical displacements in controller units:
+# insertion [mm], rotation [deg], tendon [mm]. Rotation must be zero for the
+# no-rotation isolation experiment.
+float64[] logical_displacements
+uint32 rollout_steps
+float64[6] minimum_endpoint_reserve
+float64 minimum_tip_displacement_mm
+float64 maximum_tip_displacement_mm
+---
+bool success
+string message
+geometry_msgs/Point[] targets
+# Flattened N x 6 realized logical displacement and endpoint position after
+# hardware projection and estimated response-free take-up travel.
+float64[] realized_logical_displacements
+float64[] endpoint_joint_positions
