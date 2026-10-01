@@ -11,6 +11,7 @@ whole-file sweep.
 | --- | --- | --- |
 | R1 — ROS control interfaces | complete: `f3640b6` | isolated index snapshot built; XML/CMake lint passed; package-wide Python lint still reports pre-existing manager/serial style debt |
 | R2 + R3 — controller package, launch and profiles | complete: `ed7d78c` | isolated index snapshot built both ROS packages; 302 tests passed; 15 installed console entry points resolved |
+| R4 — perception and experiment automation | complete: `72335b4`, `438f379` | marker slice: 4 tests passed; experiment slice: 75 tests passed; both exact index snapshots built all three dependent ROS packages |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
@@ -86,7 +87,7 @@ Its site-packages must precede system Python packages when adding
 NumPy shadows the supported NumPy 2.x environment. Pytest plugin autoload was
 disabled for this unit-suite run. No controller or device was started.
 
-### R4 — perception and experiment automation
+### R4 — perception and experiment automation (complete)
 
 Scope independently reviewable groups:
 
@@ -98,6 +99,19 @@ Scope independently reviewable groups:
 Do not combine marker-tracking behavior changes with experiment generators.
 The eventual package split happens only after these responsibilities have
 separate tests.
+
+The work was preserved as two commits. `72335b4` contains synchronized
+multi-rig marker tracking, partial-view fusion, bounded diagnostic preview and
+recording support, the marker-overlay launch, documentation, and its focused
+tests. `438f379` contains causal experiment generation and collection,
+runtime-identity/session-integrity utilities, stationary analysis, launch, and
+matching tests. Shared package metadata was split so the first commit did not
+install entry points whose modules were absent.
+
+Both commits were verified from exported Git index snapshots rather than the
+dirty working tree. Each snapshot built `control_interface`,
+`catheter_control`, and `automation` under ROS Humble. No camera, controller,
+manager, or device process was started.
 
 ### R5 — manager and serial safety changes
 
