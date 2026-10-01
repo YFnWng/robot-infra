@@ -4,6 +4,8 @@
 #include "driver_ack.h"
 #include "driver_ack_retry.h"
 #include "encoder_integrity_guard.h"
+#include "encoder_recovery_config.h"
+#include "motion_watchdog.h"
 #include <cmath>
 #include "position_move_tracker.h"
 #include "stall_detector.h"
@@ -72,6 +74,7 @@ constexpr uint8_t CALIBRATION = 'K';
 constexpr uint8_t LIMIT = 'L';
 constexpr uint8_t STALL = 'T';
 constexpr uint8_t POSITION_STATUS = 'G';
+constexpr uint8_t FIRMWARE_STATUS = 'B';
 constexpr uint8_t POSITION_COMPLETE = 1;
 constexpr uint8_t POSITION_TIMED_OUT = 2;
 constexpr uint8_t POSITION_REJECTED = 3;
@@ -158,13 +161,29 @@ PositionMoveTracker positionMoveTracker;
 uint16_t motionFaultSequence = 0;
 bool encoderIntegrityLatched = false;
 uint32_t lastEncoderReadMs = 0;
+// This frame advances during commanded motion and a short post-stop settling
+// interval, then remains fixed for the entire disabled interval. RESET_FAULT
+// restores this frame rather than the latest rolling telemetry sample.
+int32_t encoderRestoreCounts[numHWSerials] = {0};
+uint32_t encoderStationarySettleUntilMs = 0;
 
 // Timing
 constexpr uint8_t controlCycle = 10; // ms
 elapsedMillis sinceLastCycle;
-elapsedMillis sinceLastPCMsg;
-constexpr uint32_t PC_SILENCE_MS = 10000;
-bool watchdog_engaged = true;
+elapsedMillis sinceLastFirmwareStatus;
+constexpr uint32_t MOTION_COMMAND_TIMEOUT_MS = 250;
+MotionWatchdog motionWatchdog(MOTION_COMMAND_TIMEOUT_MS);
+bool motionWatchdogExpiredLatched = false;
+constexpr uint32_t FIRMWARE_STATUS_PERIOD_MS = 500;
+constexpr uint8_t FIRMWARE_STATUS_SCHEMA = 1;
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+constexpr char FIRMWARE_BUILD_ID[] =
+    "tkctl:recovery-exact-frame-v1|" __DATE__ "T" __TIME__;
+#else
+constexpr char FIRMWARE_BUILD_ID[] =
+    "tkctl:boot-v1|" __DATE__ "T" __TIME__;
+#endif
+bool preconnectLedState = false;
 constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next command to register
 constexpr uint32_t MOTOR_ACK_TIMEOUT_MS = 50;
 constexpr uint8_t MOTOR_ACK_ATTEMPTS = 3;
@@ -181,9 +200,17 @@ constexpr uint32_t ENCODER_MAX_COUNTS_PER_SECOND =
     static_cast<uint32_t>(maxRPM * 360.0f / (60.0f * EncRes) + 0.5f);
 constexpr uint8_t ENCODER_SPEED_MARGIN_MULTIPLIER = 2;
 constexpr uint16_t ENCODER_COUNT_MARGIN = 100;
+constexpr uint16_t ENCODER_STATIONARY_CUMULATIVE_MARGIN = 16;
+constexpr uint32_t ENCODER_POST_MOTION_SETTLE_MS = 250;
 bool pc_connected = false;
 
 void handleDriverDiagnosticCommand();
+void reportFirmwareStatus();
+void enforceImmediateMotionStop();
+void enforceMotionWatchdog();
+void writeEncoderHardwareCounts(const int32_t counts[numHWSerials]);
+void updateEncoderDerivedState(bool resetVelocity);
+bool anyMotorAxisEnabled();
 
 void setup() {
   // put your setup code here, to run once:
@@ -194,6 +221,15 @@ void setup() {
   memset(newHWMsg, 0, sizeof(newHWMsg));
   memset(EncCounts, 0, sizeof(EncCounts));
   memset(RawEncCounts, 0, sizeof(RawEncCounts));
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+  static_assert(
+      EncoderRecoveryConfig::kAxisCount == numHWSerials,
+      "recovery encoder frame must match the hardware axis count");
+  memcpy(EncCounts, EncoderRecoveryConfig::kHistoricalCounts,
+         sizeof(EncCounts));
+  memcpy(RawEncCounts, EncCounts, sizeof(RawEncCounts));
+#endif
+  memcpy(encoderRestoreCounts, EncCounts, sizeof(encoderRestoreCounts));
   memset(targetDeg, 0, sizeof(targetDeg));
   memset(currentPos, 0.0f, sizeof(currentPos));
   memset(previousPos, 0.0f, sizeof(currentPos));
@@ -201,6 +237,7 @@ void setup() {
   memset(currentRPM, 0, sizeof(currentRPM));
   memset(targetDir, '1', sizeof(targetDir));
   memset(currentDir, '1', sizeof(currentDir));
+  updateEncoderDerivedState(true);
 
   // Initialize fault state before any motor-driver I/O. Startup deliberately
   // does not wait for or classify driver acknowledgements: drivers may still
@@ -232,6 +269,10 @@ void setup() {
     // HWEncoders[i]->EncConfig.positionInitialValue = EncCounts[i];
     HWEncoders[i]->init();
   }
+  // Production boots at the installed physical zero. The temporary recovery
+  // image instead applies only its compiled, incident-specific historical
+  // frame; no runtime input can alter this boot seed.
+  writeEncoderHardwareCounts(EncCounts);
   lastEncoderReadMs = millis();
 
   for (uint8_t i = 0; i < 3; i++) {
@@ -242,8 +283,25 @@ void setup() {
 
 void loop() {
     // Asychronous I/O, atomic message processing
-    recvPCSerial();
-    procPCBytes();
+    // Drain complete host frames before applying a control cycle. If firmware
+    // was briefly occupied by a driver transaction, only the newest queued
+    // VEL/POS target can reach sendMotorCmds(); intermediate targets are parsed
+    // but never actuated.
+    do {
+      recvPCSerial();
+      procPCBytes();
+    } while (Serial.available() > 0);
+    // Advertise main-loop liveness before CONNECT and without relying on any
+    // motor-driver response. The host deliberately does not treat this
+    // one-way heartbeat as bidirectional command readiness.
+    if (!pc_connected
+        && sinceLastFirmwareStatus >= FIRMWARE_STATUS_PERIOD_MS) {
+      sinceLastFirmwareStatus = 0;
+      preconnectLedState = !preconnectLedState;
+      digitalWrite(LED_BUILTIN, preconnectLedState ? HIGH : LOW);
+      reportFirmwareStatus();
+    }
+    enforceMotionWatchdog();
     recvHWSerials();
     // procHWBytes();
     
@@ -258,24 +316,7 @@ void loop() {
       sendMotorCmds();
     }
 
-    // watchdog
-    if (sinceLastPCMsg > PC_SILENCE_MS && watchdog_engaged) {
-      for (uint8_t i = 0; i < numHWSerials; i++) {
-        stopMotorAxis(i, true);
-        targetRPM[i] = 0;
-        targetVel[i] = 0.0f;
-        motionMonitors[i].setCommand(
-            millis(), 0, targetDir[i], 0.0f);
-        stallRetryBudgets[i].reset();
-        stallRetryBlockedUntilMs[i] = 0;
-      }
-      newJointVelCmd = false;
-      newJointPosCmd = false;
-      positionMoveTracker.cancel();
-      positionCorrectionMask = 0;
-      requestedPositionValid = false;
-      watchdog_engaged = false;
-    }
+    enforceMotionWatchdog();
 }
 
 void recvHWSerials() {
@@ -334,8 +375,6 @@ void recvPCSerial() {
 
           if (rb == PCEndMarker) {
             newPCMsg = true;
-            sinceLastPCMsg = 0;
-            watchdog_engaged = true;
           } else if (rb == PCStartMarker) {
             // Malformed frame; immediately resync on this new start marker.
             expectLenByte = true;
@@ -391,8 +430,6 @@ void recvPCSerial() {
 //           // receivedPCBytes[ndx] = '\0'; // terminate the string
 //           PCBytes_len = ndx;
 //           newPCMsg = true;
-//           sinceLastPCMsg = 0;
-//           watchdog_engaged = true;
 //           recvInProgress = false;
 //           ndx = 0;
 //         }
@@ -475,8 +512,37 @@ void procPCBytes() {
           cancelPositionMove(true);
           newJointPosCmd = false;
           memcpy(targetVel, receivedPCBytes + 1, 24); // float size 4
+          bool finiteVelocity = true;
+          for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+            finiteVelocity = finiteVelocity && std::isfinite(targetVel[axis]);
+          }
+          if (!finiteVelocity) {
+            enforceImmediateMotionStop();
+            break;
+          }
           targetVel[0] -= targetVel[2]; // decouple lm and bend for catheter
           targetVel[5] += targetVel[4]; // decouple rot and bend for sheath
+          finiteVelocity = std::isfinite(targetVel[0]) &&
+                           std::isfinite(targetVel[5]);
+          if (!finiteVelocity) {
+            enforceImmediateMotionStop();
+            break;
+          }
+          bool anyVelocity = false;
+          for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+            anyVelocity = anyVelocity || targetVel[axis] != 0.0f;
+          }
+          if (!anyVelocity) {
+            enforceImmediateMotionStop();
+            break;
+          }
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+          // The temporary image may only execute the absolute all-zero home
+          // transaction. Reject every nonzero velocity command so it cannot be
+          // used as a general control firmware.
+          enforceImmediateMotionStop();
+          break;
+#endif
           newJointVelCmd = true;
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
             if (!isVelCmdValid(axis)) {
@@ -485,6 +551,8 @@ void procPCBytes() {
             }
           }
           if (newJointVelCmd) {
+            motionWatchdogExpiredLatched = false;
+            motionWatchdog.refresh(millis());
             for (uint8_t axis = 0; axis < numHWSerials; axis++) {
               temp = targetVel[axis]/jointVRate[axis];
               targetDir[axis] = (temp >= 0.0f) ? '1' : '0';
@@ -495,9 +563,7 @@ void procPCBytes() {
           if (!newJointVelCmd) {
             // Never leave an older valid command running after rejecting a
             // newer vector.
-            for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-              stopMotorAxis(axis, true);
-            }
+            enforceImmediateMotionStop();
           }
           break;
         }
@@ -511,14 +577,46 @@ void procPCBytes() {
           }
           newJointVelCmd = false;
           memcpy(targetPos, receivedPCBytes + 1, 24); // float size 4
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+          uint8_t recoveryRejectedMask = 0;
+          for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+            if (!std::isfinite(targetPos[axis]) || targetPos[axis] != 0.0f) {
+              recoveryRejectedMask |= static_cast<uint8_t>(1U << axis);
+            }
+          }
+          if (recoveryRejectedMask != 0) {
+            reportPositionStatus(POSITION_REJECTED, recoveryRejectedMask);
+            enforceImmediateMotionStop();
+            break;
+          }
+#endif
           targetPos[0] -= targetPos[2]; // decouple lm and bend for catheter
           targetPos[5] += targetPos[4]; // decouple rot and bend for sheath
           float positionSpeed[numHWSerials];
           memcpy(positionSpeed, receivedPCBytes + 1 + 24, 24);
 
+          bool finitePosition = true;
+          for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+            finitePosition = finitePosition && std::isfinite(targetPos[axis]) &&
+                             std::isfinite(positionSpeed[axis]);
+          }
+          if (!finitePosition) {
+            reportPositionStatus(POSITION_REJECTED, 0x3F);
+            enforceImmediateMotionStop();
+            break;
+          }
           // Repeated absolute targets are heartbeats. Do not stop and rebuild
           // the driver's relative move on every ROS control cycle.
-          if (requestedPositionValid && positionTargetsMatch(targetPos)) break;
+          if (requestedPositionValid && positionTargetsMatch(targetPos)) {
+            // Once the transaction has reached a terminal state there is no
+            // remaining motion authority to keep alive. A repeated completed
+            // target is a no-op, not a reason to re-arm the watchdog.
+            if (positionMoveTracker.running()) {
+              motionWatchdogExpiredLatched = false;
+              motionWatchdog.refresh(millis());
+            }
+            break;
+          }
           cancelPositionMove(true);
           memcpy(requestedPosition, targetPos, sizeof(requestedPosition));
           requestedPositionValid = true;
@@ -552,6 +650,10 @@ void procPCBytes() {
             newJointPosCmd = false;
             requestedPositionValid = false;
             reportPositionStatus(POSITION_REJECTED, rejectedMask);
+            enforceImmediateMotionStop();
+          } else {
+            motionWatchdogExpiredLatched = false;
+            motionWatchdog.refresh(millis());
           }
           break;
         }
@@ -577,20 +679,12 @@ void procPCBytes() {
           break;
         }
 
-        case ZERO: {// 'Z', set all encoders to 0
-          const int32_t zeros[numHWSerials] = { 0 };
-          writeEncoderHardwareCounts(zeros);
-          for (uint8_t axis = 0; axis < numHWSerials; axis++) {
-            EncCounts[axis] = 0;
-            RawEncCounts[axis] = 0;
-            currentPos[axis] = 0.0f;
-            previousPos[axis] = 0.0f;
-            currentVel[axis] = 0.0f;
-          }
-          currentCatheterLMPos = 0.0f;
-          currentSheathBendPos = 0.0f;
-          lastEncoderReadMs = millis();
-          sendAckIfPending();
+        case ZERO: {// 'Z', permanently forbidden calibration mutation
+          // Physical encoder zero is the read-only model calibration
+          // reference. Reject this command in firmware as well as in both ROS
+          // safety relays so a raw serial client cannot bypass the invariant.
+          enforceImmediateMotionStop();
+          sendAckIfPending("ERR_ZERO_FORBIDDEN");
           break;
         }
 
@@ -609,6 +703,8 @@ void procPCBytes() {
           }
           newJointVelCmd = false;
           newJointPosCmd = false;
+          motionWatchdog.disarm();
+          motionWatchdogExpiredLatched = false;
           sendAckIfPending();
           break;
         }
@@ -627,11 +723,15 @@ void procPCBytes() {
           }
           const bool restoredEncoderReference = encoderIntegrityLatched;
           if (restoredEncoderReference) {
-            // The invalid raw frame was never accepted. Restore every hardware
-            // counter to the retained atomic frame before allowing new data.
-            writeEncoderHardwareCounts(EncCounts);
-            memcpy(RawEncCounts, EncCounts, sizeof(EncCounts));
+            // Restore the fixed qualified frame. During a disabled interval it
+            // never advances with telemetry, so cumulative driver-power pulses
+            // cannot corrupt the recovery reference.
+            writeEncoderHardwareCounts(encoderRestoreCounts);
+            memcpy(EncCounts, encoderRestoreCounts, sizeof(EncCounts));
+            memcpy(RawEncCounts, encoderRestoreCounts, sizeof(RawEncCounts));
+            updateEncoderDerivedState(true);
             lastEncoderReadMs = millis();
+            encoderStationarySettleUntilMs = 0;
             encoderIntegrityLatched = false;
           }
           for (uint8_t axis = 0; axis < numHWSerials; axis++) {
@@ -668,6 +768,12 @@ void procPCBytes() {
         // }
 
         case DEBUG: {// 'D', send and read raw command
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+          // Raw driver forwarding is incompatible with a single-purpose
+          // recovery image.
+          sendAckIfPending("ERR_RECOVERY_BUILD");
+          break;
+#endif
           // digitalWrite(LED_BUILTIN, HIGH);
           // if (PCBytes_len < 1 + REQ_ID_LEN) return;
 
@@ -693,6 +799,7 @@ void procPCBytes() {
           // safe and always (re-)announce the current safety state.
           pc_connected = true;
           digitalWrite(LED_BUILTIN, HIGH);
+          reportFirmwareStatus();
           sendAckIfPending();
           reportLimitStates();
           reportFaultStatusEvents();
@@ -713,6 +820,36 @@ void procPCBytes() {
     // }
   }
   // PCBytes_len = 0;
+}
+
+void reportFirmwareStatus() {
+  // Body schema v1: schema(u8), flags(u8), uptime_ms(u32 LE), build-id(ASCII).
+  // Flags: bit 0 CONNECT processed; bit 1 live motion authority; bit 2 a
+  // watchdog stop occurred since the last valid motion command or explicit STOP.
+  constexpr size_t buildLength = sizeof(FIRMWARE_BUILD_ID) - 1;
+  constexpr size_t payloadLength = 1 + 1 + 1 + 4 + buildLength;
+  static_assert(payloadLength <= UINT8_MAX,
+                "firmware status payload exceeds one-byte framing length");
+  const size_t frameLength = payloadLength + 3;
+  const int available = Serial.availableForWrite();
+  if (available < 0 || static_cast<size_t>(available) < frameLength) return;
+
+  uint8_t* p = sendingPCBytes;
+  *p++ = PCStartMarker;
+  *p++ = static_cast<uint8_t>(payloadLength);
+  *p++ = FIRMWARE_STATUS;
+  *p++ = FIRMWARE_STATUS_SCHEMA;
+  uint8_t flags = pc_connected ? 1U : 0U;
+  if (motionWatchdog.armed()) flags |= 2U;
+  if (motionWatchdogExpiredLatched) flags |= 4U;
+  *p++ = flags;
+  const uint32_t uptime = millis();
+  memcpy(p, &uptime, sizeof(uptime));
+  p += sizeof(uptime);
+  memcpy(p, FIRMWARE_BUILD_ID, buildLength);
+  p += buildLength;
+  *p++ = PCEndMarker;
+  Serial.write(sendingPCBytes, static_cast<size_t>(p - sendingPCBytes));
 }
 
 static inline bool isVelCmdValid(uint8_t axis) {
@@ -798,6 +935,26 @@ void writeEncoderHardwareCounts(const int32_t counts[numHWSerials]) {
   Enc5.write(static_cast<uint32_t>(counts[5]));
 }
 
+bool anyMotorAxisEnabled() {
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    if (motorEnabled[axis]) return true;
+  }
+  return false;
+}
+
+void updateEncoderDerivedState(bool resetVelocity) {
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    const float nextPosition = EncCounts[axis] * EncRes * jointPRate[axis];
+    if (resetVelocity) {
+      previousPos[axis] = nextPosition;
+      currentVel[axis] = 0.0f;
+    }
+    currentPos[axis] = nextPosition;
+  }
+  currentCatheterLMPos = currentPos[0] + currentPos[2];
+  currentSheathBendPos = currentPos[5] - currentPos[4];
+}
+
 void readRawEncoderCounts(int32_t counts[numHWSerials]) {
   counts[0] = Enc0.read();
   counts[1] = Enc1.read();
@@ -878,11 +1035,20 @@ bool readEncoders() {
   const uint32_t elapsed_ms = now - lastEncoderReadMs;
 
   if (!encoderIntegrityLatched) {
-    const EncoderIntegrityGuard::Result result =
-        EncoderIntegrityGuard::validate(
-            RawEncCounts, EncCounts, elapsed_ms,
-            ENCODER_MAX_COUNTS_PER_SECOND,
-            ENCODER_SPEED_MARGIN_MULTIPLIER, ENCODER_COUNT_MARGIN);
+    const bool motionActive = anyMotorAxisEnabled();
+    const bool postMotionSettling =
+        encoderStationarySettleUntilMs != 0
+        && static_cast<int32_t>(
+               now - encoderStationarySettleUntilMs) < 0;
+    const bool rollingReference = motionActive || postMotionSettling;
+    const EncoderIntegrityGuard::Result result = rollingReference
+        ? EncoderIntegrityGuard::validate(
+              RawEncCounts, EncCounts, elapsed_ms,
+              ENCODER_MAX_COUNTS_PER_SECOND,
+              ENCODER_SPEED_MARGIN_MULTIPLIER, ENCODER_COUNT_MARGIN)
+        : EncoderIntegrityGuard::validateWithAllowedDelta(
+              RawEncCounts, encoderRestoreCounts,
+              ENCODER_STATIONARY_CUMULATIVE_MARGIN);
     if (!result.valid) {
       latchEncoderIntegrityFault(result, elapsed_ms);
       sendEncoderFeedback();
@@ -899,12 +1065,21 @@ bool readEncoders() {
     }
     currentCatheterLMPos = currentPos[0] + currentPos[2];
     currentSheathBendPos = currentPos[5] - currentPos[4];
+    if (motionActive) {
+      // Continue accepting physically plausible commanded motion, and leave a
+      // bounded interval for driver/mechanism settling after the last enabled
+      // sample. Once that interval expires this frame becomes fixed.
+      memcpy(encoderRestoreCounts, EncCounts, sizeof(encoderRestoreCounts));
+      encoderStationarySettleUntilMs = now + ENCODER_POST_MOTION_SETTLE_MS;
+    } else if (postMotionSettling) {
+      memcpy(encoderRestoreCounts, EncCounts, sizeof(encoderRestoreCounts));
+    }
     lastEncoderReadMs = now;
   }
 
-  // While latched, continue publishing the retained last-valid frame. The raw
-  // hardware values are not allowed to alter position until RESET_FAULT
-  // restores the counters to that retained frame.
+  // While latched, continue publishing the last accepted telemetry frame. The
+  // raw hardware values are not allowed to alter position until RESET_FAULT
+  // restores the separate fixed qualified frame.
   sendEncoderFeedback();
   return !encoderIntegrityLatched;
 }
@@ -970,6 +1145,17 @@ void checkLimitSwitches() {
     for (uint8_t axis = 0; axis < numHWSerials; axis++) {
       stopMotorAxis(axis, true);
     }
+    // A bending-limit transition is a deliberate global stop, not evidence
+    // that the other axes failed to make progress.  If an atomic position
+    // transaction is active, immediately schedule a residual move for only
+    // those active axes still outside their encoder tolerance.  The normal
+    // correction path below revalidates every direction against the updated
+    // limit state before enabling a driver; an invalid residual therefore
+    // still rejects the whole transaction fail-closed.  Velocity mode keeps
+    // its existing stop-until-the-next-fresh-heartbeat behavior.
+    positionCorrectionMask |=
+        positionMoveTracker.resumeMaskAfterExternalStop(
+            millis(), currentPos);
     Serial.write(&PCStartMarker, 1);
     Serial.write(6);
     Serial.write(sendingPCBytes, 6);
@@ -1097,8 +1283,10 @@ void updatePositionMove() {
     motionMonitors[axis].setCommand(millis(), 0, targetDir[axis], 0.0f);
   }
   if (update.status == PositionMoveTracker::COMPLETE) {
+    motionWatchdog.disarm();
     reportPositionStatus(POSITION_COMPLETE, update.command_mask);
   } else if (update.status == PositionMoveTracker::TIMED_OUT) {
+    motionWatchdog.disarm();
     reportPositionStatus(POSITION_TIMED_OUT, update.command_mask);
   }
 }
@@ -1295,10 +1483,16 @@ static void recoverMotorUart(uint8_t axis) {
 
 static DriverAck::Result waitForMotorAck(uint8_t axis) {
   DriverAck::Result result;
+  const bool requiresMotionAuthority = motionWatchdog.armed();
   const uint32_t start = millis();
   bool inFrame = false;
   bool overflow = false;
   while (millis() - start < MOTOR_ACK_TIMEOUT_MS) {
+    if (motionWatchdog.expired(millis())) {
+      enforceImmediateMotionStop();
+      result.failure = DriverAck::TIMEOUT;
+      return result;
+    }
     while (HWSerials[axis]->available() > 0) {
       const uint8_t value = HWSerials[axis]->read();
       if (!inFrame) {
@@ -1308,6 +1502,10 @@ static DriverAck::Result waitForMotorAck(uint8_t axis) {
           result.response_length = 1;
         }
       } else if (value == endMarker) {
+        if (requiresMotionAuthority && !motionWatchdog.armed()) {
+          result.failure = DriverAck::TIMEOUT;
+          return result;
+        }
         result.failure = overflow
             ? DriverAck::RESPONSE_OVERFLOW
             : DriverAck::classify(
@@ -1331,9 +1529,14 @@ static bool writeMotorCommandWithAck(
   DriverAck::Result best;
   DriverAck::Result current;
   uint8_t attempts = 0;
+  const bool requiresMotionAuthority = motionWatchdog.armed();
   const bool success = DriverAckRetry::run(
       MOTOR_ACK_ATTEMPTS,
       [&]() {
+        if (requiresMotionAuthority && !motionWatchdog.armed()) {
+          current.failure = DriverAck::TIMEOUT;
+          return false;
+        }
         drainMotorResponses(axis);
         writeMotorCommand(axis, command, length);
         current = waitForMotorAck(axis);
@@ -1373,6 +1576,41 @@ static inline void stopMotorAxis(uint8_t axis, bool force) {
   // Reassert direction before this motor is enabled again. This prevents the
   // firmware cache from surviving a stall, watchdog stop, or driver power cycle.
   directionValid[axis] = false;
+}
+
+void enforceImmediateMotionStop() {
+  // Put O0 on every independent driver UART before doing any potentially
+  // blocking acknowledgement work. This is the firmware's final stop layer.
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    writeMotorCommandNoDelay(axis, "$O0\n", 4);
+  }
+  const uint32_t now = millis();
+  for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+    motorEnabled[axis] = false;
+    speedValid[axis] = false;
+    directionValid[axis] = false;
+    currentRPM[axis] = 0;
+    targetRPM[axis] = 0;
+    targetVel[axis] = 0.0f;
+    motionMonitors[axis].setCommand(now, 0, targetDir[axis], 0.0f);
+    stallRetryBudgets[axis].reset();
+    stallRetryBlockedUntilMs[axis] = 0;
+  }
+  newJointVelCmd = false;
+  newJointPosCmd = false;
+  newTargetVelCmd = false;
+  positionMoveTracker.cancel();
+  positionCorrectionMask = 0;
+  requestedPositionValid = false;
+  motionWatchdog.disarm();
+}
+
+void enforceMotionWatchdog() {
+  if (motionWatchdog.expired(millis())) {
+    motionWatchdogExpiredLatched = true;
+    enforceImmediateMotionStop();
+    reportFirmwareStatus();
+  }
 }
 
 static bool initializeMotorDriver(uint8_t axis) {
@@ -1502,6 +1740,10 @@ static bool coordinatedEnableMask(uint8_t mask) {
   // before waiting for acknowledgements. Healthy axes therefore start within
   // the short six-command transmit burst rather than one full ACK transaction
   // apart.
+  if (!motionWatchdog.armed() || motionWatchdog.expired(millis())) {
+    enforceMotionWatchdog();
+    return false;
+  }
   for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
     if ((mask & (1U << axis)) != 0) {
       drainMotorResponses(axis);

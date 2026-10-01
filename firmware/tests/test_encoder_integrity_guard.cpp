@@ -60,6 +60,28 @@ void test_signed_extremes_do_not_overflow() {
   assert(result.first_invalid_delta == INT32_MAX);
 }
 
+void test_fixed_baseline_rejects_cumulative_stationary_drift() {
+  const int32_t baseline[6] = {0, -2020, -5, 0, 0, 0};
+  const int32_t first[6] = {0, -2015, 3, 0, 0, 0};
+  const int32_t later[6] = {0, -2003, 12, 0, 0, 0};
+
+  assert(EncoderIntegrityGuard::validateWithAllowedDelta(
+      first, baseline, 16).valid);
+  const auto result = EncoderIntegrityGuard::validateWithAllowedDelta(
+      later, baseline, 16);
+  assert(!result.valid);
+  assert(result.invalid_mask == ((1U << 1) | (1U << 2)));
+}
+
+void test_fixed_baseline_does_not_hide_signed_overflow() {
+  const int32_t baseline[6] = {INT32_MIN, 0, 0, 0, 0, 0};
+  const int32_t candidate[6] = {INT32_MAX, 0, 0, 0, 0, 0};
+  const auto result = EncoderIntegrityGuard::validateWithAllowedDelta(
+      candidate, baseline, 16);
+  assert(!result.valid);
+  assert(result.first_invalid_delta == INT32_MAX);
+}
+
 }  // namespace
 
 int main() {
@@ -68,5 +90,7 @@ int main() {
   test_multiple_bad_axes_are_reported();
   test_elapsed_time_scales_limit_after_blocking_io();
   test_signed_extremes_do_not_overflow();
+  test_fixed_baseline_rejects_cumulative_stationary_drift();
+  test_fixed_baseline_does_not_hide_signed_overflow();
   return 0;
 }

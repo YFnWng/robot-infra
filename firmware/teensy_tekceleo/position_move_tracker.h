@@ -53,6 +53,36 @@ class PositionMoveTracker {
     memset(within_, 0, sizeof(within_));
   }
 
+  // A limit-state transition deliberately stops every motor, including axes
+  // whose requested direction remains valid.  Rebase the progress detector
+  // at that known interruption and return only the active axes that still
+  // require motor motion.  Axes already inside tolerance stay stopped and
+  // must merely satisfy the normal settling interval.  This does not reset
+  // the transaction hard-timeout clock or consume an endpoint-retry budget.
+  uint8_t resumeMaskAfterExternalStop(
+      uint32_t now_ms, const float* position) {
+    if (!running_) return 0;
+    uint8_t resume_mask = 0;
+    for (uint8_t axis = 0; axis < kAxes; ++axis) {
+      const uint8_t bit = static_cast<uint8_t>(1U << axis);
+      if ((active_mask_ & bit) == 0) continue;
+      if (!std::isfinite(position[axis])) continue;
+      const float error = std::fabs(target_[axis] - position[axis]);
+      motion_anchor_[axis] = position[axis];
+      last_motion_ms_[axis] = now_ms;
+      segment_start_error_[axis] = error;
+      if (error <= tolerance_[axis]) {
+        within_[axis] = true;
+        within_since_ms_[axis] = now_ms;
+      } else {
+        within_[axis] = false;
+        within_since_ms_[axis] = 0;
+        resume_mask |= bit;
+      }
+    }
+    return resume_mask;
+  }
+
   Update update(uint32_t now_ms, const float* position, uint32_t settle_ms,
                 uint32_t timeout_ms, uint32_t retry_idle_ms,
                 uint8_t max_retries, float minimum_progress_fraction) {
@@ -84,9 +114,15 @@ class PositionMoveTracker {
         }
         if (now_ms - last_motion_ms_[axis] < retry_idle_ms) continue;
 
-        const float required_progress = std::fmax(
-            tolerance_[axis],
-            segment_start_error_[axis] * minimum_progress_fraction);
+        // A driver position segment can be consumed mostly by mechanical
+        // take-up. In that case the encoder may move by much less than a fixed
+        // fraction of the requested residual even though the mechanism is not
+        // obstructed. Treat one encoder-tolerance of motion as credible
+        // progress and spend one of the bounded correction attempts. Keep the
+        // legacy fraction argument for deployed call-site compatibility, but
+        // do not let move length raise this physical gate.
+        (void)minimum_progress_fraction;
+        const float required_progress = tolerance_[axis];
         const float progress = segment_start_error_[axis] - error;
         if (retry_count_[axis] < max_retries &&
             progress >= required_progress) {

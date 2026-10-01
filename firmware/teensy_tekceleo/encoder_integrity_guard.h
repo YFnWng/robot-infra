@@ -15,6 +15,40 @@ struct Result {
   uint32_t allowed_delta = 0;
 };
 
+template <size_t AxisCount>
+Result validateWithAllowedDelta(
+    const int32_t (&candidate)[AxisCount],
+    const int32_t (&baseline)[AxisCount],
+    uint32_t allowed_delta) {
+  Result result;
+  result.allowed_delta = allowed_delta;
+
+  for (size_t axis = 0; axis < AxisCount; ++axis) {
+    const int64_t signed_delta =
+        static_cast<int64_t>(candidate[axis]) - baseline[axis];
+    const uint64_t magnitude =
+        signed_delta < 0 ? static_cast<uint64_t>(-signed_delta)
+                         : static_cast<uint64_t>(signed_delta);
+    if (magnitude <= allowed_delta) {
+      continue;
+    }
+    result.valid = false;
+    if (axis < 8) {
+      result.invalid_mask |= static_cast<uint8_t>(1U << axis);
+    }
+    if (result.first_invalid_axis == 255) {
+      result.first_invalid_axis = static_cast<uint8_t>(axis);
+      result.first_invalid_delta =
+          signed_delta > INT32_MAX
+              ? INT32_MAX
+              : (signed_delta < INT32_MIN
+                     ? INT32_MIN
+                     : static_cast<int32_t>(signed_delta));
+    }
+  }
+  return result;
+}
+
 inline uint32_t allowedDelta(
     uint32_t elapsed_ms,
     uint32_t maximum_counts_per_second,
@@ -38,35 +72,10 @@ Result validate(
     uint32_t maximum_counts_per_second,
     uint8_t speed_margin_multiplier,
     uint16_t count_margin) {
-  Result result;
-  result.allowed_delta = allowedDelta(
+  const uint32_t allowed_delta = allowedDelta(
       elapsed_ms, maximum_counts_per_second, speed_margin_multiplier,
       count_margin);
-
-  for (size_t axis = 0; axis < AxisCount; ++axis) {
-    const int64_t signed_delta =
-        static_cast<int64_t>(candidate[axis]) - last_valid[axis];
-    const uint64_t magnitude =
-        signed_delta < 0 ? static_cast<uint64_t>(-signed_delta)
-                         : static_cast<uint64_t>(signed_delta);
-    if (magnitude <= result.allowed_delta) {
-      continue;
-    }
-    result.valid = false;
-    if (axis < 8) {
-      result.invalid_mask |= static_cast<uint8_t>(1U << axis);
-    }
-    if (result.first_invalid_axis == 255) {
-      result.first_invalid_axis = static_cast<uint8_t>(axis);
-      result.first_invalid_delta =
-          signed_delta > INT32_MAX
-              ? INT32_MAX
-              : (signed_delta < INT32_MIN
-                     ? INT32_MIN
-                     : static_cast<int32_t>(signed_delta));
-    }
-  }
-  return result;
+  return validateWithAllowedDelta(candidate, last_valid, allowed_delta);
 }
 
 }  // namespace EncoderIntegrityGuard
