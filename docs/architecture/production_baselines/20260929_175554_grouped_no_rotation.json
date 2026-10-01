@@ -1,0 +1,2180 @@
+{
+  "anchor_session_manifest": {
+    "bytes": 11730,
+    "path": "/media/chen-lab/84BABCB7BABCA6D81/Yifan/catheter_sessions/20260929_175554_mppi_demo_manifest.json",
+    "sha256": "1f9b281b08cc67c342f16299c52d7e2e8be31e0f9d12155e098011bba475cc22"
+  },
+  "artifacts": [
+    {
+      "name": "distal_tendon_allocation_checkpoint",
+      "selected": false
+    },
+    {
+      "current": {
+        "bytes": 6422,
+        "exists": true,
+        "path": "/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_interface_transmission_v175.pt",
+        "sha256": "c07960295808ccfe34a79297630a06e6edd53e71181859b2831de0fef700cfc7"
+      },
+      "matches_recorded": true,
+      "name": "interface_transmission_checkpoint",
+      "recorded": {
+        "bytes": 6422,
+        "exists": true,
+        "path": "/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_interface_transmission_v175.pt",
+        "sha256": "c07960295808ccfe34a79297630a06e6edd53e71181859b2831de0fef700cfc7"
+      },
+      "selected": true
+    },
+    {
+      "current": {
+        "bytes": 97188,
+        "exists": true,
+        "path": "/home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json",
+        "sha256": "6d3f8573d10511dcbea3c27c97141f132b95cc42c450d3aec3702db33430ad2c"
+      },
+      "matches_recorded": true,
+      "name": "jacobian_initialization_json",
+      "recorded": {
+        "bytes": 97188,
+        "exists": true,
+        "path": "/home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json",
+        "sha256": "6d3f8573d10511dcbea3c27c97141f132b95cc42c450d3aec3702db33430ad2c"
+      },
+      "selected": true
+    },
+    {
+      "current": {
+        "bytes": 4682199,
+        "exists": true,
+        "path": "/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_distal_first_order_v171_multistep_map_em.pt",
+        "sha256": "adfbe11f58d409c9a24fdbdef23ef38b32c83fcc692ef77fa68c52508254ac1a"
+      },
+      "matches_recorded": true,
+      "name": "v171_distal_checkpoint",
+      "recorded": {
+        "bytes": 4682199,
+        "exists": true,
+        "path": "/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_distal_first_order_v171_multistep_map_em.pt",
+        "sha256": "adfbe11f58d409c9a24fdbdef23ef38b32c83fcc692ef77fa68c52508254ac1a"
+      },
+      "selected": true
+    }
+  ],
+  "baseline_name": "20260929_175554_grouped_no_rotation",
+  "controller_profile": {
+    "current": {
+      "bytes": 4434,
+      "exists": true,
+      "matches_recorded": true,
+      "path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+      "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d"
+    },
+    "recorded": {
+      "bytes": 4434,
+      "exists": true,
+      "path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+      "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d"
+    }
+  },
+  "generated_at_utc": "2026-10-01T15:49:19.789200+00:00",
+  "python_import_closure": {
+    "conservative": true,
+    "entry_modules": {
+      "automation.marker_tracking.node": "online four-marker perception",
+      "catheter_control.node": "hardware catheter_mppi controller",
+      "catheter_control.path_action": "path action node launched with controller",
+      "catheter_control.sparse_point_experiment": "observed sparse-point task client",
+      "catheter_control.trajectory_action": "trajectory action node launched with controller",
+      "control_interface_py.device_serial_com": "Teensy serial bridge",
+      "control_interface_py.manager": "command arbitration and safety manager",
+      "cr_meta_lnn.deployment.v171_streaming_runtime": "active v171 learned-model runtime"
+    },
+    "external_module_roots": [
+      "__future__",
+      "abc",
+      "argparse",
+      "collections",
+      "concurrent",
+      "contextlib",
+      "control_interface",
+      "copy",
+      "csv",
+      "cv2",
+      "dataclasses",
+      "diagnostic_msgs",
+      "enum",
+      "functools",
+      "geometry_msgs",
+      "gtsam",
+      "hashlib",
+      "importlib",
+      "itertools",
+      "json",
+      "math",
+      "numpy",
+      "os",
+      "pathlib",
+      "pyzed",
+      "rclpy",
+      "scipy",
+      "sensor_msgs",
+      "serial",
+      "statistics",
+      "std_msgs",
+      "std_srvs",
+      "struct",
+      "sys",
+      "threading",
+      "time",
+      "torch",
+      "typing",
+      "uuid",
+      "yaml"
+    ],
+    "files": [
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/__init__.py",
+        "bytes": 523,
+        "exists": true,
+        "git_status": "",
+        "path": "catheter-shape-tracking/src/shape_tracking/__init__.py",
+        "reasons": [
+          "imported by shape_tracking.dual_cli",
+          "imported by shape_tracking.register",
+          "parent package of shape_tracking.aurora_capture",
+          "parent package of shape_tracking.boards",
+          "parent package of shape_tracking.dual_cli",
+          "parent package of shape_tracking.multi_camera",
+          "parent package of shape_tracking.online_markers",
+          "parent package of shape_tracking.register",
+          "parent package of shape_tracking.registration",
+          "parent package of shape_tracking.session",
+          "parent package of shape_tracking.zed_capture"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "d6ef90fba5ae8b872dea36b0708efc976537b606453e81c505d3f8aa710718e7",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/aurora_capture.py",
+        "bytes": 32294,
+        "exists": true,
+        "git_status": "",
+        "path": "catheter-shape-tracking/src/shape_tracking/aurora_capture.py",
+        "reasons": [
+          "imported by shape_tracking.dual_cli"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/aurora_capture.py",
+        "role": "python_import_closure",
+        "sha256": "23906381fbc131756347a2cedf316128665669d2afa67ef272fca70866de96e6",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/boards.py",
+        "bytes": 3377,
+        "exists": true,
+        "git_status": "",
+        "path": "catheter-shape-tracking/src/shape_tracking/boards.py",
+        "reasons": [
+          "imported by shape_tracking.dual_cli",
+          "imported by shape_tracking.register",
+          "imported by shape_tracking.registration"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/boards.py",
+        "role": "python_import_closure",
+        "sha256": "67a1a587abbb40a24d34a29ae56bd120b49183e5e8e201458a4a4a45fd08b54e",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/dual_cli.py",
+        "bytes": 31543,
+        "exists": true,
+        "git_status": "M src/shape_tracking/dual_cli.py",
+        "path": "catheter-shape-tracking/src/shape_tracking/dual_cli.py",
+        "reasons": [
+          "imported by automation.marker_tracking.node"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/dual_cli.py",
+        "role": "python_import_closure",
+        "sha256": "6aa5f99547a2c34b3d722d38c5bdc415d0102e9ed9c9e69d164a448f10c57fca",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/multi_camera.py",
+        "bytes": 21382,
+        "exists": true,
+        "git_status": "M src/shape_tracking/multi_camera.py",
+        "path": "catheter-shape-tracking/src/shape_tracking/multi_camera.py",
+        "reasons": [
+          "imported by automation.marker_tracking.node",
+          "imported by shape_tracking.dual_cli"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/multi_camera.py",
+        "role": "python_import_closure",
+        "sha256": "4cb158fe14b0a5e66dc6b28cb2d416d329cedd76995a697791e43e9197cb9270",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/online_markers.py",
+        "bytes": 31670,
+        "exists": true,
+        "git_status": "M src/shape_tracking/online_markers.py",
+        "path": "catheter-shape-tracking/src/shape_tracking/online_markers.py",
+        "reasons": [
+          "imported by automation.marker_tracking.node"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/online_markers.py",
+        "role": "python_import_closure",
+        "sha256": "32f871458be95cfe2ab8911e5036f3a15887f64313df875623a147146680ef62",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/register.py",
+        "bytes": 33797,
+        "exists": true,
+        "git_status": "",
+        "path": "catheter-shape-tracking/src/shape_tracking/register.py",
+        "reasons": [
+          "imported by shape_tracking.dual_cli"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/register.py",
+        "role": "python_import_closure",
+        "sha256": "2dd54e4a34045ba2be789deddefa1f671e53f6c59965f459b33af9c7723721d8",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/registration.py",
+        "bytes": 3238,
+        "exists": true,
+        "git_status": "",
+        "path": "catheter-shape-tracking/src/shape_tracking/registration.py",
+        "reasons": [
+          "imported by shape_tracking.dual_cli",
+          "imported by shape_tracking.register"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/registration.py",
+        "role": "python_import_closure",
+        "sha256": "6dfbe4da69c7883900eec7febc634e45545410ebbacb907194f86ecc41a1a10b",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/session.py",
+        "bytes": 20653,
+        "exists": true,
+        "git_status": "",
+        "path": "catheter-shape-tracking/src/shape_tracking/session.py",
+        "reasons": [
+          "imported by automation.marker_tracking.node",
+          "imported by shape_tracking.online_markers"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/session.py",
+        "role": "python_import_closure",
+        "sha256": "3b65cd2e8a31b2d26d13fe8bd4e2fae2573dd939c00e657cf64bf630e0e1e04a",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/catheter-shape-tracking/src/shape_tracking/zed_capture.py",
+        "bytes": 27760,
+        "exists": true,
+        "git_status": "M src/shape_tracking/zed_capture.py",
+        "path": "catheter-shape-tracking/src/shape_tracking/zed_capture.py",
+        "reasons": [
+          "imported by automation.marker_tracking.node",
+          "imported by shape_tracking.dual_cli",
+          "imported by shape_tracking.register"
+        ],
+        "repository": "catheter-shape-tracking",
+        "repository_relative_path": "src/shape_tracking/zed_capture.py",
+        "role": "python_import_closure",
+        "sha256": "faa8c24496920c40425410bddbfcee3688a52c696e790524b1c78a644f71cf24",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/__init__.py",
+        "bytes": 702,
+        "exists": true,
+        "git_status": "",
+        "path": "control/__init__.py",
+        "reasons": [
+          "parent package of control.adapj",
+          "parent package of control.base",
+          "parent package of control.cost",
+          "parent package of control.factory",
+          "parent package of control.mppi",
+          "parent package of control.open_loop",
+          "parent package of control.pid",
+          "parent package of control.reference"
+        ],
+        "repository": "control",
+        "repository_relative_path": "__init__.py",
+        "role": "python_import_closure",
+        "sha256": "50cfc24451a810b97e593f23e2508b3548ddfac56048484b250cee1c845581b0",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/adapj.py",
+        "bytes": 27544,
+        "exists": true,
+        "git_status": "M adapj.py",
+        "path": "control/adapj.py",
+        "reasons": [
+          "imported by control",
+          "imported by control.factory",
+          "imported by cr_meta_lnn.deployment.v171_loader"
+        ],
+        "repository": "control",
+        "repository_relative_path": "adapj.py",
+        "role": "python_import_closure",
+        "sha256": "784253db69e846a6df0a2c0c26b24bbcb5990b3dae6679109ae6cf27bacce163",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/base.py",
+        "bytes": 3071,
+        "exists": true,
+        "git_status": "",
+        "path": "control/base.py",
+        "reasons": [
+          "imported by control",
+          "imported by control.adapj",
+          "imported by control.mppi",
+          "imported by control.open_loop",
+          "imported by control.pid"
+        ],
+        "repository": "control",
+        "repository_relative_path": "base.py",
+        "role": "python_import_closure",
+        "sha256": "7ec9d3c6adb05224295c3a6a91cf26c42db9eb9267f2903ce7dfd00645a6d11c",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/cost.py",
+        "bytes": 3127,
+        "exists": true,
+        "git_status": "",
+        "path": "control/cost.py",
+        "reasons": [
+          "imported by control.factory",
+          "imported by control.mppi"
+        ],
+        "repository": "control",
+        "repository_relative_path": "cost.py",
+        "role": "python_import_closure",
+        "sha256": "414e578beebfd34eb22a69fec5479b9c6b7d1042f8b2a5b92a017cba9924cd29",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/factory.py",
+        "bytes": 7441,
+        "exists": true,
+        "git_status": "",
+        "path": "control/factory.py",
+        "reasons": [
+          "imported by control"
+        ],
+        "repository": "control",
+        "repository_relative_path": "factory.py",
+        "role": "python_import_closure",
+        "sha256": "9eece73f5b8ee23e3ae22b89767dbdc3062c0b8fd9abd5284e9c7063e7b264e9",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/mppi.py",
+        "bytes": 20096,
+        "exists": true,
+        "git_status": "",
+        "path": "control/mppi.py",
+        "reasons": [
+          "imported by control",
+          "imported by control.factory"
+        ],
+        "repository": "control",
+        "repository_relative_path": "mppi.py",
+        "role": "python_import_closure",
+        "sha256": "12018a78c28a49a5bed92a2a18b14e6252b25cc0e58f83686843c1b882a8b5e2",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/open_loop.py",
+        "bytes": 963,
+        "exists": true,
+        "git_status": "",
+        "path": "control/open_loop.py",
+        "reasons": [
+          "imported by control",
+          "imported by control.factory"
+        ],
+        "repository": "control",
+        "repository_relative_path": "open_loop.py",
+        "role": "python_import_closure",
+        "sha256": "69f6a15187291a60fb13c8c0f5a9a12293a56d7b747626cf3e405b51380f37b8",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/pid.py",
+        "bytes": 4178,
+        "exists": true,
+        "git_status": "",
+        "path": "control/pid.py",
+        "reasons": [
+          "imported by control",
+          "imported by control.factory"
+        ],
+        "repository": "control",
+        "repository_relative_path": "pid.py",
+        "role": "python_import_closure",
+        "sha256": "2e1d761696b807387f0cb3b1663b3e51e91272ad2b4b3b64200b0ab9362dec00",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/control/reference.py",
+        "bytes": 6066,
+        "exists": true,
+        "git_status": "",
+        "path": "control/reference.py",
+        "reasons": [
+          "imported by control",
+          "imported by control.factory",
+          "imported by control.open_loop"
+        ],
+        "repository": "control",
+        "repository_relative_path": "reference.py",
+        "role": "python_import_closure",
+        "sha256": "14c601bf611a6e96e52a4a17b81987cde72bc322eece1b398f97f4fb2a4bfc70",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr-common/cr_common/__init__.py",
+        "bytes": 69,
+        "exists": true,
+        "git_status": "",
+        "path": "cr-common/cr_common/__init__.py",
+        "reasons": [
+          "parent package of cr_common.kinematics",
+          "parent package of cr_common.utils"
+        ],
+        "repository": "cr-common",
+        "repository_relative_path": "cr_common/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "b8c4ed2922041d5f95ca9f82d888b4bda4b25a285b9f165032a9e3cba17243e7",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr-common/cr_common/kinematics.py",
+        "bytes": 2356,
+        "exists": true,
+        "git_status": "",
+        "path": "cr-common/cr_common/kinematics.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.kinematics"
+        ],
+        "repository": "cr-common",
+        "repository_relative_path": "cr_common/kinematics.py",
+        "role": "python_import_closure",
+        "sha256": "88449e0bdc035ddce3a7ce2e81c1afaf523733c4226b48767f3c0b64ddd05d81",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr-common/cr_common/utils.py",
+        "bytes": 13707,
+        "exists": true,
+        "git_status": "M cr_common/utils.py",
+        "path": "cr-common/cr_common/utils.py",
+        "reasons": [
+          "imported by control.pid",
+          "imported by cr_common.kinematics",
+          "imported by cr_meta_lnn.deployment.v171_streaming_runtime",
+          "imported by cr_meta_lnn.methods.pretrained",
+          "imported by cr_meta_lnn.networks.hybrid.kinematics",
+          "imported by cr_meta_lnn.networks.hybrid.mass",
+          "imported by cr_meta_lnn.networks.hybrid.proximal",
+          "imported by cr_meta_lnn.networks.hybrid.ssm_chart",
+          "imported by cr_meta_lnn.networks.lagrangian"
+        ],
+        "repository": "cr-common",
+        "repository_relative_path": "cr_common/utils.py",
+        "role": "python_import_closure",
+        "sha256": "311256f0a6c0e46828dc69416598bdf55d5c463b4b8fe2b0bb779f75b20e0f68",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/__init__.py",
+        "bytes": 0,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/__init__.py",
+        "reasons": [
+          "parent package of cr_meta_lnn.deployment",
+          "parent package of cr_meta_lnn.deployment.insertion_tendon_allocation_checkpoint",
+          "parent package of cr_meta_lnn.deployment.interface_transmission_checkpoint",
+          "parent package of cr_meta_lnn.deployment.v171_loader",
+          "parent package of cr_meta_lnn.deployment.v171_streaming_runtime",
+          "parent package of cr_meta_lnn.methods",
+          "parent package of cr_meta_lnn.methods.pretrained",
+          "parent package of cr_meta_lnn.networks",
+          "parent package of cr_meta_lnn.networks.hybrid",
+          "parent package of cr_meta_lnn.networks.hybrid.bayesian",
+          "parent package of cr_meta_lnn.networks.hybrid.conditioning",
+          "parent package of cr_meta_lnn.networks.hybrid.connection",
+          "parent package of cr_meta_lnn.networks.hybrid.distal",
+          "parent package of cr_meta_lnn.networks.hybrid.distal_first_order",
+          "parent package of cr_meta_lnn.networks.hybrid.force_fields",
+          "parent package of cr_meta_lnn.networks.hybrid.insertion_conditioned_tendon",
+          "parent package of cr_meta_lnn.networks.hybrid.integrator",
+          "parent package of cr_meta_lnn.networks.hybrid.interface_transmission",
+          "parent package of cr_meta_lnn.networks.hybrid.kinematics",
+          "parent package of cr_meta_lnn.networks.hybrid.mass",
+          "parent package of cr_meta_lnn.networks.hybrid.model",
+          "parent package of cr_meta_lnn.networks.hybrid.proximal",
+          "parent package of cr_meta_lnn.networks.hybrid.real_first_order",
+          "parent package of cr_meta_lnn.networks.hybrid.residual",
+          "parent package of cr_meta_lnn.networks.hybrid.scalar_tendon_chain",
+          "parent package of cr_meta_lnn.networks.hybrid.shared_tendon",
+          "parent package of cr_meta_lnn.networks.hybrid.ssm_chart",
+          "parent package of cr_meta_lnn.networks.hybrid.state",
+          "parent package of cr_meta_lnn.networks.lagrangian",
+          "parent package of cr_meta_lnn.networks.latent_dynamics",
+          "parent package of cr_meta_lnn.networks.lstm",
+          "parent package of cr_meta_lnn.networks.mlp"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "__init__.py",
+        "role": "python_import_closure",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/deployment/__init__.py",
+        "bytes": 1509,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/deployment/__init__.py",
+        "reasons": [
+          "imported by catheter_control.node",
+          "parent package of cr_meta_lnn.deployment.insertion_tendon_allocation_checkpoint",
+          "parent package of cr_meta_lnn.deployment.interface_transmission_checkpoint",
+          "parent package of cr_meta_lnn.deployment.v171_loader",
+          "parent package of cr_meta_lnn.deployment.v171_streaming_runtime"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "deployment/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "9a5eb7c1d8259c609598214f68c0ad9f9d88799dea1c854bbfb77b84e05929ba",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/deployment/insertion_tendon_allocation_checkpoint.py",
+        "bytes": 4638,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/deployment/insertion_tendon_allocation_checkpoint.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_streaming_runtime"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "deployment/insertion_tendon_allocation_checkpoint.py",
+        "role": "python_import_closure",
+        "sha256": "dfc530ac96e8470a07ab07622d294f127445c608ee20d4f95bb49e62367595df",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/deployment/interface_transmission_checkpoint.py",
+        "bytes": 6036,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/deployment/interface_transmission_checkpoint.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_streaming_runtime"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "deployment/interface_transmission_checkpoint.py",
+        "role": "python_import_closure",
+        "sha256": "e8889357856e7665b86e160cab67ccac8f5492ba15d62f458875926410cbdd27",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/deployment/v171_loader.py",
+        "bytes": 8707,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/deployment/v171_loader.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_streaming_runtime"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "deployment/v171_loader.py",
+        "role": "python_import_closure",
+        "sha256": "8c1d3220a3924496902c246f7e1ba676ae3f64b30b061df6791b5edcc410598f",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/deployment/v171_streaming_runtime.py",
+        "bytes": 94221,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/deployment/v171_streaming_runtime.py",
+        "reasons": [
+          "active v171 learned-model runtime"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "deployment/v171_streaming_runtime.py",
+        "role": "python_import_closure",
+        "sha256": "7be97df48c29d76392c5251d8e56aea4b6f83e4ef6d8e5c6e78038a16d43a09a",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/methods/__init__.py",
+        "bytes": 0,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/methods/__init__.py",
+        "reasons": [
+          "parent package of cr_meta_lnn.methods.pretrained"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "methods/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/methods/pretrained.py",
+        "bytes": 30877,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/methods/pretrained.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.latent_dynamics"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "methods/pretrained.py",
+        "role": "python_import_closure",
+        "sha256": "a57a1a75e1968f6d28a2d3bcfe027c665f02cb366327f193d244f5da6db3eef4",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/__init__.py",
+        "bytes": 790,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/__init__.py",
+        "reasons": [
+          "imported by cr_meta_lnn.methods.pretrained",
+          "imported by cr_meta_lnn.networks.latent_dynamics",
+          "parent package of cr_meta_lnn.networks.hybrid",
+          "parent package of cr_meta_lnn.networks.hybrid.bayesian",
+          "parent package of cr_meta_lnn.networks.hybrid.conditioning",
+          "parent package of cr_meta_lnn.networks.hybrid.connection",
+          "parent package of cr_meta_lnn.networks.hybrid.distal",
+          "parent package of cr_meta_lnn.networks.hybrid.distal_first_order",
+          "parent package of cr_meta_lnn.networks.hybrid.force_fields",
+          "parent package of cr_meta_lnn.networks.hybrid.insertion_conditioned_tendon",
+          "parent package of cr_meta_lnn.networks.hybrid.integrator",
+          "parent package of cr_meta_lnn.networks.hybrid.interface_transmission",
+          "parent package of cr_meta_lnn.networks.hybrid.kinematics",
+          "parent package of cr_meta_lnn.networks.hybrid.mass",
+          "parent package of cr_meta_lnn.networks.hybrid.model",
+          "parent package of cr_meta_lnn.networks.hybrid.proximal",
+          "parent package of cr_meta_lnn.networks.hybrid.real_first_order",
+          "parent package of cr_meta_lnn.networks.hybrid.residual",
+          "parent package of cr_meta_lnn.networks.hybrid.scalar_tendon_chain",
+          "parent package of cr_meta_lnn.networks.hybrid.shared_tendon",
+          "parent package of cr_meta_lnn.networks.hybrid.ssm_chart",
+          "parent package of cr_meta_lnn.networks.hybrid.state",
+          "parent package of cr_meta_lnn.networks.lagrangian",
+          "parent package of cr_meta_lnn.networks.latent_dynamics",
+          "parent package of cr_meta_lnn.networks.lstm",
+          "parent package of cr_meta_lnn.networks.mlp"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "4831e974c1396f555f11500d28dd6ef85d5cbfba98a2278105f502c3d324d3ea",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/__init__.py",
+        "bytes": 940,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/__init__.py",
+        "reasons": [
+          "parent package of cr_meta_lnn.networks.hybrid.bayesian",
+          "parent package of cr_meta_lnn.networks.hybrid.conditioning",
+          "parent package of cr_meta_lnn.networks.hybrid.connection",
+          "parent package of cr_meta_lnn.networks.hybrid.distal",
+          "parent package of cr_meta_lnn.networks.hybrid.distal_first_order",
+          "parent package of cr_meta_lnn.networks.hybrid.force_fields",
+          "parent package of cr_meta_lnn.networks.hybrid.insertion_conditioned_tendon",
+          "parent package of cr_meta_lnn.networks.hybrid.integrator",
+          "parent package of cr_meta_lnn.networks.hybrid.interface_transmission",
+          "parent package of cr_meta_lnn.networks.hybrid.kinematics",
+          "parent package of cr_meta_lnn.networks.hybrid.mass",
+          "parent package of cr_meta_lnn.networks.hybrid.model",
+          "parent package of cr_meta_lnn.networks.hybrid.proximal",
+          "parent package of cr_meta_lnn.networks.hybrid.real_first_order",
+          "parent package of cr_meta_lnn.networks.hybrid.residual",
+          "parent package of cr_meta_lnn.networks.hybrid.scalar_tendon_chain",
+          "parent package of cr_meta_lnn.networks.hybrid.shared_tendon",
+          "parent package of cr_meta_lnn.networks.hybrid.ssm_chart",
+          "parent package of cr_meta_lnn.networks.hybrid.state"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "37f08673b4ec950896b784b4629eb6b6fa54941c8e885be0e8bc299e49c5a976",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/bayesian.py",
+        "bytes": 1821,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/bayesian.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/bayesian.py",
+        "role": "python_import_closure",
+        "sha256": "75f0d9f2b12c3235cc50c8765c523ab78de059efef277e492f7c2714542192fd",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/conditioning.py",
+        "bytes": 1438,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/conditioning.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.mass",
+          "imported by cr_meta_lnn.networks.hybrid.proximal"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/conditioning.py",
+        "role": "python_import_closure",
+        "sha256": "525f8a034bd3b1f09804ebcfc760a1166a74a1e8f77c68af1e6844ab1c47e7e1",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/connection.py",
+        "bytes": 2727,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/connection.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.model"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/connection.py",
+        "role": "python_import_closure",
+        "sha256": "833c848379b83f99454c93e7d791517f6e36806e5ddabbb47ea37bfe7faf83ad",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/distal.py",
+        "bytes": 3850,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/distal.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid",
+          "imported by cr_meta_lnn.networks.hybrid.distal_first_order",
+          "imported by cr_meta_lnn.networks.hybrid.model"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/distal.py",
+        "role": "python_import_closure",
+        "sha256": "ee2dc75789420dd65c9e327c9415d7055c3d4a1ec76fee36b94335e0e4b26791",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/distal_first_order.py",
+        "bytes": 7100,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/distal_first_order.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_loader"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/distal_first_order.py",
+        "role": "python_import_closure",
+        "sha256": "786777f348086245960a902ac7524b0d13afbde706b3c13f4164352811ba5c75",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/force_fields.py",
+        "bytes": 9954,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/force_fields.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.distal",
+          "imported by cr_meta_lnn.networks.hybrid.mass",
+          "imported by cr_meta_lnn.networks.hybrid.proximal",
+          "imported by cr_meta_lnn.networks.hybrid.residual",
+          "imported by cr_meta_lnn.networks.hybrid.shared_tendon"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/force_fields.py",
+        "role": "python_import_closure",
+        "sha256": "f63d3f2b967d7a4dbd3b3d6b0c9f9a625e2e2f1973a34486e8333ebb4327742f",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/insertion_conditioned_tendon.py",
+        "bytes": 4425,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/insertion_conditioned_tendon.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.insertion_tendon_allocation_checkpoint"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/insertion_conditioned_tendon.py",
+        "role": "python_import_closure",
+        "sha256": "1a88ab31f0d2a70e5d018f7949d330bc2f91f85f282fc9befe3de4d7877cd5f6",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/integrator.py",
+        "bytes": 12863,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/integrator.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.model"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/integrator.py",
+        "role": "python_import_closure",
+        "sha256": "48ffa2a1daf29b503c7afc56aa521d6eb2a08c74ccb47e3869bc44f599455760",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/interface_transmission.py",
+        "bytes": 6205,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/interface_transmission.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.interface_transmission_checkpoint"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/interface_transmission.py",
+        "role": "python_import_closure",
+        "sha256": "a1dd9e25c297ae46c3ac7f0bd295acb5761381661b755c1bc18020d6fb9bfd00",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/kinematics.py",
+        "bytes": 12250,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/kinematics.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_streaming_runtime",
+          "imported by cr_meta_lnn.networks.hybrid",
+          "imported by cr_meta_lnn.networks.hybrid.conditioning",
+          "imported by cr_meta_lnn.networks.hybrid.distal_first_order",
+          "imported by cr_meta_lnn.networks.hybrid.integrator",
+          "imported by cr_meta_lnn.networks.hybrid.mass",
+          "imported by cr_meta_lnn.networks.hybrid.model",
+          "imported by cr_meta_lnn.networks.hybrid.proximal",
+          "imported by cr_meta_lnn.networks.hybrid.shared_tendon",
+          "imported by cr_meta_lnn.networks.hybrid.ssm_chart"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/kinematics.py",
+        "role": "python_import_closure",
+        "sha256": "78848edef16fdf8583cfd7b248f613a0aa40b7c8683c3eb6c45a16fb0df50f25",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/mass.py",
+        "bytes": 37287,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/mass.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid",
+          "imported by cr_meta_lnn.networks.hybrid.integrator",
+          "imported by cr_meta_lnn.networks.hybrid.model"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/mass.py",
+        "role": "python_import_closure",
+        "sha256": "f8b516344ada61377634612b19957e2aa034ccc2bcaf4fb961afb8ea057f8332",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/model.py",
+        "bytes": 13172,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/model.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/model.py",
+        "role": "python_import_closure",
+        "sha256": "c1dd21eb3612c62ef841b3d5674de1d4807107c8b04af0b15224af4bc148cd73",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/proximal.py",
+        "bytes": 57452,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/proximal.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid",
+          "imported by cr_meta_lnn.networks.hybrid.model"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/proximal.py",
+        "role": "python_import_closure",
+        "sha256": "24809a188f348f3cba6f10ff3e285b928af9a08296468403c72c02df93f07998",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/real_first_order.py",
+        "bytes": 12267,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/real_first_order.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_loader"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/real_first_order.py",
+        "role": "python_import_closure",
+        "sha256": "8f05d83d4b637ea40e42360154def8cec611b263927602324f4e1c7bc3098a04",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/residual.py",
+        "bytes": 6579,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/residual.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid",
+          "imported by cr_meta_lnn.networks.hybrid.model"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/residual.py",
+        "role": "python_import_closure",
+        "sha256": "9e19fa0bb474ca54ac8eb0f2a85687370e0d3843b059c0ce261cd113610abab3",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/scalar_tendon_chain.py",
+        "bytes": 22534,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/scalar_tendon_chain.py",
+        "reasons": [
+          "imported by cr_meta_lnn.deployment.v171_loader"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/scalar_tendon_chain.py",
+        "role": "python_import_closure",
+        "sha256": "868cb2fc57d083f06c7c67eceaf40feecfc413b962fc56e43d512e3fb503ff7b",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/shared_tendon.py",
+        "bytes": 28555,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/shared_tendon.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.distal_first_order"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/shared_tendon.py",
+        "role": "python_import_closure",
+        "sha256": "e18961963ab41e4d35fd6fb469f3acfba43ba26ea062c57e82ffc8872d9f7c99",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/ssm_chart.py",
+        "bytes": 11569,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/ssm_chart.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid.proximal"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/ssm_chart.py",
+        "role": "python_import_closure",
+        "sha256": "2730a4d571b5b53d5a1f68dc5bbc4445a3b8e45ca9640919475df278ff0c5224",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/hybrid/state.py",
+        "bytes": 2306,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/hybrid/state.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.hybrid",
+          "imported by cr_meta_lnn.networks.hybrid.distal",
+          "imported by cr_meta_lnn.networks.hybrid.force_fields",
+          "imported by cr_meta_lnn.networks.hybrid.integrator",
+          "imported by cr_meta_lnn.networks.hybrid.model",
+          "imported by cr_meta_lnn.networks.hybrid.proximal",
+          "imported by cr_meta_lnn.networks.hybrid.residual"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/hybrid/state.py",
+        "role": "python_import_closure",
+        "sha256": "4af11da2957fe9cb1bcc096c2c56949f5924a7bcb6261f596a972bd0a29a1c05",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/lagrangian.py",
+        "bytes": 48822,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/lagrangian.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks",
+          "imported by cr_meta_lnn.networks.hybrid.distal",
+          "imported by cr_meta_lnn.networks.hybrid.force_fields",
+          "imported by cr_meta_lnn.networks.hybrid.mass",
+          "imported by cr_meta_lnn.networks.hybrid.residual",
+          "imported by cr_meta_lnn.networks.latent_dynamics"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/lagrangian.py",
+        "role": "python_import_closure",
+        "sha256": "6c7431c10c91409d23a06da688c683cb5a84f59b07c40102fdebd64c8e216a1f",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/latent_dynamics.py",
+        "bytes": 67569,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/latent_dynamics.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks.lagrangian"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/latent_dynamics.py",
+        "role": "python_import_closure",
+        "sha256": "f32080412474c6beaca8db6dbc0edd9e0f94755284fe9bbd0132992c051f685c",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/lstm.py",
+        "bytes": 1842,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/lstm.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/lstm.py",
+        "role": "python_import_closure",
+        "sha256": "ada73e25da25e57245a18d96eefb4dc2a407b7cef78d24a7576d2d5d8ff7569b",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/cr_meta_lnn/networks/mlp.py",
+        "bytes": 945,
+        "exists": true,
+        "git_status": "",
+        "path": "cr_meta_lnn/networks/mlp.py",
+        "reasons": [
+          "imported by cr_meta_lnn.networks",
+          "imported by cr_meta_lnn.networks.lagrangian",
+          "imported by cr_meta_lnn.networks.latent_dynamics"
+        ],
+        "repository": "cr_meta_lnn",
+        "repository_relative_path": "networks/mlp.py",
+        "role": "python_import_closure",
+        "sha256": "1658aac2a2892c3cddf07d629c34c567c009f63c07667f0839188922ca672c03",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/automation/__init__.py",
+        "bytes": 0,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/automation/automation/__init__.py",
+        "reasons": [
+          "parent package of automation.marker_tracking",
+          "parent package of automation.marker_tracking.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/automation/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/automation/marker_tracking/__init__.py",
+        "bytes": 61,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/automation/automation/marker_tracking/__init__.py",
+        "reasons": [
+          "parent package of automation.marker_tracking.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/automation/marker_tracking/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "d80ca1e68db8ef067f3e3bac3e9d904f0e05b327b7a5e1f80de16f6876fdf843",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/automation/marker_tracking/node.py",
+        "bytes": 37314,
+        "exists": true,
+        "git_status": "M src/automation/automation/marker_tracking/node.py",
+        "path": "robot-infra/src/automation/automation/marker_tracking/node.py",
+        "reasons": [
+          "online four-marker perception"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/automation/marker_tracking/node.py",
+        "role": "python_import_closure",
+        "sha256": "1304d7f5c63224b4f1d8d0e23039ee33bd8ec5892cae9690321cfde007d9a79d",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/config/catheter_limits.yaml",
+        "bytes": 3502,
+        "exists": true,
+        "git_status": "M src/automation/config/catheter_limits.yaml",
+        "path": "robot-infra/src/automation/config/catheter_limits.yaml",
+        "reasons": [
+          "source hardware limits"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/config/catheter_limits.yaml",
+        "role": "runtime_metadata",
+        "sha256": "27ad5b164c503cc8f27f5f9414011a04915939f9985483003e49c71fdfa8471f",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/package.xml",
+        "bytes": 1074,
+        "exists": true,
+        "git_status": "M src/automation/package.xml",
+        "path": "robot-infra/src/automation/package.xml",
+        "reasons": [
+          "perception/experiment package metadata"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/package.xml",
+        "role": "runtime_metadata",
+        "sha256": "adf9f3f189eea6a57d3c2c9754efbc4e94d46e2ce2fde901d6b2baad8bc8bc21",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/resource/automation",
+        "bytes": 0,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/automation/resource/automation",
+        "reasons": [
+          "automation ament resource"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/resource/automation",
+        "role": "runtime_metadata",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/setup.cfg",
+        "bytes": 89,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/automation/setup.cfg",
+        "reasons": [
+          "automation installation"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/setup.cfg",
+        "role": "runtime_metadata",
+        "sha256": "21c35fd32e0b5c7f51f4a2bd795030e36d398e2f78d6b18d46861afcbfa8e044",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/automation/setup.py",
+        "bytes": 1461,
+        "exists": true,
+        "git_status": "M src/automation/setup.py",
+        "path": "robot-infra/src/automation/setup.py",
+        "reasons": [
+          "perception/experiment entry points"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/automation/setup.py",
+        "role": "runtime_metadata",
+        "sha256": "7a430b2c787c610948956a956426084f8ffe36eec33a2a8ff3000a0375f5de70",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/__init__.py",
+        "bytes": 1857,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/__init__.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/__init__.py",
+        "reasons": [
+          "parent package of catheter_control.backlash",
+          "parent package of catheter_control.causal_schedule",
+          "parent package of catheter_control.compute_device",
+          "parent package of catheter_control.engaged_gain",
+          "parent package of catheter_control.hardware_contract",
+          "parent package of catheter_control.lifecycle",
+          "parent package of catheter_control.mppi",
+          "parent package of catheter_control.node",
+          "parent package of catheter_control.path_action",
+          "parent package of catheter_control.path_tracking",
+          "parent package of catheter_control.reversal_scheduler",
+          "parent package of catheter_control.sparse_point_experiment",
+          "parent package of catheter_control.target_offset",
+          "parent package of catheter_control.timing",
+          "parent package of catheter_control.tracking",
+          "parent package of catheter_control.trajectory",
+          "parent package of catheter_control.trajectory_action",
+          "parent package of catheter_control.trajectory_file"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "542464efd47b4193e229eceb15718d77370ae400a234ec0dd6eda3e91738bc57",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/backlash.py",
+        "bytes": 67444,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/backlash.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/backlash.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/backlash.py",
+        "role": "python_import_closure",
+        "sha256": "8bdcd5fbe0d17536f3057ec329c8d55be3497fb39e4e42229cf7d8eb33341628",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/bootstrap.py",
+        "bytes": 5624,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/bootstrap.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/bootstrap.py",
+        "reasons": [
+          "selected console-script bootstrap"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/bootstrap.py",
+        "role": "runtime_metadata",
+        "sha256": "3d93aac15990d1ac966791b7087a3635bdc4cae98a41dcbe7335ca8c543004b8",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/causal_schedule.py",
+        "bytes": 1712,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/causal_schedule.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/causal_schedule.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/causal_schedule.py",
+        "role": "python_import_closure",
+        "sha256": "c80b5079be5ffb35a606599ba1a72d93b47368ef4eacf07f5ef7f063ec48f3fa",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/compute_device.py",
+        "bytes": 2886,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/compute_device.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/compute_device.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/compute_device.py",
+        "role": "python_import_closure",
+        "sha256": "f4013b8c6f454680024d8d0e8359be411ef760ee59509151a78f693171c0cadf",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/engaged_gain.py",
+        "bytes": 12865,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/engaged_gain.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/engaged_gain.py",
+        "reasons": [
+          "imported by catheter_control.backlash",
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/engaged_gain.py",
+        "role": "python_import_closure",
+        "sha256": "48a99894ac79f1a5a22b29544463932f6fad7126cf8c16d1bf256ac0e390ef69",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/hardware_contract.py",
+        "bytes": 27635,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/hardware_contract.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/hardware_contract.py",
+        "reasons": [
+          "imported by catheter_control.mppi",
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/hardware_contract.py",
+        "role": "python_import_closure",
+        "sha256": "5b522c3fe46f32e7d11e2e87a6bb64520a5d87b32bdc335152758f107412fb88",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/lifecycle.py",
+        "bytes": 6249,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/lifecycle.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/lifecycle.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/lifecycle.py",
+        "role": "python_import_closure",
+        "sha256": "7cbd9ccef73857ad19ea57b2cf4ca31b9810253cf4e675ec6766c1157bf86043",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/mppi.py",
+        "bytes": 93431,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/mppi.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/mppi.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/mppi.py",
+        "role": "python_import_closure",
+        "sha256": "00648098ef98d7dd1203dfe0b4d33d26aca2a64afcf58477881350a77fb5d352",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/node.py",
+        "bytes": 171930,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/node.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/node.py",
+        "reasons": [
+          "hardware catheter_mppi controller"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/node.py",
+        "role": "python_import_closure",
+        "sha256": "abdb2b9f776c20dc6c1d1e77c4226eba8b374dd852f5486995efb9c4be34664e",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/path_action.py",
+        "bytes": 20783,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/path_action.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/path_action.py",
+        "reasons": [
+          "path action node launched with controller"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/path_action.py",
+        "role": "python_import_closure",
+        "sha256": "a1d19ce741875a50d51357333f8932b21d9f7098cdfb0c3b5634e9295af186f9",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/path_tracking.py",
+        "bytes": 19449,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/path_tracking.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/path_tracking.py",
+        "reasons": [
+          "imported by catheter_control.node",
+          "imported by catheter_control.path_action"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/path_tracking.py",
+        "role": "python_import_closure",
+        "sha256": "4d0d12781390b0c22c6dbb70a5ac4f0d6276465a2f85c3393304225822b8b03b",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/reversal_scheduler.py",
+        "bytes": 10815,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/reversal_scheduler.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/reversal_scheduler.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/reversal_scheduler.py",
+        "role": "python_import_closure",
+        "sha256": "cb7a0c0c3a5124ac284dc3395040baba76925c2fcb5e19efcb16ec7b9b9baabd",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/sparse_point_experiment.py",
+        "bytes": 40963,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/sparse_point_experiment.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/sparse_point_experiment.py",
+        "reasons": [
+          "observed sparse-point task client"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/sparse_point_experiment.py",
+        "role": "python_import_closure",
+        "sha256": "4e0f551236320481c0d0d1e9e8538df5c371081bad3fe4dc2df14b276277ab83",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/target_offset.py",
+        "bytes": 8408,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/target_offset.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/target_offset.py",
+        "reasons": [
+          "imported by catheter_control.path_action",
+          "imported by catheter_control.sparse_point_experiment",
+          "imported by catheter_control.trajectory_action",
+          "imported by catheter_control.trajectory_file"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/target_offset.py",
+        "role": "python_import_closure",
+        "sha256": "71479aebcb95f0dbe20c2139e5cfa5ce94b36712d6a3be00ac4c15f4d77b3069",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/timing.py",
+        "bytes": 3492,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/timing.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/timing.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/timing.py",
+        "role": "python_import_closure",
+        "sha256": "7ad23a89e1b2b29f41b8510e2eaecd2045a63e5cd802f9fdf30fa36023f0ce0d",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/tracking.py",
+        "bytes": 8204,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/tracking.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/tracking.py",
+        "reasons": [
+          "imported by catheter_control.node"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/tracking.py",
+        "role": "python_import_closure",
+        "sha256": "96c70040e8c88cb25820f10ec13c41802ca719faae045ba822376274c139af3a",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/trajectory.py",
+        "bytes": 4526,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/trajectory.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/trajectory.py",
+        "reasons": [
+          "imported by catheter_control.trajectory_action"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/trajectory.py",
+        "role": "python_import_closure",
+        "sha256": "2709a3749f749c5eefaa08345e56a54d2bd82ebbb05b1a382fa157cb1dbbcad9",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/trajectory_action.py",
+        "bytes": 13708,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/trajectory_action.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/trajectory_action.py",
+        "reasons": [
+          "trajectory action node launched with controller"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/trajectory_action.py",
+        "role": "python_import_closure",
+        "sha256": "3056f95434b6f8f0d818c03927a12b5fbfbb632de93b995af0a916cd70ffa254",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/catheter_control/trajectory_file.py",
+        "bytes": 13337,
+        "exists": true,
+        "git_status": "?? src/catheter_control/catheter_control/trajectory_file.py",
+        "path": "robot-infra/src/catheter_control/catheter_control/trajectory_file.py",
+        "reasons": [
+          "imported by catheter_control.sparse_point_experiment"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/catheter_control/trajectory_file.py",
+        "role": "python_import_closure",
+        "sha256": "fa85595080799808d3ef38cff0bb8cb3148425d613deaf9fcbcd8c62f5e3d287",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+        "bytes": 4434,
+        "exists": true,
+        "git_status": "?? src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+        "path": "robot-infra/src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+        "reasons": [
+          "resolved controller profile"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml",
+        "role": "runtime_metadata",
+        "sha256": "0d7c72858a5b1bc37eb81ef4e16d160428ea4e235b004b0a463322e00d33d07d",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/launch/control.launch.py",
+        "bytes": 30156,
+        "exists": true,
+        "git_status": "?? src/catheter_control/launch/control.launch.py",
+        "path": "robot-infra/src/catheter_control/launch/control.launch.py",
+        "reasons": [
+          "hardware launch"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/launch/control.launch.py",
+        "role": "runtime_metadata",
+        "sha256": "fd13f32ce40383cdd9192b44eafeba82ce0e4bbcbce97251d90566983c902877",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/package.xml",
+        "bytes": 1191,
+        "exists": true,
+        "git_status": "?? src/catheter_control/package.xml",
+        "path": "robot-infra/src/catheter_control/package.xml",
+        "reasons": [
+          "ROS package metadata"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/package.xml",
+        "role": "runtime_metadata",
+        "sha256": "95e0f289bb94da73e1d8f6cac6dc5a6e65264c785b0094bfd7b4e080843873c2",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/resource/catheter_control",
+        "bytes": 1,
+        "exists": true,
+        "git_status": "?? src/catheter_control/resource/catheter_control",
+        "path": "robot-infra/src/catheter_control/resource/catheter_control",
+        "reasons": [
+          "ament resource"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/resource/catheter_control",
+        "role": "runtime_metadata",
+        "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/setup.cfg",
+        "bytes": 101,
+        "exists": true,
+        "git_status": "?? src/catheter_control/setup.cfg",
+        "path": "robot-infra/src/catheter_control/setup.cfg",
+        "reasons": [
+          "ROS Python installation"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/setup.cfg",
+        "role": "runtime_metadata",
+        "sha256": "4eb92b3129cb9c8a5b7edd63bc39a791c98ad3e206abfe6d8579113e2a1f1f74",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/catheter_control/setup.py",
+        "bytes": 2332,
+        "exists": true,
+        "git_status": "?? src/catheter_control/setup.py",
+        "path": "robot-infra/src/catheter_control/setup.py",
+        "reasons": [
+          "ROS Python entry points"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/catheter_control/setup.py",
+        "role": "runtime_metadata",
+        "sha256": "a544df8d23655200015bb959fda1c2e808d9231607f38f57a20737a1ec08b1fc",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/CMakeLists.txt",
+        "bytes": 2041,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/CMakeLists.txt",
+        "reasons": [
+          "ROS interface generation"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/CMakeLists.txt",
+        "role": "runtime_metadata",
+        "sha256": "915d991bd91ff44ac1533e96e91817ffc550dae43dd84daf620a83d3f44456a2",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/action/TrackTipPath.action",
+        "bytes": 838,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/action/TrackTipPath.action",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/action/TrackTipPath.action",
+        "role": "runtime_metadata",
+        "sha256": "67d0261e57c4d9621dc65344495b235ab06aa25b95d367cce3b50c3d2c7ef71c",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/action/TrackTipTrajectory.action",
+        "bytes": 694,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/action/TrackTipTrajectory.action",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/action/TrackTipTrajectory.action",
+        "role": "runtime_metadata",
+        "sha256": "4f35441286f48bd5b8ffe43805818781997e38a918381e81fa5210a06cf6af0a",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/__init__.py",
+        "bytes": 0,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/control_interface_py/__init__.py",
+        "reasons": [
+          "parent package of control_interface_py.command_freshness",
+          "parent package of control_interface_py.device_serial_com",
+          "parent package of control_interface_py.manager"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/control_interface_py/__init__.py",
+        "role": "python_import_closure",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/command_freshness.py",
+        "bytes": 1330,
+        "exists": true,
+        "git_status": "?? src/control_interface/control_interface_py/command_freshness.py",
+        "path": "robot-infra/src/control_interface/control_interface_py/command_freshness.py",
+        "reasons": [
+          "imported by control_interface_py.device_serial_com",
+          "imported by control_interface_py.manager"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/control_interface_py/command_freshness.py",
+        "role": "python_import_closure",
+        "sha256": "c4d86c4e7bf7504dcc087d76c85d6f2354fd8010e6172ed58ec51c8bc0c77830",
+        "tracked": false
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/device_serial_com.py",
+        "bytes": 32242,
+        "exists": true,
+        "git_status": "M src/control_interface/control_interface_py/device_serial_com.py",
+        "path": "robot-infra/src/control_interface/control_interface_py/device_serial_com.py",
+        "reasons": [
+          "Teensy serial bridge"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/control_interface_py/device_serial_com.py",
+        "role": "python_import_closure",
+        "sha256": "4d865572c98aaf3ada275a3aea68c5bd8a06029731e691bf13abb1f6c7170ef8",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/control_interface_py/manager.py",
+        "bytes": 61326,
+        "exists": true,
+        "git_status": "M src/control_interface/control_interface_py/manager.py",
+        "path": "robot-infra/src/control_interface/control_interface_py/manager.py",
+        "reasons": [
+          "command arbitration and safety manager"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/control_interface_py/manager.py",
+        "role": "python_import_closure",
+        "sha256": "a5692f9561fd635e2116d787929ef95a7f7085b94dad1f39a43e935da89ef8a1",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/launch/launch.py",
+        "bytes": 3744,
+        "exists": true,
+        "git_status": "M src/control_interface/launch/launch.py",
+        "path": "robot-infra/src/control_interface/launch/launch.py",
+        "reasons": [
+          "manager and serial launch"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/launch/launch.py",
+        "role": "runtime_metadata",
+        "sha256": "7107621e9360a0d974cea711260c80f1e3389ddde39086ecb6677be4cd7550e5",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/CausalExperimentTrace.msg",
+        "bytes": 998,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/CausalExperimentTrace.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/CausalExperimentTrace.msg",
+        "role": "runtime_metadata",
+        "sha256": "d424e86bdde64cdee132ab069059788c7b97f84a72a97b400a1678244f03df72",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/ControlCycleTiming.msg",
+        "bytes": 1007,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/ControlCycleTiming.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/ControlCycleTiming.msg",
+        "role": "runtime_metadata",
+        "sha256": "6ca023f0983ebc4234436c1ddeee044968bd5f43911517353caf90ef1926664f",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/ControlStream.msg",
+        "bytes": 2414,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/ControlStream.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/ControlStream.msg",
+        "role": "runtime_metadata",
+        "sha256": "75d514408e1cc2aab990cb3f6279892a3d522163c325139da991ab30b9d3d5f1",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/DeviceEvent.msg",
+        "bytes": 81,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/DeviceEvent.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/DeviceEvent.msg",
+        "role": "runtime_metadata",
+        "sha256": "298251711961a14a4dcab1142ebc752c1a3733186a2183686828e2d4201da68c",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/DeviceStream.msg",
+        "bytes": 136,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/DeviceStream.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/DeviceStream.msg",
+        "role": "runtime_metadata",
+        "sha256": "0738513b8a00b51f1e0185d263d27d76d6142ef3e9c3294463b6cdc521a2187d",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/EstimatorStateTrace.msg",
+        "bytes": 2340,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/EstimatorStateTrace.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/EstimatorStateTrace.msg",
+        "role": "runtime_metadata",
+        "sha256": "110a477ebee1b63ba5e3e4e0673a271364bb3d4f7ebf613e525db587959571df",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/ManagerEvent.msg",
+        "bytes": 1557,
+        "exists": true,
+        "git_status": "M src/control_interface/msg/ManagerEvent.msg",
+        "path": "robot-infra/src/control_interface/msg/ManagerEvent.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/ManagerEvent.msg",
+        "role": "runtime_metadata",
+        "sha256": "1ce2c621cffa036e56b50f849e437efd0eb46672d94900a278266accb10f778f",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/ManagerStream.msg",
+        "bytes": 211,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/ManagerStream.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/ManagerStream.msg",
+        "role": "runtime_metadata",
+        "sha256": "b8c5a10d31071ef30a570df5fc583b6edac435a04e18d27a75ee30c1b1e16754",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/MppiResponseTrace.msg",
+        "bytes": 989,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/MppiResponseTrace.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/MppiResponseTrace.msg",
+        "role": "runtime_metadata",
+        "sha256": "666f92766e389c917db481df1d876ed2b720306ba18bdd6395edd0a0c3c6c6cf",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/PathTrackingTrace.msg",
+        "bytes": 515,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/PathTrackingTrace.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/PathTrackingTrace.msg",
+        "role": "runtime_metadata",
+        "sha256": "189a9888bc88379c11f5c217faf9e195aee3da9683954b3c8a70b4c6fa2bc4e2",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/msg/TipReferenceHorizon.msg",
+        "bytes": 486,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/msg/TipReferenceHorizon.msg",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/msg/TipReferenceHorizon.msg",
+        "role": "runtime_metadata",
+        "sha256": "acaffdb0cb8b5c6236fde1fa3cec8536840850476fc024f20058af435f8482a9",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/package.xml",
+        "bytes": 1050,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/package.xml",
+        "reasons": [
+          "ROS interface metadata"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/package.xml",
+        "role": "runtime_metadata",
+        "sha256": "d4d1ea7be59a87cce18a0875893ac6e72cd2f35d4ae0b827eb1290ce69e1d91d",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/srv/DeviceCmd.srv",
+        "bytes": 157,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/srv/DeviceCmd.srv",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/srv/DeviceCmd.srv",
+        "role": "runtime_metadata",
+        "sha256": "3e1fa1504903bea13455793d6905bc39005ff1d08724e96caa75b64e5ee50f30",
+        "tracked": true
+      },
+      {
+        "absolute_path": "/home/chen-lab/Yifan/robot-infra/src/control_interface/srv/GenerateSparseTargets.srv",
+        "bytes": 631,
+        "exists": true,
+        "git_status": "",
+        "path": "robot-infra/src/control_interface/srv/GenerateSparseTargets.srv",
+        "reasons": [
+          "ROS interface definition"
+        ],
+        "repository": "robot-infra",
+        "repository_relative_path": "src/control_interface/srv/GenerateSparseTargets.srv",
+        "role": "runtime_metadata",
+        "sha256": "ef478f56474cdbf37cba69e857465775aa860f1979ad92815af9ec79821b3512",
+        "tracked": true
+      }
+    ],
+    "note": "Static tracing includes conditional imports and package __init__ side effects. Artifact selection identifies which optional checkpoints were active in the observed session.",
+    "unresolved_local_references": []
+  },
+  "qualification_scope": {
+    "command_output_was_enabled": true,
+    "observed_session": "20260929_175554_mppi_demo",
+    "provenance_gap": "The controller launch manifest does not record the exact sparse-point task YAML or the independently launched marker/control-interface profiles. Their executable source is included conservatively, but their resolved task/launch parameters require a future unified full-stack session manifest.",
+    "result": "all targets reached",
+    "rotation_enabled": false,
+    "task": "four sparse two-axis targets",
+    "warning": "This is an observed successful no-rotation qualification, not a claim that the three-axis continuous-path stack is qualified."
+  },
+  "repositories": [
+    {
+      "branch": "main",
+      "commit": "f3640b6690164a8e86551bfb0ea8e2651b3dd413",
+      "dirty": true,
+      "is_git_repository": true,
+      "path": "/home/chen-lab/Yifan/robot-infra",
+      "status_entry_count": 53
+    },
+    {
+      "branch": "main",
+      "commit": "4b210cd3f3554d87920c61a11d83b4a94acc0248",
+      "dirty": true,
+      "is_git_repository": true,
+      "path": "/home/chen-lab/Yifan/cr_meta_lnn",
+      "status_entry_count": 477
+    },
+    {
+      "branch": "main",
+      "commit": "2b9ea0e17e3e4f3799bba0d11f545c5301dba616",
+      "dirty": true,
+      "is_git_repository": true,
+      "path": "/home/chen-lab/Yifan/cr-common",
+      "status_entry_count": 1
+    },
+    {
+      "branch": "main",
+      "commit": "8ac3b36eb7ffc040eb94450a658e04bd8865476d",
+      "dirty": true,
+      "is_git_repository": true,
+      "path": "/home/chen-lab/Yifan/control",
+      "status_entry_count": 2
+    },
+    {
+      "branch": "main",
+      "commit": "86fce65fc5a9eceac96d9d603d64525a8a2c1b0a",
+      "dirty": true,
+      "is_git_repository": true,
+      "path": "/home/chen-lab/Yifan/catheter-shape-tracking",
+      "status_entry_count": 22
+    }
+  ],
+  "resolved_controller_parameters": {
+    "adaptation_confirmation_windows": 2,
+    "adaptation_consistency_cosine": 0.5,
+    "adaptation_directional_purity": 0.8,
+    "adaptation_enabled": false,
+    "adaptation_maximum_column_gain": 4.0,
+    "adaptation_maximum_direction_deviation_deg": 60.0,
+    "adaptation_maximum_window_s": 1.0,
+    "adaptation_minimum_column_gain": 0.25,
+    "adaptation_minimum_normalized_action": 0.01,
+    "adaptation_minimum_observations": 4,
+    "adaptation_minimum_response_snr": 3.0,
+    "adaptation_minimum_rotation_deg": 0.1,
+    "adaptation_minimum_translation_mm": 0.3,
+    "adaptation_reversal_holdoff_normalized_action": 0.02,
+    "adaptation_reversal_holdoff_normalized_action_shaft_0": -1.0,
+    "adaptation_reversal_holdoff_normalized_action_shaft_1": -1.0,
+    "adaptation_reversal_holdoff_normalized_action_shaft_2": -1.0,
+    "backlash_compensation_enabled": true,
+    "backlash_directional_purity": 0.9,
+    "backlash_engagement_confirmation_observations": 3,
+    "backlash_minimum_distal_bending_increment": 0.05,
+    "backlash_minimum_motor_increment_rad": 0.01,
+    "backlash_minimum_response_evidence": 0.5,
+    "backlash_minimum_transmitted_increment_rad": 0.1,
+    "backlash_provisional_rejection_observations": 2,
+    "backlash_response_direction_cosine": 0.5,
+    "backlash_takeup_velocity": [
+      1.0,
+      2.5,
+      0.5
+    ],
+    "backlash_width_learning_rate": 0.05,
+    "backlash_width_negative_rad": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "backlash_width_positive_rad": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "backlash_width_rad": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "catheter": "imricor_test",
+    "command_output_enabled": true,
+    "command_rate_hz": 100.0,
+    "controller_velocity_max": [
+      10.0,
+      0.0,
+      4.5,
+      4.0,
+      25.0,
+      25.0
+    ],
+    "cr_common_root": "/home/chen-lab/Yifan/cr-common",
+    "cr_meta_lnn_root": "/home/chen-lab/Yifan/cr_meta_lnn",
+    "device": "cuda",
+    "distal_tendon_allocation_checkpoint": "",
+    "encoder_update_rate_hz": 50.0,
+    "engaged_gain_confidence_log_width": 0.5,
+    "engaged_gain_contradiction_log_std": 0.7,
+    "engaged_gain_credible_sigma": 1.645,
+    "engaged_gain_enabled": true,
+    "engaged_gain_huber_sigma": 3.0,
+    "engaged_gain_maximum": 2.0,
+    "engaged_gain_maximum_normalized_innovation": 8.0,
+    "engaged_gain_minimum": 0.1,
+    "engaged_gain_minimum_nominal_increment": 0.02,
+    "engaged_gain_minimum_updates": 2,
+    "engaged_gain_observation_std": 0.08,
+    "engaged_gain_prior_log_std": 0.7,
+    "engaged_gain_prior_mean": [
+      1.0,
+      1.0
+    ],
+    "engaged_gain_process_log_std_sqrt_s": 0.05,
+    "engaged_gain_reversal_log_std": 0.8,
+    "estimator_catchup_timeout_s": 0.35,
+    "estimator_filter_initial_covariance": 0.25,
+    "estimator_filter_process_std_sqrt_s": 1.0,
+    "estimator_history_reconciliation_enabled": true,
+    "estimator_history_reconciliation_maximum_shift": 120.0,
+    "estimator_initial_roll_hypotheses": 24,
+    "feedback_pair_max_skew_s": 0.15,
+    "frame_id": "robot_base",
+    "horizon_steps": 4,
+    "initialization_consecutive_inliers": 2,
+    "initialization_observations": 8,
+    "interface_transmission_checkpoint": "/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_interface_transmission_v175.pt",
+    "jacobian_initialization_json": "/home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_v174.json",
+    "limits_file": "/home/chen-lab/Yifan/robot-infra/install/automation/share/automation/config/catheter_limits.yaml",
+    "marker_estimator": "ukf",
+    "marker_update_rate_hz": 20.0,
+    "maximum_marker_lag_s": 0.15,
+    "maximum_planner_deadline_misses": 3,
+    "mppi_best_candidate_guard": true,
+    "mppi_capture_hold_s": 0.3,
+    "mppi_capture_minimum_terminal_improvement_mm": 0.25,
+    "mppi_capture_radius_mm": 2.5,
+    "mppi_capture_response_minimum_prediction_mm": 0.25,
+    "mppi_capture_response_minimum_ratio": 0.5,
+    "mppi_engaged_gain_cvar_alpha": 0.67,
+    "mppi_engaged_gain_learning_velocity_scale": 0.5,
+    "mppi_engaged_gain_maximum_first_step_shift": 8.0,
+    "mppi_engaged_gain_risk_beta": 0.5,
+    "mppi_engaged_gain_scenarios": true,
+    "mppi_grouped_mode_sampling": true,
+    "mppi_point_prediction_tail_step_s": 0.12,
+    "mppi_point_prediction_tail_steps": 0,
+    "mppi_point_rollout_coarse_steps": true,
+    "mppi_point_rollout_step_s": 0.2,
+    "mppi_rotation_direction_latch": false,
+    "mppi_seed": 0,
+    "mppi_takeup_confirmation_time_s": 0.1,
+    "mppi_takeup_limit_reserve_scale": 1.0,
+    "mppi_takeup_risk_weight": 4.0,
+    "mppi_transmission_aware_rollout": false,
+    "plan_rate_hz": 15.0,
+    "planning_deadline_s": 0.06,
+    "reversal_scheduler_cooldown_s": 1.0,
+    "reversal_scheduler_enabled": true,
+    "reversal_scheduler_minimum_absolute_cost_improvement": 5.0,
+    "reversal_scheduler_minimum_accepted_observations": 3,
+    "reversal_scheduler_minimum_fractional_cost_improvement": 0.0,
+    "reversal_scheduler_minimum_terminal_error_improvement_mm": 0.25,
+    "reversal_scheduler_required_plans": 3,
+    "rollout_step_s": 0.04,
+    "samples": 512,
+    "takeup_confirmation_hold_timeout_s": 1.0,
+    "takeup_transaction_enabled": true,
+    "tip_error_log_rate_hz": 1.0,
+    "torch_interop_threads": 1,
+    "torch_intraop_threads": 2,
+    "v171_distal_checkpoint": "/home/chen-lab/Yifan/cr_meta_lnn/checkpoints/real_distal_first_order_v171_multistep_map_em.pt"
+  },
+  "schema_version": 1
+}

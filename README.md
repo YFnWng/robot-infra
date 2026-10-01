@@ -34,6 +34,55 @@ ros2 launch control_interface launch.py \
   serial_port:=/dev/ttyACM0
 ```
 
+### Full closed-loop ROS node structure
+
+The real-hardware closed loop uses the following primary nodes:
+
+| Node | Responsibility |
+| --- | --- |
+| `/marker_tracking` | Owns the primary and oblique ZED rigs, synchronizes their frames, detects and triangulates the four markers, and publishes marker positions and tracking diagnostics. |
+| `/device_serial_com` | Exchanges framed data with the Teensy: it publishes POS/ENC feedback and firmware events, and sends manager-approved commands to the firmware. |
+| `/manager` | Arbitrates command sources and enforces mode, freshness, feedback, joint-limit, transport, and firmware safety gates before forwarding a command. |
+| `/catheter_mppi` | Runs the estimator/UKF, delayed-marker rewind and replay, engagement and gain beliefs, learned-model rollouts, MPPI planning, take-up transactions, and the command heartbeat. These are callbacks and workers inside one ROS node, not separate estimator and planner nodes. |
+| `/catheter_tip_trajectory` | Sends timed waypoint or sparse-point goals to the controller's trajectory action server. It is idle when no trajectory is requested. |
+| `/catheter_tip_path` | Sends continuous paths to the controller's path action server. It is idle when no path is requested. |
+
+Experiment and visualization launches may additionally run
+`/catheter_sparse_point_experiment`, `/collection`,
+`/catheter_camera_overlay`, RViz, and a rosbag recorder. These orchestrate
+tests, visualization, or recording; they are not part of the actuator feedback
+loop.
+
+The feedback and command paths are:
+
+```text
+VISUAL FEEDBACK
+ZED rigs -> /marker_tracking -> /shape_tracking/markers
+                               -> /catheter_mppi estimator
+
+ENCODER AND SAFETY FEEDBACK
+Teensy -> /device_serial_com -> /device/state
+                              -> /catheter_mppi estimator
+                              -> /manager safety gates
+
+AUTONOMOUS COMMAND
+trajectory/path client -> /catheter_mppi action server
+                       -> MPPI plan or take-up command
+                       -> /teleop/control
+                       -> /manager
+                       -> /manager/control
+                       -> /device_serial_com
+                       -> Teensy firmware -> motor drivers
+```
+
+Despite its historical name, `/teleop/control` is the manager's generic
+high-level motion-intent input, not a keyboard-only topic. Both Slicer/manual
+teleoperation and autonomous MPPI publish `ControlStream` messages there.
+The message's `header.frame_id` identifies the source, while the manager owns
+source arbitration, mode authorization, safety projection, and forwarding to
+`/manager/control`. Renaming this deployed topic would require a coordinated
+interface migration; new code should treat it as the command-intent bus.
+
 The supported hardware startup order is:
 
 1. Motor-driver power off.
@@ -133,6 +182,14 @@ any additional transform names explicitly assigned in that configuration.
 The estimator launch uses `~/state_estimation`, `~/cr-common`, and
 `~/cr-venv` by default. Override these locations with
 `STATE_ESTIMATION_PATH`, `CR_COMMON_PATH`, and `CR_VENV`.
+
+## Codebase architecture and cleanup
+
+The maintained cross-repository cleanup, ROS package decomposition, and
+Python/C++ production migration plan is in
+[`docs/architecture/CODEBASE_CLEANUP_AND_PRODUCTION_MIGRATION_PLAN.md`](docs/architecture/CODEBASE_CLEANUP_AND_PRODUCTION_MIGRATION_PLAN.md).
+Structural cleanup is behavior preserving and is qualified separately from
+controller, estimator, scheduling, model, and firmware changes.
 
 ## Serial device
 
