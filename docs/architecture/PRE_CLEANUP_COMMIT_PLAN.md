@@ -15,6 +15,7 @@ whole-file sweep.
 | R5 — manager and serial safety | complete: `bc242f7` | exact index snapshot built `control_interface`; all 70 manager/transport safety tests passed |
 | R6 — firmware safety | complete: `20f2930` | exact index snapshot passed all 8 C++ host regressions and 2 firmware source-contract tests; no flash performed |
 | R7 — maintained docs and audit summaries | complete: `29618f0` | 99 Markdown files passed relative-link validation; staged diff contained only text/vector documentation artifacts |
+| R8 — reproducible audit tooling | complete: `3e320be` | exact staged snapshot compiled; 6 focused tests and 10 non-actuating CLI checks passed |
 | M1 + M2 — active v171 deployment and runtime models | complete: `4b210cd` | exact staged snapshot passed 51 focused tests |
 
 The deployment package is now intentionally v171-only and lazy. The uncommitted
@@ -177,6 +178,18 @@ Verification checked whitespace, validated relative links in all 99 staged
 Markdown files, and confirmed that the commit contained only Markdown, CSV,
 YAML, DOT/SVG, README, and ignore-policy files. No hardware or runtime process
 was started.
+
+### R8 — reproducible audit tooling (complete)
+
+The remaining twelve audit-analysis Python files are maintained reproducibility
+tools rather than runtime dependencies. Their catalog and safety boundary are
+documented in `audits/TOOLING.md`. Developer-specific workspace defaults were
+replaced with paths derived from the repository location. The live passive
+monitor remains subscription-only and the other tools consume recorded data.
+
+The exact staged snapshot passed source compilation, six focused offline tests,
+and ten CLI loading checks in the supported ROS 2 and `cr-venv` environment.
+No publisher, service client, device link, or hardware process was opened.
 
 ## `cr_meta_lnn`
 
