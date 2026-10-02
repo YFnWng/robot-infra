@@ -41,7 +41,7 @@ from .orchestration.diagnostics import (
     transmission_diagnostic_values)
 from .orchestration.estimator_owner import marker_measurement, stamp_ns
 from .orchestration.parameters import declare_parameters
-from .orchestration.runtime import load_runtime
+from .orchestration.runtime import load_runtime_pair
 from .transmission.engaged_gain import EngagedGainConfig
 from .safety.hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
 from .safety.lifecycle import (
@@ -210,6 +210,9 @@ class CatheterControlNode(Node):
         torch.set_num_interop_threads(self.torch_interop_threads)
         self.compute_device = resolve_compute_device(
             str(self.get_parameter("device").value))
+        requested_estimator = str(self.get_parameter("estimator_device").value).strip()
+        self.estimator_compute_device = resolve_compute_device(
+            requested_estimator or str(self.compute_device.device))
 
         runtime_options = dict(
             estimator_initialization_observations=self.required_observations,
@@ -271,10 +274,13 @@ class CatheterControlNode(Node):
             adaptation_maximum_direction_deviation_deg=float(
                 self.get_parameter(
                     "adaptation_maximum_direction_deviation_deg").value))
-        self.runtime_bundle = load_runtime(
+        self.runtime_bundle, self.planner_runtime_bundle = load_runtime_pair(
             str(self.get_parameter("model_manifest").value),
-            device=str(self.compute_device.device), options=runtime_options)
+            estimator_device=str(self.estimator_compute_device.device),
+            estimator_dtype=str(self.get_parameter("estimator_dtype").value).strip() or "float32",
+            planner_device=str(self.compute_device.device), options=runtime_options)
         self.runtime = self.runtime_bundle.runtime
+        self.planner_runtime = self.planner_runtime_bundle.runtime
         self.model_diagnostics = self.runtime.diagnostics()
         self.model_valid = True
         self.contract = load_hardware_contract(
@@ -471,7 +477,7 @@ class CatheterControlNode(Node):
                 cooldown_s=float(self.get_parameter(
                     "reversal_scheduler_cooldown_s").value)))
         self.planner = CatheterMppi(
-            self.runtime, self.contract,
+            self.planner_runtime, self.contract,
             MppiConfig(
                 horizon_steps=int(
                     self.get_parameter("horizon_steps").value),
@@ -719,6 +725,7 @@ class CatheterControlNode(Node):
             if flat.size == 0 or flat.size % 3:
                 raise ValueError(
                     "logical_displacements must contain flattened triplets")
+            root = self._planner_root_on_device(root)
             prediction = self.planner.predict_sparse_targets(
                 root, position, observed_tip, flat.reshape(-1, 3),
                 int(request.rollout_steps),
@@ -865,6 +872,19 @@ class CatheterControlNode(Node):
             self.pending_encoder_timestamp_ns = None
             self.pending_encoder_arrival = None
             return sample
+
+    def _planner_root_on_device(self, root):
+        """Complete blocking handoff outside owner/exchange locks, once per solve."""
+        if (root.motor_angle_rad.device == self.planner_runtime.device
+                and root.motor_angle_rad.dtype == self.planner_runtime.dtype):
+            return root
+        started = self._steady()
+        try:
+            if root.motor_angle_rad.dtype != self.planner_runtime.dtype:
+                return root.clone_to(self.planner_runtime.device, dtype=self.planner_runtime.dtype)
+            return root.clone_to(self.planner_runtime.device)
+        finally:
+            self._timing.record_seconds("plan_snapshot_transfer", self._steady()-started)
 
     def _publish_planner_snapshot(
             self, state, source_time, transmission_state=None):
@@ -1680,6 +1700,7 @@ class CatheterControlNode(Node):
                     with self._lock:
                         self._fault_locked(str(error))
                     return
+            root = self._planner_root_on_device(root)
             plan = self.planner.plan(
                 root, position, target,
                 target_tangent_base=(
@@ -2472,6 +2493,10 @@ class CatheterControlNode(Node):
                     self.raw_response_during_interface_takeup),
                 takeup_response_free_mask=self.takeup_response_free_mask))
             values.update(compute_device_diagnostics(self.compute_device))
+            values["estimator_compute_device"] = str(self.estimator_compute_device.device)
+            values["planner_compute_device"] = str(self.compute_device.device)
+            values["estimator_compute_dtype"] = str(self.runtime.dtype)
+            values["planner_compute_dtype"] = str(self.planner_runtime.dtype)
             values.update({
                 key: (str(value) if isinstance(value, int)
                       else f"{value:.6g}")

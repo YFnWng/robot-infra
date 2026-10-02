@@ -38,7 +38,7 @@ class ReplayEvent:
     quality: dict | None = None
 
 
-def read_events(session: Path, prefix: str = ""):
+def read_events(session: Path, prefix: str = "", *, include_status=False):
     """Reuse the storage/CDR and marker conversion used by existing audits."""
     import rosbag2_py
     from rclpy.serialization import deserialize_message
@@ -54,6 +54,8 @@ def read_events(session: Path, prefix: str = ""):
     selected = {prefix + "/device/state": "device",
                 prefix + "/shape_tracking/markers": "marker",
                 prefix + "/catheter_mppi/control_cycle_timing": "plan"}
+    if include_status:
+        selected[prefix + "/catheter_mppi/status"] = "status"
     classes = {x.name: get_message(x.type)
                for x in reader.get_all_topics_and_types() if x.name in selected}
     if len(classes) != len(selected):
@@ -68,7 +70,10 @@ def read_events(session: Path, prefix: str = ""):
         if stamp <= 0:
             raise ValueError(f"invalid source timestamp: {topic}")
         kind = selected[topic]
-        if kind == "marker":
+        if kind == "status":
+            values = {item.key: item.value for status in message.status for item in status.values}
+            events.append(ReplayEvent(receipt, stamp, kind, values))
+        elif kind == "marker":
             stamp, points, quality = marker_measurement(message, "robot_base")
             events.append(ReplayEvent(receipt, stamp, kind, points, quality))
         elif kind == "plan":
@@ -114,7 +119,8 @@ class Measurements:
 def replay(runtime, contract, config, events, targets, *, start_ns, end_ns,
            measured: Measurements, encoder_period_ns=20_000_000,
            marker_period_ns=50_000_000, transmission_state=None,
-           direction_lease=None, on_window_start=None):
+           direction_lease=None, on_window_start=None, on_estimator_event=None,
+           before_event=None):
     """Sequential causal workload, preserving prefix history before the window.
 
     Encoders are thinned at the configured source-time recurrence period;
@@ -137,6 +143,8 @@ def replay(runtime, contract, config, events, targets, *, start_ns, end_ns,
             window_started = True
             if on_window_start is not None:
                 on_window_start()
+        if before_event is not None:
+            before_event(event)
         while target_index < len(targets) and targets[target_index][0] <= event.receipt_ns:
             target = targets[target_index][1]
             target_index += 1
@@ -151,6 +159,8 @@ def replay(runtime, contract, config, events, targets, *, start_ns, end_ns,
                        event.source_ns, event.values)
             meter.call("diagnostics", event.source_ns, runtime.diagnostics)
             meter.call("snapshot_clone", event.source_ns, runtime.clone_state)
+            if on_estimator_event is not None:
+                on_estimator_event("encoder", event, None)
         elif event.kind == "plan" and runtime.state is not None and position is not None and target is not None:
             # Fresh seed + zero nominal freezes proposal noise for each case.
             # Do not reuse a warm start that depends on machine-specific misses.
@@ -172,6 +182,8 @@ def replay(runtime, contract, config, events, targets, *, start_ns, end_ns,
                 and event.receipt_ns-last_marker >= marker_period_ns):
             marker, pending = pending, None
             last_marker = event.receipt_ns
+            if on_estimator_event is not None:
+                on_estimator_event("before_marker", marker, None)
             # Read-only workload accounting of the exact retained replay grid.
             replay_times = [entry.timestamp_ns for entry in runtime._rewind
                             if entry.timestamp_ns > marker.source_ns]
@@ -186,17 +198,32 @@ def replay(runtime, contract, config, events, targets, *, start_ns, end_ns,
                                 marker.values, marker.quality)
             meter.call("diagnostics", marker.source_ns, runtime.diagnostics)
             meter.call("snapshot_clone", marker.source_ns, runtime.clone_state)
+            if on_estimator_event is not None:
+                on_estimator_event("marker", marker, result)
             if meter is measured:
                 early_rejection = result.reason in {
                     "observation_from_future", "observation_too_old",
                     "observation_before_rewind_buffer"}
                 corrections.append({"source_ns": marker.source_ns,
                                     "accepted": result.accepted, "reason": result.reason,
+                                    "observable_rank": getattr(result, "observable_rank", None),
                                     "replay_entries": len(replay_times) if result.accepted else 0,
                                     "replay_substeps": replay_substeps if result.accepted else 0,
                                     "timing_ms": ({} if early_rejection else
                                                   dict(runtime.last_marker_timing_ms))})
     return plans, corrections
+
+
+def require_controller_idle():
+    """Refuse profiling alongside a detected local controller; never stop it."""
+    for process in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            command = process.read_bytes().decode(errors="replace").split("\0")
+        except (OSError, PermissionError):
+            continue
+        if any(Path(token).name == "catheter_mppi" or token == "catheter_control.node"
+               for token in command):
+            raise RuntimeError("stop the controller before compute profiling; no process was stopped")
 
 
 def main(argv=None):
@@ -224,14 +251,7 @@ def main(argv=None):
         parser.error("intrusive traces are limited to 2 s; use a separate longer timing run")
     # Avoid accidentally overwriting an earlier measurement or trace.
     args.output.mkdir(parents=True, exist_ok=False)
-    for process in Path("/proc").glob("[0-9]*/cmdline"):
-        try:
-            command = process.read_bytes().decode(errors="replace").split("\0")
-        except (OSError, PermissionError):
-            continue
-        if any(Path(token).name == "catheter_mppi" or token == "catheter_control.node"
-               for token in command):
-            raise RuntimeError("stop the controller before compute profiling; no process was stopped")
+    require_controller_idle()
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
     from cr_meta_lnn.deployment import load_runtime_bundle

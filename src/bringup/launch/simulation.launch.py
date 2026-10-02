@@ -262,6 +262,8 @@ def _setup(context, *_args, **_kwargs):
         "limits_file": value("limits_file"),
         "catheter": value("catheter"),
         "device": value("device"),
+        "estimator_device": value("estimator_device"),
+        "estimator_dtype": value("estimator_dtype"),
         "frame_id": value("frame_id"),
     }
     plan_rate_hz = float(controller_profile_parameters.get(
@@ -637,6 +639,10 @@ def generate_launch_description():
         DeclareLaunchArgument("limits_file", default_value=_default_limits()),
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("device", default_value="cpu"),
+        DeclareLaunchArgument("estimator_dtype", default_value="",
+                             description="Estimator precision: float32 (default) or opt-in float64"),
+        DeclareLaunchArgument("estimator_device", default_value="",
+                              description="Estimator device; empty inherits controller device."),
         DeclareLaunchArgument(
             "truth_model_device", default_value="cpu",
             description=(

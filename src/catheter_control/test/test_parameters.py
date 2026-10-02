@@ -20,7 +20,7 @@ def test_controller_parameter_surface_is_complete_and_stable():
 
     names = [name for name, _ in node.declarations]
     values = dict(node.declarations)
-    assert len(names) == 125
+    assert len(names) == 127
     assert names[:6] == [
         "source_name",
         "command_output_enabled",
@@ -34,6 +34,8 @@ def test_controller_parameter_surface_is_complete_and_stable():
     assert values["source_name"] == "catheter_mppi"
     assert values["command_output_enabled"] is False
     assert values["model_manifest"] == ""
+    assert values["estimator_device"] == ""
+    assert values["estimator_dtype"] == ""
     assert values["marker_estimator"] == "gauss_newton"
     assert values["samples"] == 32
     assert values["horizon_steps"] == 4

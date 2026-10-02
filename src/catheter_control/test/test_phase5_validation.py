@@ -9,6 +9,15 @@ from catheter_control.node import CatheterControlNode
 from catheter_control.safety.validation import percentile_metrics, response_metrics
 
 
+def test_trace_environment_uses_ros2_header_and_time():
+    from builtin_interfaces.msg import Time
+    from std_msgs.msg import Header
+
+    stamp = Header().stamp
+    assert isinstance(stamp, Time), "ROS 1 Header shadowed ROS 2; put Humble paths before system dist-packages"
+    assert hasattr(stamp, "sec") and hasattr(stamp, "nanosec")
+
+
 def test_percentile_metrics_reports_milliseconds():
     result = percentile_metrics([1.0, 2.0, 3.0, 4.0])
 

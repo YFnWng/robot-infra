@@ -144,7 +144,7 @@ def test_model_manifest_routes_to_truth_and_controller():
     assert '"model_manifest": effective_model_manifest' in launch
     assert "load_runtime_bundle" in perception
     assert 'get_parameter("model_manifest")' in perception
-    assert "self.runtime_bundle = load_runtime" in controller
+    assert "self.runtime_bundle, self.planner_runtime_bundle = load_runtime_pair" in controller
     assert 'get_parameter("model_manifest")' in controller
 
 

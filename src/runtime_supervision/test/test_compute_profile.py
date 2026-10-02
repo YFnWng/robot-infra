@@ -88,3 +88,26 @@ def test_measurement_exception_is_not_swallowed():
     with pytest.raises(RuntimeError, match="test"):
         meter.call("failure", 1, fail)
     assert not meter.rows
+
+
+def test_optional_event_observer_preserves_causal_order():
+    runtime = Runtime()
+    rows = []
+    events = [ReplayEvent(100, 100, "encoder", np.zeros(6)),
+              ReplayEvent(110, 100, "marker", np.zeros((4, 3)), {})]
+    replay(runtime, None, None, events, [], start_ns=0, end_ns=200,
+           measured=Measurements(), on_estimator_event=lambda stage, event, result:
+           rows.append((stage, event.source_ns, result is not None)))
+    assert rows == [("encoder", 100, False), ("before_marker", 100, False), ("marker", 100, True)]
+    assert runtime.counts == [100] and runtime.observations == [100]
+
+
+def test_receipt_hook_runs_before_owner_mutation_including_prefix():
+    runtime = Runtime()
+    rows = []
+    events = [ReplayEvent(100, 100, "encoder", np.zeros(6)),
+              ReplayEvent(130, 130, "encoder", np.zeros(6))]
+    replay(runtime, None, None, events, [], start_ns=120, end_ns=140,
+           measured=Measurements(), encoder_period_ns=20,
+           before_event=lambda event: rows.append((event.receipt_ns, len(runtime.counts))))
+    assert rows == [(100, 0), (130, 1)]

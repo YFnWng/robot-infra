@@ -15,6 +15,8 @@ ALLOWED_STACK_KEYS = {
 }
 FORBIDDEN_PARAMETERS = {"command_output_enabled"}
 ACTIVE_CONTROLLER_PARAMETERS = frozenset({
+    "estimator_device",
+    "estimator_dtype",
     "adaptation_enabled",
     "backlash_width_rad",
     "backlash_width_positive_rad",

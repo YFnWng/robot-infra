@@ -184,6 +184,8 @@ def _setup(context, *_args, **_kwargs):
             "limits_file": value("limits_file"),
             "catheter": value("catheter"),
             "device": value("device"),
+            "estimator_device": value("estimator_device"),
+            "estimator_dtype": value("estimator_dtype"),
             "marker_estimator": value("marker_estimator"),
             "estimator_filter_initial_covariance": float(
                 value("estimator_filter_initial_covariance")),
@@ -525,6 +527,10 @@ def generate_launch_description():
         DeclareLaunchArgument("limits_file", default_value=_default_limits()),
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("device", default_value="cpu"),
+        DeclareLaunchArgument("estimator_dtype", default_value="",
+                             description="Estimator precision: float32 (default) or opt-in float64"),
+        DeclareLaunchArgument("estimator_device", default_value="",
+                             description="Estimator device; empty preserves the planner device."),
         DeclareLaunchArgument(
             "marker_estimator", default_value="gauss_newton",
             description=(

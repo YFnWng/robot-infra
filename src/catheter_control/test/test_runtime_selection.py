@@ -37,3 +37,68 @@ def test_individual_legacy_artifacts_fail_closed():
 def test_missing_selection_fails_closed():
     with pytest.raises(ValueError, match="model_manifest is required"):
         resolve_model_selection("")
+
+
+def test_runtime_pair_reuses_same_device_and_checks_split_identity(monkeypatch):
+    from types import SimpleNamespace
+    from catheter_control.orchestration import runtime
+
+    identity = SimpleNamespace(manifest_sha256="abc", artifacts=("hash",), dtype="float32", runtime_family="v171")
+    calls = []
+    def load(manifest, **kwargs):
+        calls.append(kwargs["device"])
+        return SimpleNamespace(identity=identity, runtime=object())
+    monkeypatch.setattr(runtime, "load_runtime", load)
+    a, b = runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cpu")
+    assert a is b and calls == ["cpu"]
+    a, b = runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cuda:0")
+    assert a is not b
+    def mismatch(manifest, **kwargs):
+        other = SimpleNamespace(manifest_sha256=kwargs["device"], artifacts=("hash",), dtype="float32", runtime_family="v171")
+        return SimpleNamespace(identity=other)
+    monkeypatch.setattr(runtime, "load_runtime", mismatch)
+    with pytest.raises(ValueError, match="identity mismatch"):
+        runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cuda:0")
+
+
+def test_split_runtime_rejects_old_snapshot_api(monkeypatch):
+    from types import SimpleNamespace
+    from catheter_control.orchestration import runtime
+    import cr_meta_lnn.deployment as deployment
+
+    monkeypatch.setattr(runtime, "load_runtime", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(deployment, "RuntimeState", object)
+    with pytest.raises(ValueError, match="updated model package"):
+        runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cuda:0")
+
+
+def test_mixed_precision_pair_on_same_device_is_not_reused(monkeypatch):
+    from types import SimpleNamespace
+    from catheter_control.orchestration import runtime
+    calls = []
+    def load(manifest, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(identity=SimpleNamespace(
+            manifest_sha256="abc", artifacts=("hash",), dtype=kwargs["dtype"], runtime_family="v171"))
+    monkeypatch.setattr(runtime, "load_runtime", load)
+    a, b = runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cpu",
+                                    estimator_dtype="float64")
+    assert a is not b
+    assert [call["dtype"] for call in calls] == ["float64", "float32"]
+    with pytest.raises(ValueError, match="dtype must"):
+        runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cpu",
+                                 estimator_dtype="float16")
+
+
+def test_mixed_precision_rejects_old_dtype_api(monkeypatch):
+    from types import SimpleNamespace
+    from catheter_control.orchestration import runtime
+    import cr_meta_lnn.deployment as deployment
+    class OldState:
+        def clone_to(self, device):
+            pass
+    monkeypatch.setattr(runtime, "load_runtime", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(deployment, "RuntimeState", OldState)
+    with pytest.raises(ValueError, match="dtype-aware"):
+        runtime.load_runtime_pair("manifest", estimator_device="cpu", planner_device="cuda:0",
+                                 estimator_dtype="float64")

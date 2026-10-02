@@ -223,6 +223,27 @@ deployment packaging and frozen planner conformance pass. Isolated FK P50 at
 reuse and larger propagation-payload redesign remain follow-ups. Full-stack
 timing and installed-model promotion are not qualified by this microbenchmark.
 
+O2 implementation (2026-10-02): opt-in independent estimator/planner devices,
+complete packed snapshot transfer outside owner locks, transfer timing, and a
+bounded concurrent recorded-input comparison are available. Shared-device
+defaults remain unchanged. CPU estimator tails improve, but planner tails do
+not, and strict complete UKF CPU/CUDA numerical conformance remains open;
+therefore **O2 qualification is pending**, not a default deployment change.
+See [implementation, measurements and remaining gate](O2_COMPUTE_ISOLATION_20261002.md).
+The follow-up [numerical diagnostic](O2_ESTIMATOR_NUMERICS_20261002.md) confirms
+float32 observable-rank sensitivity from identical priors; float64 passes
+complete 45-second replay conformance. Stabilize correction arithmetic before
+promoting the split, then qualify the full adaptive planner workload.
+The next [precision-boundary slice](O2_PRECISION_BOUNDARY_20261002.md) adds an
+opt-in full float64 CPU estimator with an explicitly cast float32 GPU planner
+snapshot. Numerical equations and default behavior remain unchanged; hardware
+and representative adaptive-workload qualification are still pending.
+The [paced recorded-input gate](O2_PACED_QUALIFICATION_20261002.md) now exercises
+evolving float64 snapshots, recorded directional gain bounds and the actual
+512-sample/three-scenario configuration. The phase-5 failure was resolved as a
+ROS 1/ROS 2 import-order conflict, not an estimator defect. Live-stack timing
+qualification remains separate from this bounded non-actuating replay.
+
 ## 6. Where C++ helps, and where it does not
 
 Preferred eventual boundary:

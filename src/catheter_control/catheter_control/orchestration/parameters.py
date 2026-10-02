@@ -38,6 +38,8 @@ def declare_parameters(node, *, source_name):
     # final independent safety authority.
     node.declare_parameter("controller_velocity_max", [-1.0]*6)
     node.declare_parameter("device", "cpu")
+    node.declare_parameter("estimator_device", "")
+    node.declare_parameter("estimator_dtype", "")
     node.declare_parameter("marker_estimator", "gauss_newton")
     node.declare_parameter("estimator_filter_initial_covariance", 0.25)
     node.declare_parameter("estimator_filter_process_std_sqrt_s", 1.0)
