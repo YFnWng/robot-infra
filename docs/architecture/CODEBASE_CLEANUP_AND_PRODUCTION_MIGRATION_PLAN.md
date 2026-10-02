@@ -396,11 +396,11 @@ package reusable code, and isolate legacy deployment/research pipelines. The
 staged implementation and acceptance gates are defined in the
 [Phase 5 model deployment stabilization plan](PHASE5_MODEL_DEPLOYMENT_STABILIZATION_PLAN.md).
 
-Status: P5.0-P5.2 complete. The selected closure is machine-readable, the
-semantic API wraps the unchanged concrete v171 runtime, and schema-v2 manifest
-selection verifies compatibility, qualification, loader contracts, and hashes
-before construction. Packaging, consumer migration, and legacy isolation
-remain.
+Status: P5.0-P5.3 complete. The selected closure is machine-readable, the
+semantic API wraps the unchanged concrete v171 runtime, schema-v2 manifest
+selection verifies compatibility and artifacts before construction, and the
+model plus its `control` and `cr-common` dependencies build and load as wheels.
+Consumer migration and legacy isolation remain.
 
 
 ### Phase 6 -- promote stable algorithms to C++

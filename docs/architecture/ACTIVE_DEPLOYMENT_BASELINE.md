@@ -49,6 +49,15 @@ manifest declares reviewed legacy paths, and its fail-closed alias materializer
 creates relative symlinks for historical reproduction tools without duplicating
 artifact bytes.
 
+## Python package boundary
+
+The supported deployment distributions are `cr-meta-lnn==1.0.0`,
+`catheter-control==0.1.0` (import name `control`), and `cr-common==0.1.0`.
+NumPy and PyTorch remain explicit runtime dependencies; plotting, HDF5, pandas,
+SciPy, and YAML experiment tooling are optional research dependencies. Model
+artifacts remain a separate manifest-owned bundle and are not embedded in the
+Python wheel.
+
 ## Configuration boundary
 
 Active launches accept reviewed semantic stack names from

@@ -1,6 +1,6 @@
 # Phase 5 Model Deployment Stabilization Plan
 
-Status: P5.0-P5.2 implemented; P5.3-P5.6 pending
+Status: P5.0-P5.3 implemented; P5.4-P5.6 pending
 Primary repository: `cr_meta_lnn`
 Consumer repository: `robot-infra`
 Baseline: `catheter-stack-pre-cleanup-20261001`
@@ -15,7 +15,11 @@ Current gate status:
 - P5.2: schema-v2 migration, manifest-selected construction, compatibility and
   qualification gates, loader allow-lists, immutable identity, relocation, and
   numerical-equivalence tests implemented. Artifact bytes remain unchanged.
-- P5.3-P5.6: pending. The schema-v1 manifest is retained only as explicit
+- P5.3: `cr-meta-lnn==1.0.0`, `catheter-control==0.1.0`, and the existing
+  `cr-common==0.1.0` build as wheels with explicit runtime dependencies. An
+  isolated install loads a relocated bundle and runs a rollout from `/tmp`
+  without source checkout or current-working-directory assumptions.
+- P5.4-P5.6: pending. The schema-v1 manifest is retained only as explicit
   migration input.
 
 Phase 4 representative timing qualification is explicitly deferred. That does
@@ -66,8 +70,8 @@ prediction, and batched control rollout.
 
 The current deployment works, but the boundary is not yet stable:
 
-1. `cr_meta_lnn` has no installable package metadata. Tests and ROS consumers
-   rely on source-tree path injection.
+1. At phase start, `cr_meta_lnn` had no installable package metadata. P5.3
+   added the wheel boundary; ROS source-path injection remains until P5.4.
 2. ROS launch and controller parameters expose a repository root plus separate
    artifact paths. A manifest exists, but it is not the single load authority.
 3. `robot-infra/control_tasks/camera_overlay.py` imports
@@ -392,4 +396,4 @@ The safest first implementation slice is P5.0 plus P5.1:
 4. retain and test the `V171StreamingCatheterRuntime` alias;
 5. make no edits to unrelated research files and no artifact changes.
 
-That slice and P5.2 are complete. The next gate is P5.3 packaging.
+P5.0-P5.3 are complete. The next gate is P5.4 consumer migration.
