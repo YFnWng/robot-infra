@@ -1,6 +1,6 @@
 # Phase 5 Model Deployment Stabilization Plan
 
-Status: P5.0 and P5.1 implemented; P5.2-P5.6 pending
+Status: P5.0-P5.2 implemented; P5.3-P5.6 pending
 Primary repository: `cr_meta_lnn`
 Consumer repository: `robot-infra`
 Baseline: `catheter-stack-pre-cleanup-20261001`
@@ -12,8 +12,11 @@ Current gate status:
   delayed-correction, rewind/replay, and rollout fixtures verified.
 - P5.1: lightweight semantic API and lazy v171 compatibility aliases
   implemented and verified.
-- P5.2-P5.6: pending. The version-1 manifest and all artifact bytes remain
-  unchanged.
+- P5.2: schema-v2 migration, manifest-selected construction, compatibility and
+  qualification gates, loader allow-lists, immutable identity, relocation, and
+  numerical-equivalence tests implemented. Artifact bytes remain unchanged.
+- P5.3-P5.6: pending. The schema-v1 manifest is retained only as explicit
+  migration input.
 
 Phase 4 representative timing qualification is explicitly deferred. That does
 not block this behavior-preserving packaging and API work, but it remains a
@@ -389,4 +392,4 @@ The safest first implementation slice is P5.0 plus P5.1:
 4. retain and test the `V171StreamingCatheterRuntime` alias;
 5. make no edits to unrelated research files and no artifact changes.
 
-Only after that slice is reviewed should manifest schema 2 and packaging begin.
+That slice and P5.2 are complete. The next gate is P5.3 packaging.

@@ -34,7 +34,7 @@ not authorize a hardware run.
 ## Model artifacts
 
 The portable source of truth is
-`cr_meta_lnn/artifacts/manifests/20260929_175554_grouped_no_rotation.json`.
+`cr_meta_lnn/artifacts/manifests/20260929_175554_grouped_no_rotation_v2.json`.
 It declares the v171 distal checkpoint, v174 Jacobian initialization, and v175
 interface-transmission checkpoint by relative path, byte size, SHA-256 digest,
 loader, and role. Binary files remain external to Git.
@@ -77,7 +77,7 @@ and `command_output_enabled` remains an explicit launch-only interlock. See
 - [Clean-source cross-repository gate](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)
 - [Historical active runtime closure](ACTIVE_RUNTIME_CLOSURE_20260929.md)
 - [Machine-readable historical session baseline](production_baselines/20260929_175554_grouped_no_rotation.json)
-- `cr_meta_lnn/artifacts/manifests/20260929_175554_grouped_no_rotation.json`
+- `cr_meta_lnn/artifacts/manifests/20260929_175554_grouped_no_rotation_v2.json`
 
 Any change to model equations, artifacts, controller costs, belief thresholds,
 scheduling, ROS interfaces, or safety behavior creates a new candidate
