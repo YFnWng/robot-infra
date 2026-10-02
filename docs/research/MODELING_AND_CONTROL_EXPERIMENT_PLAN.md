@@ -296,6 +296,18 @@ tools; do not duplicate their parsers or mathematical implementations.
 
 ## Required analysis and result-generation scripts
 
+### Recording readiness correction (2026-10-02)
+
+The initial coordinated session failed with rosbag SQLite `database is locked`.
+The supervisor no longer queries the active database. Readiness now combines
+the owned recorder's process liveness, storage-file existence, its required
+ROS graph subscriptions, fresh telemetry and camera recording diagnostics.
+The manifest stores recorder evidence and missing subscriptions; a readiness
+loss preserves the failing snapshot. Database integrity/content validation
+remains mandatory after all owned processes stop. This changes no controller,
+manager or firmware safety gate and does not permit resuming a failed session.
+See `audits/ros-realtime/RECORDING_READINESS_20261002.md` for evidence and tests.
+
 ### Implemented bag-evidence gate
 
 After the coordinated recorder is finalized, use a sourced ROS Humble terminal:

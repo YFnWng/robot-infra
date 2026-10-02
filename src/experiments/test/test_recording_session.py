@@ -10,8 +10,9 @@ import pytest
 import yaml
 
 from experiments.recording_session import (
-    allocate_session, live_bag_ready, qualify_recording, session_token, write_manifest)
-from experiments.session_recording import RecordingProcess, finalize_session
+    allocate_session, recorder_readiness, qualify_recording, session_token, write_manifest)
+from experiments.session_recording import (
+    RecordingProcess, finalize_session, recorder_subscriptions)
 
 
 @pytest.mark.parametrize("value", ["", "../outside", "/tmp", "UpperCase", "a b", "a;cmd"])
@@ -54,13 +55,30 @@ def test_bag_qualification_and_missing_topics(tmp_path):
     assert "missing recorded messages" in result["errors"][0]
 
 
-def test_live_readiness_requires_initialized_storage_and_required_topics(tmp_path):
+def test_live_readiness_never_opens_storage(tmp_path, monkeypatch):
     bag = tmp_path / "robot_bag"
-    assert not live_bag_ready(bag, ["/device/state"])
-    finalized_bag(tmp_path)
-    assert live_bag_ready(bag, ["/device/state"])
-    assert not live_bag_ready(bag, ["/missing"])
-    assert not live_bag_ready(bag, [])
+    def forbidden(*args, **kwargs):
+        pytest.fail("live readiness must not open SQLite")
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    assert not recorder_readiness(bag, ["/device/state"], ["/device/state"])["ready"]
+    bag.mkdir()
+    # Deliberately not a valid SQLite file: readiness only checks its existence.
+    (bag / "live.db3").touch()
+    assert recorder_readiness(bag, ["/device/state"], ["/device/state"])["ready"]
+    result = recorder_readiness(bag, ["/missing"], ["/device/state"])
+    assert not result["ready"]
+    assert result["missing_subscriptions"] == ["/missing"]
+    assert not recorder_readiness(bag, [], [])["ready"]
+
+
+def test_graph_readiness_excludes_other_nodes_and_namespaces():
+    from types import SimpleNamespace
+    endpoints = [SimpleNamespace(node_name="other", node_namespace="/"),
+                 SimpleNamespace(node_name="rosbag2_recorder", node_namespace="/other")]
+    node = SimpleNamespace(get_subscriptions_info_by_topic=lambda _: endpoints)
+    assert recorder_subscriptions(node, ["/device/state"]) == []
+    endpoints.append(SimpleNamespace(node_name="rosbag2_recorder", node_namespace="/"))
+    assert recorder_subscriptions(node, ["/device/state"]) == ["/device/state"]
 
 
 def test_missing_finalized_metadata_is_not_success(tmp_path):
@@ -134,6 +152,29 @@ def test_real_process_is_gracefully_finalized_without_ros_or_hardware(tmp_path):
     finally:
         result = owned.stop(grace_s=1)
     assert result == {"returncode": 0, "escalated": False}
+
+
+def test_sqlite_qualification_waits_for_process_shutdown(tmp_path, monkeypatch):
+    manifest = finalized_bag(tmp_path)
+    stopped = []
+    connect = sqlite3.connect
+
+    def after_shutdown(*args, **kwargs):
+        assert stopped == ["controller", "bag", "camera"]
+        return connect(*args, **kwargs)
+
+    class Owned:
+        def __init__(self, role):
+            self.role = role
+
+        def stop(self):
+            stopped.append(self.role)
+            # An aborted recorder remains failure even if leftover content is valid.
+            return {"returncode": -6 if self.role == "bag" else 0, "escalated": False}
+
+    monkeypatch.setattr(sqlite3, "connect", after_shutdown)
+    processes = {role: Owned(role) for role in ("controller", "bag", "camera")}
+    assert finalize_session(tmp_path, manifest, processes, "operator_stop", True) == "failed"
 
 
 def test_manifest_replacement_is_complete_json(tmp_path):

@@ -10,7 +10,14 @@ import subprocess
 import time
 
 from .recording_session import (
-    live_bag_ready, qualify_recording, utc_now, write_manifest)
+    recorder_readiness, qualify_recording, utc_now, write_manifest)
+
+
+def recorder_subscriptions(node, required_topics):
+    """Observe only the owned default recorder, not arbitrary subscribers."""
+    return [topic for topic in required_topics if any(
+        endpoint.node_name == "rosbag2_recorder" and endpoint.node_namespace == "/"
+        for endpoint in node.get_subscriptions_info_by_topic(topic))]
 
 
 class RecordingProcess:
@@ -102,6 +109,7 @@ def main(argv=None):
     received = {}
     camera_active = not manifest["video_enabled"]
     recorder_active = False
+    recorder_evidence = {}
     next_query = 0.0
     next_manifest = 0.0
     status = node.create_publisher(String, "/experiments/session_status", 10)
@@ -154,8 +162,10 @@ def main(argv=None):
                 if owned.process.poll() is not None:
                     raise RuntimeError(f"{role} exited unexpectedly; see {role}.log")
             if now >= next_query:
-                recorder_active = live_bag_ready(
-                    session / "robot_bag", manifest["required_topics"])
+                recorder_evidence = recorder_readiness(
+                    session / "robot_bag", manifest["required_topics"],
+                    recorder_subscriptions(node, manifest["required_topics"]))
+                recorder_active = recorder_evidence["ready"]
                 next_query = now + 1.0
             camera_fresh = not manifest["video_enabled"] or (
                 now - received.get("camera", -float("inf")) < 2.0)
@@ -164,15 +174,17 @@ def main(argv=None):
             fresh = all(now - received.get(key, -float("inf")) < 2.0
                         for key in streams)
             ready = camera_active and camera_fresh and recorder_active and fresh
-            if ready_once and not (camera_active and camera_fresh
-                                   and recorder_active):
-                raise RuntimeError("required recording readiness lost")
             state = "recording_ready" if ready else "recording_not_ready"
             manifest["readiness"] = {
                 "camera_active": camera_active and camera_fresh,
                 "recorder_active": recorder_active,
                 "telemetry_fresh": fresh, "observed_streams": sorted(received),
+                "recorder_evidence": recorder_evidence,
             }
+            if ready_once and not (camera_active and camera_fresh
+                                   and recorder_active):
+                raise RuntimeError(
+                    f"required recording readiness lost: {manifest['readiness']}")
             if manifest["state"] != state:
                 manifest["state"] = state
                 if ready:

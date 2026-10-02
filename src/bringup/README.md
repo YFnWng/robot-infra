@@ -72,11 +72,15 @@ avoid timezone ambiguity; existing directories are never overwritten.
 
 Wait for `recording_ready`, then operate the existing task client separately.
 Check `/experiments/session_status` or the manifest for readiness; subprocess
-output is saved to the three logs. Readiness requires live initialized SQLite
-storage with required topic registrations, fresh telemetry, and active camera
+output is saved to the three logs. Readiness requires an owned live recorder,
+a created storage file, required recorder subscriptions observed in the ROS
+graph, fresh telemetry, and active camera
 recording when requested. The owned recorder starts unpaused, without keyboard
-input; do not pause it externally during a trial. Finalized message counts
-are checked after flushing the cache.
+input; do not pause it externally during a trial. The supervisor never opens
+the active SQLite database: read-only connections can still compete with writes.
+Subscriptions/file existence do not prove durable message delivery. SQLite
+integrity and message counts are checked only after the recorder has exited
+and flushed its cache.
 
 Ctrl-C stops the controller first, finalizes the bag, then finalizes video.
 Wait for the final manifest before processing. Unexpected child exit or loss

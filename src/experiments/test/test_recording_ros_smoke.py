@@ -47,8 +47,14 @@ def test_real_bag_supervision_finalizes_on_interrupt(tmp_path):
                 time.sleep(0.1)
             assert document.get("state") == "recording_ready", (
                 tmp_path / "supervisor.log").read_text()
-            # Allow messages to reach finalized storage before intentional stop.
-            time.sleep(0.5)
+            # Exercise repeated graph-only probes while the real recorder writes.
+            for _ in range(60):
+                time.sleep(0.1)
+                assert process.poll() is None
+                document = json.loads(manifest_path.read_text())
+                assert document["state"] == "recording_ready"
+                assert document["readiness"]["recorder_evidence"]["probe"] == (
+                    "ros_graph_and_file_existence")
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGINT)

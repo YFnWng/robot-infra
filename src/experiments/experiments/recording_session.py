@@ -44,23 +44,21 @@ def write_manifest(path: Path, document: dict) -> None:
     temporary.replace(path)
 
 
-def live_bag_ready(bag: Path, required_topics: list[str]) -> bool:
-    """Confirm SQLite initialization and required recorder subscriptions.
+def recorder_readiness(bag: Path, required_topics: list[str],
+                       subscribed_topics: list[str]) -> dict:
+    """Use graph evidence and file existence only; never open active storage.
 
-    Humble installations differ in recorder-service availability. Registered
-    topics in the owned live storage provide evidence without parsing console
-    output; message counts are checked only after the write cache is finalized.
+    This establishes initialization/subscription readiness, not durable message
+    completeness. SQLite contents are qualified only after the recorder exits.
     """
-    recorded_topics = set()
-    try:
-        for database in bag.glob("*.db3"):
-            with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True,
-                                 timeout=0.05) as conn:
-                recorded_topics.update(row[0] for row in conn.execute(
-                    "SELECT name FROM topics"))
-    except (OSError, sqlite3.Error):
-        return False
-    return bool(required_topics) and set(required_topics) <= recorded_topics
+    storage_created = any(path.is_file() for path in bag.glob("*.db3"))
+    missing = sorted(set(required_topics) - set(subscribed_topics))
+    return {
+        "ready": bool(required_topics) and storage_created and not missing,
+        "storage_created": storage_created,
+        "missing_subscriptions": missing,
+        "probe": "ros_graph_and_file_existence",
+    }
 
 
 def qualify_recording(session: Path, manifest: dict) -> dict:
