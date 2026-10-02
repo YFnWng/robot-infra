@@ -35,9 +35,10 @@ active deployment boundary; it does not mean scientifically invalid.
 
 ### Other repositories
 
-- `cr_meta_lnn/deployment/v171_*.py`,
-  `interface_transmission_checkpoint.py`, and
-  `artifact_manifest.py`: supported runtime/model loading surface.
+- `cr_meta_lnn/deployment` semantic API and its selected v171 implementation,
+  `interface_transmission_checkpoint.py`, and `artifact_manifest.py`: supported
+  runtime/model loading surface. The `V171StreamingCatheterRuntime` export is a
+  temporary compatibility alias for `CatheterRuntime`.
 - `cr_meta_lnn/artifacts/manifests`: reviewed artifact metadata.
 - `control/control/adapj.py`: adaptive forward Jacobian.
 - `cr-common/utils.py`: shared deployment utility required by the runtime.

@@ -385,10 +385,21 @@ adapter, opt-in launch surface, shared cross-language fixtures, and static audit
 are implemented. Replay/simulation conformance and representative full-stack
 timing qualification remain open; no command authority has moved.
 
+Representative timing qualification is deferred by decision on 2026-10-01.
+This is not a passed gate: it remains required before any C++ command-authority
+promotion, but it does not block behavior-preserving Phase 5 packaging work.
+
 ### Phase 5 -- `cr_meta_lnn` deployment stabilization
 
 Narrow and version the deployment API, add artifact manifests and hashes,
-package reusable code, and isolate legacy deployment/research pipelines.
+package reusable code, and isolate legacy deployment/research pipelines. The
+staged implementation and acceptance gates are defined in the
+[Phase 5 model deployment stabilization plan](PHASE5_MODEL_DEPLOYMENT_STABILIZATION_PLAN.md).
+
+Status: P5.0-P5.1 complete. The selected closure is machine-readable, and the
+semantic deployment API wraps the unchanged concrete v171 runtime. Manifest
+schema migration, packaging, consumer migration, and legacy isolation remain.
+
 
 ### Phase 6 -- promote stable algorithms to C++
 

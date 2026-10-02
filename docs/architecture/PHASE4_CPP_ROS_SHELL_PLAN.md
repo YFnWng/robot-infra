@@ -1,6 +1,6 @@
 # Phase 4 C++ ROS Shell and Shadow Deployment Plan
 
-Status: shadow foundation implemented; conformance and timing qualification pending
+Status: shadow foundation implemented; conformance pending; timing qualification explicitly deferred
 Owning repository: `robot-infra`
 Depends on: completed Phase 3 package cleanup (`dd8d048`)
 
@@ -13,6 +13,10 @@ Current gate status:
 - P4.2: versioned request/decision protocol and Python adapter implemented.
 - P4.3-P4.5: conformance, simulation, and representative timing qualification pending.
 - P4.6-P4.7: not authorized; Python retains command authority.
+
+By decision on 2026-10-01, P4.5 representative full-stack timing
+qualification is deferred while Phase 5 deployment stabilization proceeds.
+Deferral is not acceptance: P4.5 remains a hard gate before P4.6 or P4.7.
 
 ## 1. Objective
 
