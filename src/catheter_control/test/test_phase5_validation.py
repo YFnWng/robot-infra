@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from catheter_control.backlash import TakeupTransactionArbiter
+from catheter_control.transmission.backlash import TakeupTransactionArbiter
 from catheter_control.node import CatheterControlNode
-from catheter_control.validation import percentile_metrics, response_metrics
+from catheter_control.safety.validation import percentile_metrics, response_metrics
 
 
 def test_percentile_metrics_reports_milliseconds():

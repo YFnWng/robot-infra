@@ -61,10 +61,18 @@ def repository_state(path: Path) -> dict:
 
 
 def module_roots(workspace: Path) -> dict[str, Path]:
+    robot_src = workspace / "robot-infra" / "src"
     return {
-        "catheter_control": workspace / "robot-infra" / "src" / "catheter_control" / "catheter_control",
-        "automation": workspace / "robot-infra" / "src" / "automation" / "automation",
-        "control_interface_py": workspace / "robot-infra" / "src" / "control_interface" / "control_interface_py",
+        "catheter_control": (
+            robot_src / "catheter_control" / "catheter_control"),
+        "control_tasks": robot_src / "control_tasks" / "control_tasks",
+        "simulation": robot_src / "simulation" / "simulation",
+        "perception": robot_src / "perception" / "perception",
+        "experiments": robot_src / "experiments" / "experiments",
+        "runtime_supervision": (
+            robot_src / "runtime_supervision" / "runtime_supervision"),
+        "control_interface_py": (
+            robot_src / "control_interface" / "control_interface_py"),
         "cr_meta_lnn": workspace / "cr_meta_lnn",
         "cr_common": workspace / "cr-common" / "cr_common",
         "control": workspace / "control",
@@ -220,17 +228,22 @@ def source_record(path: Path, workspace: Path, reasons: Iterable[str], role: str
 def explicit_source_files(workspace: Path, session: dict) -> list[tuple[Path, str]]:
     robot = workspace / "robot-infra"
     result: list[tuple[Path, str]] = [
-        (robot / "src/catheter_control/launch/control.launch.py", "hardware launch"),
+        (robot / "src/bringup/launch/control.launch.py",
+         "hardware launch"),
         (robot / "src/catheter_control/catheter_control/bootstrap.py", "selected console-script bootstrap"),
         (robot / "src/catheter_control/setup.py", "ROS Python entry points"),
         (robot / "src/catheter_control/setup.cfg", "ROS Python installation"),
         (robot / "src/catheter_control/package.xml", "ROS package metadata"),
         (robot / "src/catheter_control/resource/catheter_control", "ament resource"),
-        (robot / "src/automation/config/catheter_limits.yaml", "source hardware limits"),
-        (robot / "src/automation/setup.py", "perception/experiment entry points"),
-        (robot / "src/automation/setup.cfg", "automation installation"),
-        (robot / "src/automation/package.xml", "perception/experiment package metadata"),
-        (robot / "src/automation/resource/automation", "automation ament resource"),
+        (robot / "src/control_interface/config/catheter_limits.yaml", "source hardware limits"),
+        (robot / "src/control_tasks/setup.py", "task-client entry points"),
+        (robot / "src/control_tasks/setup.cfg", "task-client installation"),
+        (robot / "src/control_tasks/package.xml",
+         "task-client package metadata"),
+        (robot / "src/control_tasks/resource/control_tasks",
+         "task-client ament resource"),
+        (robot / "src/perception/setup.py", "perception entry points"),
+        (robot / "src/perception/package.xml", "perception package metadata"),
         (robot / "src/control_interface/CMakeLists.txt", "ROS interface generation"),
         (robot / "src/control_interface/launch/launch.py", "manager and serial launch"),
         (robot / "src/control_interface/package.xml", "ROS interface metadata"),
@@ -299,10 +312,13 @@ def main() -> int:
     # package's console-script dispatcher.
     entries = {
         "catheter_control.node": "hardware catheter_mppi controller",
-        "catheter_control.trajectory_action": "trajectory action node launched with controller",
-        "catheter_control.path_action": "path action node launched with controller",
-        "catheter_control.sparse_point_experiment": "observed sparse-point task client",
-        "automation.marker_tracking.node": "online four-marker perception",
+        "control_tasks.trajectory_action": (
+            "trajectory action node launched with controller"),
+        "control_tasks.path_action": (
+            "path action node launched with controller"),
+        "control_tasks.sparse_point_experiment": (
+            "observed sparse-point task client"),
+        "perception.marker_tracking": "online four-marker perception",
         "control_interface_py.manager": "command arbitration and safety manager",
         "control_interface_py.device_serial_com": "Teensy serial bridge",
         # Package exports are lazy by design. Trace the selected runtime

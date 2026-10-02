@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>bringup</name>
+  <version>0.1.0</version>
+  <description>Launch composition and deployment entry points.</description>
+  <maintainer email="todo@todo.com">chen-lab</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ros2bag</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>catheter_control</exec_depend>
+  <exec_depend>control_tasks</exec_depend>
+  <exec_depend>control_interface</exec_depend>
+  <exec_depend>experiments</exec_depend>
+  <exec_depend>perception</exec_depend>
+  <exec_depend>runtime_supervision</exec_depend>
+  <exec_depend>simulation</exec_depend>
+
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

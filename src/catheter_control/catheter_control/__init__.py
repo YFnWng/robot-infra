@@ -18,16 +18,6 @@ __all__ = [
     "FreshnessLimits",
     "GateInputs",
     "readiness",
-    "ModelInLoopPlant",
-    "PlantSnapshot",
-    "SimulatedActuatorPlant",
-    "ActuatorSnapshot",
-    "MarkerSensorConfig",
-    "MarkerSensorModel",
-    "ActuatorConfig",
-    "ActuatorPerturbation",
-    "JacobianConfig",
-    "JacobianPerturbation",
 ]
 
 
@@ -43,16 +33,6 @@ _MODULE_BY_NAME = {
     "FreshnessLimits": "safety.lifecycle",
     "GateInputs": "safety.lifecycle",
     "readiness": "safety.lifecycle",
-    "ModelInLoopPlant": "simulation.sim_plant",
-    "PlantSnapshot": "simulation.sim_plant",
-    "SimulatedActuatorPlant": "simulation.sim_plant",
-    "ActuatorSnapshot": "simulation.sim_plant",
-    "MarkerSensorConfig": "simulation.sim_perturbations",
-    "MarkerSensorModel": "simulation.sim_perturbations",
-    "ActuatorConfig": "simulation.sim_perturbations",
-    "ActuatorPerturbation": "simulation.sim_perturbations",
-    "JacobianConfig": "simulation.sim_perturbations",
-    "JacobianPerturbation": "simulation.sim_perturbations",
 }
 
 

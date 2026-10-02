@@ -113,7 +113,7 @@ to the measured run-start POS with the qualified position transaction.
 cd /home/chen-lab/Yifan/robot-infra
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install \
-  --packages-select control_interface automation catheter_control
+  --packages-select control_interface catheter_control control_tasks bringup
 source install/setup.bash
 ```
 
@@ -124,7 +124,7 @@ the model-in-loop stack with MPPI left disarmed and recording disabled:
 
 ```bash
 export ROS_DOMAIN_ID=42
-ros2 launch catheter_control simulation.launch.py \
+ros2 launch bringup simulation.launch.py \
   record:=false \
   marker_estimator:=ukf \
   auto_qualify:=true
@@ -137,7 +137,7 @@ export ROS_DOMAIN_ID=42
 cd /home/chen-lab/Yifan/robot-infra
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   use_sim:=true \
   start_motor:=true
 ```
@@ -163,7 +163,7 @@ perturbed simulation before selecting any hardware amplitudes, use a separate
 simulation run such as:
 
 ```bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   use_sim:=true \
   start_motor:=true \
   amplitudes:=4.0,40.0,2.5 \
@@ -181,7 +181,7 @@ hardware procedure. Qualify driver power and require `MANAGER_READY`. Start a
 separate estimator-only controller process:
 
 ```bash
-ros2 launch catheter_control control.launch.py \
+ros2 launch bringup control.launch.py \
   controller_config:=$(ros2 pkg prefix catheter_control)/share/catheter_control/config/v174_fixed_hardware_no_rotation.yaml \
   marker_estimator:=ukf \
   adaptation_enabled:=false \
@@ -194,7 +194,7 @@ Confirm that `/catheter_mppi/status` reports `armed=False`,
 `model_adaptation_enabled=False`. Then run:
 
 ```bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=stationary \
   static_s:=15.0 \
   start_motor:=true
@@ -204,7 +204,7 @@ Analyze the Phase-1 noise floor after the launch prints a passing completeness
 result:
 
 ```bash
-ros2 run automation causal_stationary_analysis \
+ros2 run runtime_supervision causal_stationary_analysis \
   /media/chen-lab/84BABCB7BABCA6D81/Yifan/catheter_sessions/SESSION_NAME
 ```
 
@@ -213,15 +213,15 @@ manager readiness and stationary estimator checks before each command:
 
 ```bash
 # Phase 2A: logical insertion / raw shaft 0.
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=insertion start_motor:=true
 
 # Phase 2B: equal logical insertion+bend, cancelling raw shaft 0.
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=tendon_motor start_motor:=true
 
 # Phase 2C: logical bending through the production compensation mapping.
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=compensated_bend start_motor:=true
 ```
 
@@ -241,7 +241,7 @@ Run the insertion-stratified compensated-bending experiment as its own
 session:
 
 ```bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=phase_2e \
   require_estimator_tracking:=false \
   start_motor:=true
@@ -276,7 +276,7 @@ default schedule has 38 labelled episodes and lasts approximately 712 seconds
 completion; do not leave an actuating experiment unattended.
 
 ```bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=insertion_rotation \
   amplitudes:=6.0,75.0,0.0 \
   minimum_amplitudes:=5.0,65.0,0.0 \
@@ -316,7 +316,7 @@ timing with a different preconditioning history.
 After reviewing the Phase 0--2 session, run the positive timing experiment:
 
 ```bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=phase_3 \
   timing_direction:=1 \
   timing_leads_ms:=20.0,40.0,80.0 \
@@ -366,7 +366,7 @@ episodes is therefore a mechanical backdrive response, not a requested chassis
 move.
 
 ```bash
-ros2 launch automation causal_experiment.launch.py \
+ros2 launch bringup causal_experiment.launch.py \
   schedule:=chassis_knob_backdrive \
   amplitudes:=10.0,0.0,5.0 \
   minimum_amplitudes:=8.0,0.0,4.0 \

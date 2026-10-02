@@ -1,6 +1,6 @@
 import numpy as np
 
-from catheter_control.reversal_scheduler import (
+from catheter_control.transmission.reversal_scheduler import (
     ReversalDirectionScheduler, ReversalSchedulerConfig)
 
 

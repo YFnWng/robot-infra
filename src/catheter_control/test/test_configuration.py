@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from catheter_control.configuration import (
+from catheter_control.orchestration.configuration import (
     ACTIVE_CONTROLLER_PARAMETERS, locate_stack, resolve_stack)
 
 

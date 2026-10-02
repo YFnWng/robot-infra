@@ -82,26 +82,28 @@ It must not publish motor commands or own ROS safety policy.
 
 ## 4. ROS package restructuring decision
 
-`catheter_control` is conceptually part of robot automation, but the existing
-`automation` package already combines unrelated responsibilities: marker
+`catheter_control` is conceptually part of robot automation, but the former
+`automation` package combined unrelated responsibilities: marker
 perception, a legacy estimator bridge, data collection, experiment identity,
 session checks, stationary analysis, launch, and configuration aggregation.
 Merging `catheter_control` into it would create a larger catch-all.
 
-The chosen direction is to dissolve the generic `automation` package gradually
-into functional packages, while preserving current package names, executable
-names, topics, and launch aliases during migration.
+The generic `automation` package was dissolved into functional packages and
+retired after maintained consumers migrated. Runtime topic and diagnostic names
+remain unchanged where they are part of recorded or deployed interfaces.
 
 Target package set:
 
 ```text
 robot-infra/src/
-  catheter_bringup/             launch composition and deployment profiles
-  catheter_perception/          online marker tracking and diagnostics
-  catheter_control_py/          Python reference/development controller
-  catheter_control_cpp/         production C++ controller and ROS shell
-  catheter_experiments/         collection, sparse/path clients, qualification
-  catheter_supervision/         runtime identity, timing, session validation
+  bringup/                      launch composition and deployment profiles
+  perception/                   online marker tracking and diagnostics
+  control_py/                   Python reference/development controller
+  control_cpp/                  production C++ controller and ROS shell
+  experiments/                  collection and identification schedules
+  control_tasks/                action servers, target/path clients, overlays
+  simulation/                   isolated plant, device, perception, and RViz
+  runtime_supervision/          runtime identity, timing, session validation
   control_interface/            manager, serial bridge, messages, safety API
   teleop/                       manual command source and Slicer integration
 ```
@@ -133,8 +135,6 @@ catheter_control/
   safety/
     hardware_contract.py
     validation.py
-  simulation/
-  applications/
 ```
 
 Learned dynamics remain in `cr_meta_lnn`. The ROS package owns scheduling,
@@ -347,13 +347,29 @@ Split the controller composition node, beliefs/state machines, applications,
 and simulation. Split `automation` responsibilities behind compatibility entry
 points. Do not change behavior.
 
-Status: complete. `catheter_control` now has canonical `orchestration`,
-`planning`, `transmission`, `safety`, `simulation`, and `applications`
-packages. `automation` now has canonical `perception`, `experiments`, and
-`supervision` packages. Existing import paths, console-command names, and
-`python -m` paths remain compatibility shims. Package-boundary tests prevent
-canonical implementations from depending back on those shims. See
+Status: complete. `catheter_control` has canonical `orchestration`, `planning`,
+`transmission`, and `safety` subpackages. Task clients have moved to the
+standalone `control_tasks` package, simulation owns the isolated plant and
+visualization runtime, and all launch composition has moved to `bringup`. The
+temporary root controller compatibility modules have been retired. ROS
+parameter declarations and deterministic diagnostic value serialization have
+single owners under `orchestration`; the composition node retains only ROS
+entities, scheduling, locking, lifecycle transitions, and publication. Further
+separation of planner execution is a Phase 4 scheduling change, not
+behavior-preserving cleanup. See
 [Python runtime package layout](PYTHON_RUNTIME_PACKAGE_LAYOUT.md).
+
+Post-Phase-3 extraction includes five standalone functional packages.
+`perception` owns online marker tracking, marker UDP input, the EM bridge,
+and the legacy live state-estimation adapter. `experiments` owns guarded
+data collection and the causal and identification schedules.
+`runtime_supervision` owns runtime identity, finalized-session validation, and
+stationary-session qualification. `control_tasks` owns action servers and task
+clients. `simulation` owns the isolated device, plant, perception, scenario,
+target, and RViz runtime.
+Launch composition belongs to `bringup`, and the shared safety limits belong to
+`control_interface`. The historical `automation` compatibility package is
+retired; historical session manifests remain unchanged.
 
 ### Phase 4 -- C++ ROS shell and shadow deployment
 

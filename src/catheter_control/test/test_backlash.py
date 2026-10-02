@@ -4,15 +4,15 @@ import numpy as np
 import pytest
 import yaml
 
-from catheter_control.backlash import (
+from catheter_control.transmission.backlash import (
     BacklashConfig, BacklashFeedforwardCompensator, BacklashSnapshot,
     BacklashStateEstimator, TakeupTransactionArbiter,
     rollout_backlash_state, rollout_raw_interface_play)
-from catheter_control.hardware_contract import load_hardware_contract
+from catheter_control.safety.hardware_contract import load_hardware_contract
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LIMITS = ROOT / "automation" / "config" / "catheter_limits.yaml"
+LIMITS = ROOT / "control_interface" / "config" / "catheter_limits.yaml"
 
 
 def _pose(x=0.0, y=0.0, z=0.0):

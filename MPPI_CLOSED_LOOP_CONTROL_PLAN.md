@@ -62,7 +62,7 @@ a late command.
 ## Phase 0: hardware/model contract
 
 Status: implemented in
-`src/catheter_control/catheter_control/hardware_contract.py`.
+`src/catheter_control/catheter_control/safety/hardware_contract.py`.
 
 One shared implementation owns:
 
@@ -167,7 +167,7 @@ innovations and covariance are stable.
 ## Phase 3: catheter-specific MPPI
 
 **Minimal implementation status (2026-09-08): implemented offline.** The
-`catheter_control.mppi.CatheterMppi` core uses six correlated 40 ms knots,
+`catheter_control.planning.mppi.CatheterMppi` core uses six correlated 40 ms knots,
 includes zero and warm-start candidates, evaluates the Phase 0 projection and
 firmware RPM quantization at every rollout step, and returns zero on rollout,
 finite-value, or 60 ms deadline failure. It includes tip, optional intermediate

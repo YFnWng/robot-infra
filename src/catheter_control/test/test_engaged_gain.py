@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from catheter_control.engaged_gain import EngagedGainConfig, EngagedGainEstimator
+from catheter_control.transmission.engaged_gain import EngagedGainConfig, EngagedGainEstimator
 
 
 def test_gain_updates_only_after_confirmed_engagement():

@@ -1,6 +1,6 @@
 import pytest
 
-from catheter_control.causal_schedule import CausalMarkerSchedule
+from catheter_control.orchestration.causal_schedule import CausalMarkerSchedule
 
 
 def test_marker_is_deferred_until_estimator_reaches_its_timestamp():

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from catheter_control.compute_device import (
+from catheter_control.orchestration.compute_device import (
     compute_device_diagnostics, resolve_compute_device)
 
 

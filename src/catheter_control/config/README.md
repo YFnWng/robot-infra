@@ -18,13 +18,14 @@ parameters passed to catheter_mppi.
 - performance/: compute device, sample count, rates, and deadlines.
 - stacks/: reviewed semantic compositions.
 - experiments/: canonical task definitions used by semantic stacks.
-- rviz/: canonical visualization profiles.
+- rviz/: compatibility references only; canonical simulation visualization assets
+  are owned by the standalone `simulation` package.
 - root-level versioned files: compatibility aliases pending the package split.
 
 A stack is selected by semantic name:
 
 ~~~bash
-ros2 launch catheter_control control.launch.py \
+ros2 launch bringup control.launch.py \
   stack_config:=hardware_grouped_no_rotation_farther_tendon_12
 ~~~
 

@@ -206,9 +206,9 @@ current ground-truth tip and publishes an absolute target from a requested
 offset. Examples for uncoupled experiments should look like:
 
 ```bash
-ros2 run catheter_control catheter_sim_target --dx-mm 5
-ros2 run catheter_control catheter_sim_target --dy-mm 5
-ros2 run catheter_control catheter_sim_target --dz-mm 5
+ros2 run simulation catheter_sim_target --dx-mm 5
+ros2 run simulation catheter_sim_target --dy-mm 5
+ros2 run simulation catheter_sim_target --dz-mm 5
 ```
 
 Exactly one offset should be nonzero unless an explicit combined target is

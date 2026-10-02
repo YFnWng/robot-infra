@@ -1,8 +1,9 @@
 # Catheter control
 
-This ROS package contains the hardware contract (Phase 0), offline controller
-core (minimal Phase 3), guarded ROS integration (minimal Phase 4), and a
-non-actuating validation preflight (minimal Phase 5).
+This ROS package contains the Python reference controller core, ROS composition
+node, hardware contract, safety gates, and non-actuating validation preflight.
+Task clients, simulation, perception, experiments, supervision, and launch
+composition live in their own functional packages.
 
 Both installed executables automatically re-exec in the shared Python 3.10
 environment at `/home/chen-lab/Yifan/cr-venv` before importing NumPy or
@@ -10,6 +11,16 @@ PyTorch. This avoids mixing the ROS build interpreter with the learned-model
 environment. Set `CR_VENV=/another/python310/venv` before launch to override
 the location. Manual activation and `PYTHONPATH` modification are not required
 for `catheter_mppi` or `phase5_preflight`.
+
+## Internal ownership
+
+The package has one canonical implementation path. `node.py` owns ROS entities,
+callback groups, timers, immutable snapshot handoff, lifecycle transitions, and
+publication. `orchestration` owns parameter declaration, diagnostic formatting,
+timing, runtime loading, configuration, and estimator ownership. `planning` owns
+MPPI and reference tracking; `transmission` owns engagement, take-up, gain, and
+reversal state; `safety` owns the hardware contract and fail-closed gates.
+Retired root-level compatibility imports are intentionally unsupported.
 
 `CatheterMppi` accepts a cloned `V171StreamingCatheterRuntime` state, the current
 six-axis logical joint position, and a target tip position in the calibrated
@@ -29,7 +40,7 @@ execution; axes 4--6 are always zero in this minimal controller.
 from catheter_control import CatheterMppi, load_hardware_contract
 
 contract = load_hardware_contract(
-    "robot-infra/src/automation/config/catheter_limits.yaml", "imricor_test")
+    "robot-infra/src/control_interface/config/catheter_limits.yaml", "imricor_test")
 controller = CatheterMppi(runtime, contract)
 plan = controller.plan(
     runtime.clone_state(), joint_position,
@@ -127,7 +138,7 @@ Use `catheter_target_offset` to construct a target directly from marker ID 3
 in the latest registered measurement:
 
 ```bash
-ros2 run catheter_control catheter_target_offset \
+ros2 run control_tasks catheter_target_offset \
   --dx-mm 5 --dy-mm 0 --dz-mm 0
 ```
 
@@ -263,7 +274,7 @@ hardware. For a full-stack hardware shadow launch, combine the selected model
 profile with the non-actuating performance overlay:
 
 ```bash
-ros2 launch catheter_control control.launch.py \
+ros2 launch bringup control.launch.py \
   controller_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/causal_v2_fixed_hardware.yaml \
   performance_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/gpu_mppi_1024_shadow.yaml \
   record:=true
@@ -357,7 +368,7 @@ action server. `circle_trajectory_sim.yaml` dynamically samples 36 points on a
 `(x0+10 mm,0,z0)`. Run it in the simulation domain with:
 
 ```bash
-ros2 run catheter_control catheter_tip_trajectory_file \
+ros2 run control_tasks catheter_tip_trajectory_file \
   /home/chen-lab/Yifan/robot-infra/src/catheter_control/config/circle_trajectory_sim.yaml
 ```
 
@@ -403,7 +414,7 @@ run `sparse_circle_points_sim_history_preserving.yaml` instead of
 Simulation configuration:
 
 ```bash
-ros2 run catheter_control catheter_sparse_point_experiment \
+ros2 run control_tasks catheter_sparse_point_experiment \
   "$(ros2 pkg prefix catheter_control)/share/catheter_control/config/sparse_circle_points_sim.yaml"
 ```
 
@@ -510,7 +521,7 @@ The legacy waypoint action remains available for comparison.
 After launching simulation, run the current-tip-relative YZ circle with:
 
 ```bash
-ros2 run catheter_control catheter_tip_path_file \
+ros2 run control_tasks catheter_tip_path_file \
   "$(ros2 pkg prefix catheter_control)/share/catheter_control/config/continuous_circle_sim.yaml"
 ```
 
@@ -521,17 +532,17 @@ other YAML settings stay identical:
 
 ```bash
 # 1 mm/s
-ros2 run catheter_control catheter_tip_path_file \
+ros2 run control_tasks catheter_tip_path_file \
   "$(ros2 pkg prefix catheter_control)/share/catheter_control/config/continuous_circle_sim.yaml" \
   --speed-mm-s 1 --total-timeout-s 180
 
 # 2 mm/s baseline
-ros2 run catheter_control catheter_tip_path_file \
+ros2 run control_tasks catheter_tip_path_file \
   "$(ros2 pkg prefix catheter_control)/share/catheter_control/config/continuous_circle_sim.yaml" \
   --speed-mm-s 2 --total-timeout-s 90
 
 # 3 mm/s
-ros2 run catheter_control catheter_tip_path_file \
+ros2 run control_tasks catheter_tip_path_file \
   "$(ros2 pkg prefix catheter_control)/share/catheter_control/config/continuous_circle_sim.yaml" \
   --speed-mm-s 3 --total-timeout-s 75
 ```
@@ -558,7 +569,7 @@ apply the same deadzone twice and launch rejects it.
 
 ```bash
 export ROS_DOMAIN_ID=43
-ros2 launch catheter_control simulation.launch.py \
+ros2 launch bringup simulation.launch.py \
   interface_transmission_checkpoint:=/home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_interface_transmission_v175.pt \
   backlash_compensation_enabled:=true \
   takeup_transaction_enabled:=true \
@@ -579,13 +590,13 @@ from terminating an otherwise healthy long path. The hardware launch retains
 the stricter three-miss threshold.
 
 ```bash
-ros2 launch catheter_control control.launch.py
+ros2 launch bringup control.launch.py
 ```
 
 For example, run a non-actuating UKF shadow session with:
 
 ```bash
-ros2 launch catheter_control control.launch.py \
+ros2 launch bringup control.launch.py \
   marker_estimator:=ukf record:=true
 ```
 
@@ -594,7 +605,7 @@ heartbeats. This makes the default launch suitable for inspection and dry-run
 work. Enabling real commands is intentionally explicit:
 
 ```bash
-ros2 launch catheter_control control.launch.py \
+ros2 launch bringup control.launch.py \
   controller_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/causal_v2_fixed_hardware.yaml \
   command_output_enabled:=true record:=true
 ```
@@ -668,7 +679,7 @@ colcon build --symlink-install \
   --packages-select control_interface catheter_control
 source install/setup.bash
 export ROS_DOMAIN_ID=42
-ros2 launch catheter_control simulation.launch.py record:=true
+ros2 launch bringup simulation.launch.py record:=true
 ```
 
 The simulated manager qualifies automatically after three seconds. In terminal
@@ -679,7 +690,7 @@ cd /home/chen-lab/Yifan/robot-infra
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=42
-ros2 run catheter_control catheter_sim_target --dx-mm 5
+ros2 run simulation catheter_sim_target --dx-mm 5
 ros2 service call /sim/catheter_mppi/set_armed \
   std_srvs/srv/SetBool "{data: true}"
 ```
@@ -717,7 +728,7 @@ cd /home/chen-lab/Yifan/robot-infra
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=43
-ros2 launch catheter_control simulation.launch.py \
+ros2 launch bringup simulation.launch.py \
   rviz:=false record:=true robustness_seed:=7 \
   marker_noise_std_mm:=0.10 marker_latency_ms:=50 \
   marker_timestamp_jitter_ms:=2
@@ -733,7 +744,7 @@ cd /home/chen-lab/Yifan/robot-infra
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=43
-ros2 run catheter_control catheter_sim_scenario \
+ros2 run simulation catheter_sim_scenario \
   --dx-mm 5 --duration-s 20 --label noise_latency_x
 ```
 
@@ -746,12 +757,12 @@ Actuator and plant-model examples are:
 
 ```bash
 # 50% gain on the insertion motor plus 50 ms command delay
-ros2 launch catheter_control simulation.launch.py rviz:=false record:=true \
+ros2 launch bringup simulation.launch.py rviz:=false record:=true \
   'actuator_gain:=[0.5,1,1,1,1,1]' \
   actuator_command_delay_s:=0.05
 
 # Hardware-evaluation-centered truth J mismatch; controller J stays nominal
-ros2 launch catheter_control simulation.launch.py rviz:=false record:=true \
+ros2 launch bringup simulation.launch.py rviz:=false record:=true \
   'plant_jacobian_angular_column_gain:=[0.55,0.5,1.0]' \
   'plant_jacobian_linear_column_gain:=[0.55,0.0,0.95]'
 ```
@@ -825,7 +836,7 @@ gates and are never used as feedforward widths.
 
 ```bash
 export ROS_DOMAIN_ID=43
-ros2 launch catheter_control simulation.launch.py \
+ros2 launch bringup simulation.launch.py \
   record:=true rviz:=true device:=cuda truth_model_device:=cpu \
   horizon_steps:=4 rollout_step_s:=0.04 samples:=32 \
   planning_deadline_s:=0.06 plan_rate_hz:=15.0 \
@@ -892,7 +903,7 @@ colcon build --symlink-install \
 source install/setup.bash
 export ROS_DOMAIN_ID=43
 
-ros2 launch catheter_control simulation.launch.py \
+ros2 launch bringup simulation.launch.py \
   mppi_variant:=grouped rviz:=false record:=true \
   device:=cuda truth_model_device:=cpu samples:=1024 mppi_seed:=17 \
   horizon_steps:=4 rollout_step_s:=0.04 \
@@ -917,7 +928,7 @@ cd /home/chen-lab/Yifan/robot-infra
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=43
-ros2 run catheter_control catheter_tip_path_file \
+ros2 run control_tasks catheter_tip_path_file \
   "$(ros2 pkg prefix catheter_control)/share/catheter_control/config/continuous_circle_sim.yaml" \
   --speed-mm-s 1.0
 ```
@@ -946,7 +957,7 @@ In another terminal start the RViz-window recorder, then replay the bag in a
 third terminal:
 
 ```bash
-ros2 run catheter_control catheter_rviz_record --label grouped_mppi
+ros2 run control_tasks catheter_rviz_record --label grouped_mppi
 ros2 bag play /absolute/path/to/grouped_bag
 ```
 

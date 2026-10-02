@@ -6,8 +6,6 @@ from contextlib import contextmanager
 from dataclasses import replace
 import json
 import math
-import os
-from pathlib import Path
 import threading
 import time
 
@@ -36,8 +34,13 @@ from .transmission.backlash import (
     BacklashStateEstimator, TakeupTransactionArbiter)
 from .orchestration.compute_device import (
     compute_device_diagnostics, resolve_compute_device)
-from .orchestration.diagnostics import instrument_timer
+from .orchestration.diagnostics import (
+    instrument_timer, marker_diagnostic_values, model_diagnostic_values,
+    plan_diagnostic_values, planner_policy_diagnostic_values,
+    response_diagnostic_values, runtime_diagnostic_values,
+    transmission_diagnostic_values)
 from .orchestration.estimator_owner import marker_measurement, stamp_ns
+from .orchestration.parameters import declare_parameters
 from .orchestration.runtime import load_runtime
 from .transmission.engaged_gain import EngagedGainConfig
 from .safety.hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
@@ -60,7 +63,7 @@ class CatheterControlNode(Node):
 
     def __init__(self):
         super().__init__("catheter_mppi")
-        self._declare_parameters()
+        declare_parameters(self, source_name=SOURCE_NAME)
         self.source = str(self.get_parameter("source_name").value)
         if self.source != SOURCE_NAME:
             raise ValueError(f"source_name must be {SOURCE_NAME!r}")
@@ -603,190 +606,6 @@ class CatheterControlNode(Node):
                 np.array2string(
                     self.contract.velocity_max, separator=",", precision=3),
                 "ENABLED" if self.command_output_enabled else "DISABLED"))
-
-    def _declare_parameters(self):
-        root = os.environ.get(
-            "CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn")
-        common = os.environ.get(
-            "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")
-        self.declare_parameter("source_name", SOURCE_NAME)
-        self.declare_parameter("command_output_enabled", False)
-        self.declare_parameter("simulation_state_reset_enabled", False)
-        self.declare_parameter("frame_id", "robot_base")
-        self.declare_parameter("cr_meta_lnn_root", root)
-        self.declare_parameter("cr_common_root", common)
-        self.declare_parameter(
-            "v171_distal_checkpoint",
-            str(Path(root) / "artifacts" / "deployed"
-                / "20260929_175554_grouped_no_rotation"
-                / "real_distal_first_order_v171_multistep_map_em.pt"))
-        self.declare_parameter(
-            "jacobian_initialization_json",
-            str(Path(root) / "artifacts" / "deployed"
-                / "20260929_175554_grouped_no_rotation"
-                / "real_joint_local_distal_v174.json"))
-        self.declare_parameter("interface_transmission_checkpoint", "")
-        self.declare_parameter("distal_tendon_allocation_checkpoint", "")
-        # Stay in prequential shadow mode until causal replay is reviewed.
-        self.declare_parameter("adaptation_enabled", False)
-        self.declare_parameter("adaptation_minimum_observations", 4)
-        self.declare_parameter("adaptation_minimum_normalized_action", 0.01)
-        self.declare_parameter("adaptation_minimum_rotation_deg", 0.10)
-        self.declare_parameter("adaptation_minimum_translation_mm", 0.30)
-        self.declare_parameter("adaptation_minimum_response_snr", 3.0)
-        self.declare_parameter("adaptation_maximum_window_s", 1.0)
-        self.declare_parameter("adaptation_directional_purity", 0.80)
-        self.declare_parameter(
-            "adaptation_reversal_holdoff_normalized_action", 0.02)
-        self.declare_parameter(
-            "adaptation_reversal_holdoff_normalized_action_shaft_0", -1.0)
-        self.declare_parameter(
-            "adaptation_reversal_holdoff_normalized_action_shaft_1", -1.0)
-        self.declare_parameter(
-            "adaptation_reversal_holdoff_normalized_action_shaft_2", -1.0)
-        self.declare_parameter("adaptation_confirmation_windows", 2)
-        self.declare_parameter("adaptation_consistency_cosine", 0.50)
-        self.declare_parameter("adaptation_minimum_column_gain", 0.25)
-        self.declare_parameter("adaptation_maximum_column_gain", 4.0)
-        self.declare_parameter(
-            "adaptation_maximum_direction_deviation_deg", 60.0)
-        self.declare_parameter("limits_file", "")
-        self.declare_parameter("catheter", "imricor_test")
-        # Negative entries inherit the hardware profile.  Zero disables an
-        # axis only inside this controller; manager/firmware limits remain the
-        # final independent safety authority.
-        self.declare_parameter("controller_velocity_max", [-1.0]*6)
-        self.declare_parameter("device", "cpu")
-        self.declare_parameter("marker_estimator", "gauss_newton")
-        self.declare_parameter("estimator_filter_initial_covariance", 0.25)
-        self.declare_parameter("estimator_filter_process_std_sqrt_s", 1.0)
-        self.declare_parameter("estimator_initial_roll_hypotheses", 24)
-        self.declare_parameter(
-            "estimator_history_reconciliation_enabled", True)
-        self.declare_parameter(
-            "estimator_history_reconciliation_maximum_shift", 120.0)
-        self.declare_parameter("horizon_steps", 4)
-        self.declare_parameter("rollout_step_s", 0.04)
-        self.declare_parameter("mppi_point_rollout_step_s", 0.0)
-        self.declare_parameter("mppi_point_rollout_coarse_steps", False)
-        self.declare_parameter("mppi_path_rollout_coarse_steps", False)
-        self.declare_parameter("mppi_point_prediction_tail_steps", 0)
-        self.declare_parameter("mppi_point_prediction_tail_step_s", 0.12)
-        self.declare_parameter("samples", 32)
-        self.declare_parameter("mppi_noise_std", [4.0, 20.0, 2.0])
-        self.declare_parameter("mppi_noise_correlation", 0.65)
-        self.declare_parameter("mppi_exploration_fraction", 0.15)
-        self.declare_parameter(
-            "mppi_reversal_backlash_rad", [0.0, 0.0, 0.0])
-        self.declare_parameter("backlash_compensation_enabled", False)
-        self.declare_parameter("backlash_width_rad", [0.0, 0.0, 0.0])
-        self.declare_parameter(
-            "backlash_width_positive_rad", [0.0, 0.0, 0.0])
-        self.declare_parameter(
-            "backlash_width_negative_rad", [0.0, 0.0, 0.0])
-        self.declare_parameter(
-            "backlash_takeup_velocity", [8.0, 40.0, 4.5])
-        self.declare_parameter(
-            "backlash_minimum_motor_increment_rad", 0.01)
-        self.declare_parameter(
-            "backlash_minimum_transmitted_increment_rad", 0.10)
-        self.declare_parameter("backlash_directional_purity", 0.90)
-        self.declare_parameter(
-            "backlash_response_direction_cosine", 0.50)
-        self.declare_parameter(
-            "backlash_minimum_response_evidence", 0.50)
-        self.declare_parameter(
-            "backlash_minimum_distal_bending_increment", 0.05)
-        self.declare_parameter("backlash_width_learning_rate", 0.05)
-        self.declare_parameter(
-            "backlash_engagement_confirmation_observations", 1)
-        self.declare_parameter(
-            "backlash_provisional_rejection_observations", 2)
-        self.declare_parameter("engaged_gain_enabled", False)
-        self.declare_parameter("engaged_gain_minimum", 0.10)
-        self.declare_parameter("engaged_gain_maximum", 2.0)
-        self.declare_parameter("engaged_gain_prior_mean", [1.0, 1.0])
-        self.declare_parameter("engaged_gain_prior_log_std", 0.70)
-        self.declare_parameter("engaged_gain_reversal_log_std", 0.80)
-        self.declare_parameter(
-            "engaged_gain_process_log_std_sqrt_s", 0.05)
-        self.declare_parameter("engaged_gain_observation_std", 0.08)
-        self.declare_parameter(
-            "engaged_gain_minimum_nominal_increment", 0.02)
-        self.declare_parameter("engaged_gain_huber_sigma", 3.0)
-        self.declare_parameter(
-            "engaged_gain_maximum_normalized_innovation", 8.0)
-        self.declare_parameter(
-            "engaged_gain_contradiction_log_std", 0.70)
-        self.declare_parameter("engaged_gain_confidence_log_width", 0.50)
-        self.declare_parameter("engaged_gain_minimum_updates", 2)
-        self.declare_parameter("engaged_gain_credible_sigma", 1.645)
-        self.declare_parameter("mppi_engaged_gain_scenarios", False)
-        self.declare_parameter("mppi_engaged_gain_risk_beta", 0.50)
-        self.declare_parameter("mppi_engaged_gain_cvar_alpha", 0.67)
-        self.declare_parameter(
-            "mppi_engaged_gain_maximum_first_step_shift", 0.0)
-        self.declare_parameter(
-            "mppi_engaged_gain_learning_velocity_scale", 1.0)
-        self.declare_parameter("mppi_capture_radius_mm", 0.0)
-        self.declare_parameter(
-            "mppi_capture_minimum_terminal_improvement_mm", 0.0)
-        self.declare_parameter("mppi_capture_hold_s", 0.0)
-        self.declare_parameter(
-            "mppi_capture_response_minimum_prediction_mm", 0.25)
-        self.declare_parameter(
-            "mppi_capture_response_minimum_ratio", 0.50)
-        self.declare_parameter("mppi_transmission_aware_rollout", False)
-        self.declare_parameter("takeup_transaction_enabled", False)
-        self.declare_parameter(
-            "takeup_confirmation_hold_timeout_s", 1.0)
-        self.declare_parameter("mppi_rotation_direction_latch", False)
-        self.declare_parameter("mppi_best_candidate_guard", True)
-        self.declare_parameter("mppi_grouped_mode_sampling", True)
-        self.declare_parameter("mppi_takeup_limit_reserve_scale", 1.0)
-        self.declare_parameter("mppi_takeup_risk_weight", 4.0)
-        self.declare_parameter("mppi_takeup_confirmation_time_s", 0.10)
-        self.declare_parameter("reversal_scheduler_enabled", True)
-        self.declare_parameter("reversal_scheduler_required_plans", 3)
-        self.declare_parameter(
-            "reversal_scheduler_minimum_absolute_cost_improvement", 5.0)
-        self.declare_parameter(
-            "reversal_scheduler_minimum_fractional_cost_improvement", 0.0)
-        self.declare_parameter(
-            "reversal_scheduler_minimum_terminal_error_improvement_mm", 0.25)
-        self.declare_parameter(
-            "reversal_scheduler_minimum_accepted_observations", 3)
-        self.declare_parameter("reversal_scheduler_cooldown_s", 1.0)
-        self.declare_parameter("mppi_seed", 0)
-        self.declare_parameter("planning_deadline_s", 0.06)
-        self.declare_parameter("plan_rate_hz", 15.0)
-        self.declare_parameter("command_rate_hz", 100.0)
-        self.declare_parameter("diagnostic_rate_hz", 10.0)
-        self.declare_parameter("encoder_update_rate_hz", 50.0)
-        self.declare_parameter("marker_update_rate_hz", 20.0)
-        self.declare_parameter("torch_intraop_threads", 2)
-        self.declare_parameter("torch_interop_threads", 1)
-        self.declare_parameter("manager_timeout_s", 0.5)
-        self.declare_parameter("feedback_timeout_s", 0.15)
-        # If raw ENC remains fresh while estimator correction runs, command
-        # zero for this bounded window before retaining encoder_stale.
-        self.declare_parameter("estimator_catchup_timeout_s", 0.35)
-        self.declare_parameter("marker_timeout_s", 0.15)
-        self.declare_parameter("maximum_marker_lag_s", 0.15)
-        self.declare_parameter("marker_diagnostic_timeout_s", 0.5)
-        self.declare_parameter("feedback_pair_max_skew_s", 0.15)
-        self.declare_parameter("command_timeout_s", 0.15)
-        self.declare_parameter("path_reference_timeout_s", 0.20)
-        self.declare_parameter("tip_error_log_rate_hz", 1.0)
-        self.declare_parameter("mode_settle_s", 0.10)
-        self.declare_parameter("initialization_observations", 8)
-        self.declare_parameter("initialization_consecutive_inliers", 2)
-        self.declare_parameter("maximum_marker_rejections", 3)
-        self.declare_parameter("maximum_planner_deadline_misses", 3)
-        self.declare_parameter(
-            "marker_topic", "/shape_tracking/markers")
-        self.declare_parameter(
-            "marker_diagnostic_topic", "/shape_tracking/marker_status")
 
     def _create_ros_interfaces(self):
         safety_qos = QoSProfile(depth=1)
@@ -2631,533 +2450,55 @@ class CatheterControlNode(Node):
                     self.estimator_filter_process_std_sqrt_s),
                 "estimator_initial_roll_hypotheses": str(
                     self.estimator_initial_roll_hypotheses),
-                "marker_update_reason": (
-                    "none" if self.last_marker_result is None
-                    else self.last_marker_result.reason),
-                "marker_rms_before_mm": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.rms_before_mm is None
-                    else f"{self.last_marker_result.rms_before_mm:.6g}"),
-                "marker_rms_after_mm": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.rms_after_mm is None
-                    else f"{self.last_marker_result.rms_after_mm:.6g}"),
-                "marker_maximum_residual_before_mm": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.maximum_residual_before_mm
-                    is None else format(
-                        self.last_marker_result.maximum_residual_before_mm,
-                        ".6g")),
-                "marker_maximum_residual_after_mm": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.maximum_residual_after_mm
-                    is None else format(
-                        self.last_marker_result.maximum_residual_after_mm,
-                        ".6g")),
-                "marker_nis": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.normalized_innovation is None
-                    else format(
-                        self.last_marker_result.normalized_innovation,
-                        ".6g")),
-                "marker_postfit_normalized_residual": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.normalized_innovation is None
-                    else format(
-                        self.last_marker_result.normalized_innovation,
-                        ".6g")),
-                "marker_innovation_nis": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.innovation_nis is None
-                    else format(
-                        self.last_marker_result.innovation_nis, ".6g")),
-                "marker_innovation_nis_per_dof": (
-                    "none" if self.last_marker_result is None
-                    or self.last_marker_result.innovation_nis_per_dof is None
-                    else format(
-                        self.last_marker_result.innovation_nis_per_dof,
-                        ".6g")),
-                "marker_innovation_dof": (
-                    "none" if self.last_marker_result is None
-                    else str(self.last_marker_result.innovation_dof)),
-                "marker_observable_rank": (
-                    "none" if self.last_marker_result is None
-                    else str(self.last_marker_result.observable_rank)),
-                "command": json.dumps(self.last_command.tolist()),
-                "effective_command": json.dumps(
-                    self.last_effective_command.tolist()),
-                "backlash_compensation_enabled": str(
-                    self.backlash_compensation_enabled),
-                "backlash_model_encoder_input": (
-                    "estimated_transmitted"
-                    if self.backlash_compensation_enabled else "raw_shaft"),
-                "upstream_raw_encoder_counts_first_three": (
-                    "none" if self.latest_raw_encoder_counts is None
-                    else json.dumps(
-                        self.latest_raw_encoder_counts.tolist(),
-                        separators=(",", ":"))),
-                "backlash_width_rad": json.dumps(
-                    self.backlash_snapshot.width_rad.tolist()),
-                "backlash_width_positive_rad": json.dumps(
-                    self.backlash_snapshot.width_positive_rad.tolist()),
-                "backlash_width_negative_rad": json.dumps(
-                    self.backlash_snapshot.width_negative_rad.tolist()),
-                "backlash_remaining_rad": json.dumps(
-                    self.backlash_snapshot.remaining_rad.tolist()),
-                "backlash_remaining_lower_rad": json.dumps(
-                    self.backlash_snapshot.remaining_lower_rad.tolist()),
-                "backlash_remaining_upper_rad": json.dumps(
-                    self.backlash_snapshot.remaining_upper_rad.tolist()),
-                "backlash_width_positive_interval_rad": json.dumps([
-                    self.backlash_snapshot.width_positive_lower_rad.tolist(),
-                    self.backlash_snapshot.width_positive_upper_rad.tolist()]),
-                "backlash_width_negative_interval_rad": json.dumps([
-                    self.backlash_snapshot.width_negative_lower_rad.tolist(),
-                    self.backlash_snapshot.width_negative_upper_rad.tolist()]),
-                "backlash_reversal_start_motor_rad": json.dumps(
-                    self.backlash_snapshot.reversal_start_motor_rad.tolist()),
-                "backlash_engagement_anchor_motor_rad": json.dumps(
-                    self.backlash_snapshot.engagement_anchor_motor_rad.tolist()),
-                "backlash_accumulated_takeup_rad": json.dumps(
-                    self.backlash_snapshot.accumulated_takeup_rad.tolist()),
-                "backlash_effective_motor_rad": json.dumps(
-                    self.backlash_snapshot.effective_motor_rad.tolist()),
-                "backlash_effective_motor_uncertainty_rad": json.dumps(
-                    self.backlash_snapshot
-                    .effective_motor_uncertainty_rad.tolist()),
-                "backlash_last_evidence_timestamp_ns": json.dumps(
-                    self.backlash_snapshot.last_evidence_timestamp_ns.tolist()),
-                "backlash_motion_direction": json.dumps(
-                    self.backlash_snapshot.motion_direction.tolist()),
-                "backlash_engaged_direction": json.dumps(
-                    self.backlash_snapshot.engaged_direction.tolist()),
-                "backlash_confidence": json.dumps(
-                    self.backlash_snapshot.confidence.tolist()),
-                "backlash_confirmation_count": json.dumps(
-                    self.backlash_snapshot.confirmation_count.tolist()),
-                "backlash_inferred_transmitted_increment_rad": json.dumps(
-                    self.backlash_snapshot
-                    .inferred_transmitted_increment_rad.tolist()),
-                "backlash_response_evidence": json.dumps(
-                    self.backlash_snapshot.response_evidence.tolist()),
-                "backlash_response_classification": json.dumps(
-                    list(self.backlash_snapshot.response_classification)),
-                "backlash_provisional_rejection_count": json.dumps(
-                    self.backlash_snapshot
-                    .provisional_rejection_count.tolist()),
-                "backlash_joint_response_residual": format(
-                    self.backlash_snapshot.joint_response_residual, ".6g"),
-                "backlash_distal_bending_increment": format(
-                    self.backlash_snapshot.distal_bending_increment, ".6g"),
-                "backlash_tendon_distal_response_evidence": format(
-                    self.backlash_snapshot
-                    .tendon_distal_response_evidence, ".6g"),
-                "backlash_tendon_distal_response_confirmed": str(
-                    self.backlash_snapshot
-                    .tendon_distal_response_confirmed),
-                "backlash_phase": json.dumps(
-                    list(self.backlash_snapshot.phase)),
-                "engaged_gain_enabled": str(
-                    self.backlash_snapshot.engaged_gain.enabled),
-                "engaged_gain_mean": json.dumps(
-                    self.backlash_snapshot.engaged_gain.mean.tolist()),
-                "engaged_gain_lower": json.dumps(
-                    self.backlash_snapshot.engaged_gain.lower.tolist()),
-                "engaged_gain_upper": json.dumps(
-                    self.backlash_snapshot.engaged_gain.upper.tolist()),
-                "engaged_gain_update_count": json.dumps(
-                    self.backlash_snapshot.engaged_gain.update_count.tolist()),
-                "engaged_gain_status": json.dumps(
-                    self.backlash_snapshot.engaged_gain.status),
-                "engaged_gain_last_reason": json.dumps(
-                    self.backlash_snapshot.engaged_gain.last_reason),
-                "takeup_transaction_enabled": str(
-                    self.takeup_transaction_enabled),
-                "takeup_transaction_state": self.takeup_arbiter.state,
-                "takeup_transaction_generation": str(
-                    self.takeup_arbiter.generation),
-                "takeup_transaction_active_mask": json.dumps(
-                    self.takeup_arbiter.active_mask.astype(int).tolist()),
-                "takeup_transaction_pending_mask": json.dumps(
-                    self.takeup_arbiter.pending_mask.astype(int).tolist()),
-                "takeup_transaction_direction": json.dumps(
-                    self.takeup_arbiter.direction.tolist()),
-                "takeup_transaction_saturated_mask": json.dumps(
-                    self.takeup_arbiter.saturated_mask.astype(int).tolist()),
-                "takeup_transaction_leakage_mask": json.dumps(
-                    self.takeup_arbiter.leakage_mask.astype(int).tolist()),
-                "takeup_requested_motor_rad_s": json.dumps(
-                    self.takeup_arbiter
-                    .requested_motor_radians_per_second.tolist()),
-                "takeup_realized_motor_rad_s": json.dumps(
-                    self.takeup_arbiter
-                    .realized_motor_radians_per_second.tolist()),
-                "reversal_scheduler_enabled": str(
-                    self.reversal_scheduler.config.enabled),
-                "reversal_scheduler_gating_active": str(
-                    self.reversal_scheduler.config.enabled
-                    and not self.planner.config.grouped_mode_sampling),
-                "mppi_grouped_mode_sampling": str(
-                    self.planner.config.grouped_mode_sampling),
-                "mppi_best_candidate_guard": str(
-                    self.planner.config.best_candidate_guard),
-                "reversal_mode_selector": (
-                    "grouped_mppi" if self.planner.config.grouped_mode_sampling
-                    else ("legacy_reversal_scheduler"
-                          if self.reversal_scheduler.config.enabled
-                          else "plain_mppi")),
-                "mppi_samples": str(self.planner.config.samples),
-                "mppi_engaged_gain_scenarios": str(
-                    self.planner.config.engaged_gain_scenarios),
-                "mppi_engaged_gain_risk_beta": format(
-                    self.planner.config.engaged_gain_risk_beta, ".6g"),
-                "mppi_engaged_gain_cvar_alpha": format(
-                    self.planner.config.engaged_gain_cvar_alpha, ".6g"),
-                "mppi_engaged_gain_maximum_first_step_shift": format(
-                    self.planner.config
-                    .engaged_gain_maximum_first_step_shift, ".6g"),
-                "mppi_engaged_gain_learning_velocity_scale": format(
-                    self.planner.config
-                    .engaged_gain_learning_velocity_scale, ".6g"),
-                "mppi_capture_radius_mm": format(
-                    self.planner.config.capture_radius_mm, ".6g"),
-                "mppi_capture_minimum_terminal_improvement_mm": format(
-                    self.planner.config
-                    .capture_minimum_terminal_improvement_mm, ".6g"),
-                "mppi_capture_hold_s": format(
-                    self.planner.config.capture_hold_s, ".6g"),
-                "mppi_capture_response_minimum_prediction_mm": format(
-                    self.planner.config
-                    .capture_response_minimum_prediction_mm, ".6g"),
-                "mppi_capture_response_minimum_ratio": format(
-                    self.planner.config.capture_response_minimum_ratio, ".6g"),
-                "capture_passive_response_scale": format(
-                    capture_diagnostics["passive_response_scale"], ".6g"),
-                "capture_last_response_ratio": format(
-                    capture_diagnostics["last_response_ratio"], ".6g"),
-                "capture_last_response_reason": str(
-                    capture_diagnostics["last_response_reason"]),
-                "capture_release_count": str(
-                    capture_diagnostics["release_count"]),
-                "capture_rearm_blocked": str(
-                    capture_diagnostics["rearm_blocked"]),
-                "mppi_point_rollout_step_s": format(
-                    self.planner.config.point_rollout_step_s, ".6g"),
-                "mppi_point_rollout_coarse_steps": str(
-                    self.planner.config.point_rollout_coarse_steps).lower(),
-                "mppi_path_rollout_coarse_steps": str(
-                    self.planner.config.path_rollout_coarse_steps).lower(),
-                "mppi_point_prediction_tail_steps": str(
-                    self.planner.config.point_prediction_tail_steps),
-                "mppi_point_prediction_tail_step_s": format(
-                    self.planner.config.point_prediction_tail_step_s, ".6g"),
-                "mppi_takeup_risk_cost_weight": format(
-                    self.planner.config.takeup_risk_weight, ".6g"),
-                "mppi_takeup_confirmation_time_s": format(
-                    self.planner.config.takeup_confirmation_time_s, ".6g"),
-                "takeup_confirmation_hold_timeout_s": format(
-                    self.takeup_arbiter.confirmation_hold_timeout_s, ".6g"),
-                "mppi_active_proposal_groups": str(
-                    1 << int(np.count_nonzero(
-                        self.reversal_scheduler.lease_direction))
-                    if self.planner.config.grouped_mode_sampling else 1),
-                "mppi_minimum_samples_per_active_group": str(
-                    self.planner.config.samples // (
-                        1 << int(np.count_nonzero(
-                            self.reversal_scheduler.lease_direction)))
-                    if self.planner.config.grouped_mode_sampling else
-                    self.planner.config.samples),
-                "reversal_lease_direction": json.dumps(
-                    self.reversal_scheduler.lease_direction.tolist()),
-                "reversal_pending_direction": json.dumps(
-                    self.reversal_scheduler.pending_direction.tolist()),
-                "reversal_pending_count": json.dumps(
-                    self.reversal_scheduler.pending_count.tolist()),
-                "reversal_approved_direction": json.dumps(
-                    self.reversal_scheduler.approved_direction.tolist()),
-                "reversal_scheduler_reason": (
-                    self.reversal_scheduler.reason),
-                "reversal_absolute_cost_improvement": format(
-                    self.reversal_scheduler.last_absolute_improvement,
-                    ".6g"),
-                "reversal_fractional_cost_improvement": format(
-                    self.reversal_scheduler.last_fractional_improvement,
-                    ".6g"),
-                "reversal_terminal_error_improvement_mm": json.dumps(
-                    self.reversal_scheduler.last_terminal_improvement_mm
-                    .tolist()),
-                "planner_blocked_motor_direction": json.dumps(
-                    self.blocked_motor_direction.tolist()),
-                "takeup_saturation_position": (
-                    "none" if self.takeup_saturation_position is None else
-                    json.dumps(
-                        self.takeup_saturation_position.tolist(),
-                        separators=(",", ":"))),
-                "takeup_saturation_position_timestamp_ns": (
-                    "none" if self.takeup_saturation_position_timestamp_ns
-                    is None else str(
-                        self.takeup_saturation_position_timestamp_ns)),
-                "takeup_saturation_release_reason": (
-                    self.takeup_saturation_release_reason),
-                "position_feedback_valid": str(self.position_valid),
-                "encoder_feedback_valid": str(self.encoder_valid),
-                "estimator_runtime_owner": "single_timer",
-                "planner_state_exchange": "replace_only_snapshot",
-                "planner_snapshot_age_ms": (
-                    "none" if self._planner_snapshot_source_time is None
-                    else f"{1e3*max(0.0, now-self._planner_snapshot_source_time):.3f}"),
-                "torch_intraop_threads": str(self.torch_intraop_threads),
-                "torch_interop_threads": str(self.torch_interop_threads),
-                "controller_velocity_min": json.dumps(
-                    self.contract.velocity_min.tolist(), separators=(",", ":")),
-                "controller_velocity_max": json.dumps(
-                    self.contract.velocity_max.tolist(), separators=(",", ":")),
-                "raw_response_during_interface_takeup": json.dumps(
-                    self.raw_response_during_interface_takeup.tolist(),
-                    separators=(",", ":")),
-                "takeup_response_free_mask": json.dumps(
-                    self.takeup_response_free_mask.tolist(),
-                    separators=(",", ":")),
             }
+            values.update(marker_diagnostic_values(
+                self.last_marker_result))
+            values.update(transmission_diagnostic_values(
+                self.last_command, self.last_effective_command,
+                self.backlash_compensation_enabled,
+                self.latest_raw_encoder_counts, self.backlash_snapshot,
+                self.takeup_transaction_enabled, self.takeup_arbiter))
+            values.update(planner_policy_diagnostic_values(
+                self.planner.config, capture_diagnostics,
+                self.reversal_scheduler, self.takeup_arbiter))
+            values.update(runtime_diagnostic_values(
+                blocked_motor_direction=self.blocked_motor_direction,
+                takeup_saturation_position=self.takeup_saturation_position,
+                takeup_saturation_position_timestamp_ns=(
+                    self.takeup_saturation_position_timestamp_ns),
+                takeup_saturation_release_reason=(
+                    self.takeup_saturation_release_reason),
+                position_valid=self.position_valid,
+                encoder_valid=self.encoder_valid,
+                planner_snapshot_source_time=(
+                    self._planner_snapshot_source_time),
+                now=now,
+                torch_intraop_threads=self.torch_intraop_threads,
+                torch_interop_threads=self.torch_interop_threads,
+                contract=self.contract,
+                raw_response_during_interface_takeup=(
+                    self.raw_response_during_interface_takeup),
+                takeup_response_free_mask=self.takeup_response_free_mask))
             values.update(compute_device_diagnostics(self.compute_device))
             values.update({
                 key: (str(value) if isinstance(value, int)
                       else f"{value:.6g}")
                 for key, value in self._timing.snapshot_and_reset().items()
             })
-            if self.last_plan is not None:
-                values.update({
-                    "plan_elapsed_ms": f"{1e3*self.last_plan.elapsed_s:.3f}",
-                    "best_cost": f"{self.last_plan.best_cost:.6g}",
-                    "effective_samples": (
-                        f"{self.last_plan.effective_samples:.3f}"),
-                    "plan_sample_projection_ms": (
-                        f"{self.last_plan.sample_projection_ms:.3f}"),
-                    "plan_rollout_ms": f"{self.last_plan.rollout_ms:.3f}",
-                    "plan_engaged_gain_scenario_count": str(
-                        self.last_plan.engaged_gain_scenario_count),
-                    "plan_selected_engaged_gain_scenarios": json.dumps(
-                        self.last_plan.selected_engaged_gain_scenarios.tolist()),
-                    "plan_selected_gain_tracking_costs": json.dumps(
-                        self.last_plan.selected_gain_tracking_costs.tolist()),
-                    "plan_selected_maximum_first_step_lambda_shift": format(
-                        self.last_plan
-                        .selected_maximum_first_step_lambda_shift, ".6g"),
-                    "plan_cost_weighting_ms": (
-                        f"{self.last_plan.cost_weighting_ms:.3f}"),
-                    "plan_update_projection_ms": (
-                        f"{self.last_plan.update_projection_ms:.3f}"),
-                    "plan_command_prediction_kind": (
-                        "scored_feasible_candidate"
-                        if self.last_plan.scored_candidate_guard_applied else
-                        "weighted_feasible_candidate_mean"),
-                    "plan_transmission_prediction_applied": str(
-                        self.last_plan.transmission_prediction_applied),
-                    "plan_rotation_direction_latched": str(
-                        self.last_plan.rotation_direction_latched),
-                    "plan_takeup_direction_latched": str(
-                        self.last_plan.takeup_direction_latched),
-                    "plan_best_candidate_selected": str(
-                        self.last_plan.best_candidate_selected),
-                    "plan_scored_candidate_guard_applied": str(
-                        self.last_plan.scored_candidate_guard_applied),
-                    "plan_blocked_motor_direction": (
-                        "none" if self.last_plan.blocked_motor_direction
-                        is None else json.dumps(
-                            self.last_plan.blocked_motor_direction.tolist())),
-                    "plan_blocked_candidate_count": str(
-                        self.last_plan.blocked_candidate_count),
-                    "plan_direction_lease": json.dumps(
-                        self.last_plan.direction_lease.tolist()),
-                    "plan_approved_reversal_direction": json.dumps(
-                        self.last_plan.approved_reversal_direction.tolist()),
-                    "plan_proposed_reversal_direction": json.dumps(
-                        self.last_plan.proposed_reversal_direction.tolist()),
-                    "plan_direction_lease_applied": str(
-                        self.last_plan.direction_lease_applied),
-                    "plan_unrestricted_candidate_index": str(
-                        self.last_plan.unrestricted_candidate_index),
-                    "plan_lease_constrained_candidate_index": str(
-                        self.last_plan.lease_constrained_candidate_index),
-                    "plan_unrestricted_total_cost": format(
-                        self.last_plan.unrestricted_total_cost, ".6g"),
-                    "plan_lease_constrained_total_cost": format(
-                        self.last_plan.lease_constrained_total_cost, ".6g"),
-                    "plan_reversal_axis_cost_improvement": json.dumps(
-                        self.last_plan.reversal_axis_cost_improvement.tolist()),
-                    "plan_reversal_axis_terminal_error_improvement_mm": (
-                        json.dumps(
-                            self.last_plan
-                            .reversal_axis_terminal_error_improvement_mm
-                            .tolist())),
-                    "plan_hold_branch_applied": str(
-                        self.last_plan.hold_branch_applied),
-                    "plan_hold_branch_terminal_error_mm": format(
-                        self.last_plan.hold_branch_terminal_error_mm, ".6g"),
-                    "plan_zero_terminal_error_mm": format(
-                        self.last_plan.zero_terminal_error_mm, ".6g"),
-                    "plan_raw_zero_terminal_error_mm": format(
-                        self.last_plan.raw_zero_terminal_error_mm, ".6g"),
-                    "plan_capture_passive_response_scale": format(
-                        self.last_plan.capture_passive_response_scale, ".6g"),
-                    "plan_selected_gain_learning_velocity_scale": format(
-                        self.last_plan
-                        .selected_gain_learning_velocity_scale, ".6g"),
-                    "plan_proposal_group_count": str(
-                        self.last_plan.proposal_group_count),
-                    "plan_prediction_horizon_steps": str(
-                        self.last_plan.prediction_horizon_steps),
-                    "plan_prediction_horizon_s": format(
-                        self.last_plan.prediction_horizon_s, ".6g"),
-                    "plan_tendon_probe_candidate_count": str(
-                        self.last_plan.tendon_probe_candidate_count),
-                    "plan_selected_tendon_probe": str(
-                        self.last_plan.selected_tendon_probe),
-                    "plan_selected_reversal_mask": str(
-                        self.last_plan.selected_reversal_mask),
-                    "plan_unrestricted_reversal_mask": str(
-                        self.last_plan.unrestricted_reversal_mask),
-                    "plan_mode_best_total_cost": json.dumps(
-                        self.last_plan.mode_best_total_cost.tolist(),
-                        separators=(",", ":")),
-                    "plan_takeup_joint_position_offset": json.dumps(
-                        self.last_plan.takeup_joint_position_offset.tolist(),
-                        separators=(",", ":")),
-                    "plan_selected_takeup_risk_s": format(
-                        self.last_plan.selected_takeup_risk_s, ".6g"),
-                    "plan_selected_takeup_risk_cost": format(
-                        self.last_plan.selected_takeup_risk_cost, ".6g"),
-                    "plan_selected_switch_count": str(
-                        self.last_plan.selected_switch_count),
-                    "plan_selected_candidate_index": str(
-                        self.last_plan.selected_candidate_index),
-                    "plan_selected_total_cost": (
-                        f"{self.last_plan.selected_total_cost:.6g}"),
-                    "plan_zero_total_cost": (
-                        f"{self.last_plan.zero_total_cost:.6g}"),
-                    "plan_weighted_tracking_cost": (
-                        f"{self.last_plan.weighted_tracking_cost:.6g}"),
-                    "plan_zero_tracking_cost": (
-                        f"{self.last_plan.zero_tracking_cost:.6g}"),
-                    "plan_best_tracking_cost": (
-                        f"{self.last_plan.best_tracking_cost:.6g}"),
-                    "plan_logical_velocity_sequence": json.dumps(
-                        self.last_plan.logical_velocity_sequence.tolist(),
-                        separators=(",", ":")),
-                    "plan_motor_radians_per_second_sequence": json.dumps(
-                        self.last_plan.motor_radians_per_second_sequence
-                        .tolist(),
-                        separators=(",", ":")),
-                    "plan_compensated_motor_radians_per_second_sequence": (
-                        "none" if self.last_plan
-                        .compensated_motor_radians_per_second_sequence is None
-                        else json.dumps(
-                            self.last_plan
-                            .compensated_motor_radians_per_second_sequence
-                            .tolist(), separators=(",", ":"))),
-                    "plan_transmitted_motor_radians_per_second_sequence": (
-                        "none" if self.last_plan
-                        .transmitted_motor_radians_per_second_sequence is None
-                        else json.dumps(
-                            self.last_plan
-                            .transmitted_motor_radians_per_second_sequence
-                            .tolist(), separators=(",", ":"))),
-                })
-                if self.last_plan.command_tip_sequence_m is not None:
-                    terminal = self.last_plan.command_tip_sequence_m[-1]
-                    values["plan_command_predicted_terminal_tip_m"] = (
-                        json.dumps(terminal.tolist(), separators=(",", ":")))
-                    if self.target is not None:
-                        _, terminal_error = tip_tracking_error_mm(
-                            self.target, terminal)
-                        values[
-                            "plan_command_predicted_terminal_error_mm"] = (
-                                f"{terminal_error:.6g}")
-            response = self.last_tip_forecast_result
-            if response is not None:
-                values.update({
-                    "response_forecast_start_timestamp_ns": str(
-                        response.start_timestamp_ns),
-                    "response_forecast_due_timestamp_ns": str(
-                        response.due_timestamp_ns),
-                    "response_forecast_horizon_ms": (
-                        f"{1e-6*(response.due_timestamp_ns-response.start_timestamp_ns):.6g}"),
-                    "response_observation_timestamp_ns": str(
-                        response.observation_timestamp_ns),
-                    "response_observation_lateness_ms": (
-                        "{:.6g}".format(1e-6*(
-                            response.observation_timestamp_ns
-                            - response.due_timestamp_ns))),
-                    "response_start_observation_skew_ms": (
-                        f"{response.start_observation_skew_ms:.6g}"),
-                    "response_predicted_tip_delta_mm": json.dumps(
-                        response.predicted_delta_mm.tolist(),
-                        separators=(",", ":")),
-                    "response_measured_tip_delta_mm": json.dumps(
-                        response.measured_delta_mm.tolist(),
-                        separators=(",", ":")),
-                    "response_endpoint_error_xyz_mm": json.dumps(
-                        response.endpoint_error_mm.tolist(),
-                        separators=(",", ":")),
-                    "response_endpoint_error_norm_mm": (
-                        f"{response.endpoint_error_norm_mm:.6g}"),
-                    "response_direction_cosine": (
-                        "none" if response.direction_cosine is None
-                        else f"{response.direction_cosine:.6g}"),
-                    "response_pending_forecasts": str(
-                        self.tip_forecast_monitor.pending_count),
-                })
-            for key in (
-                    "distal_sha256", "jacobian_sha256", "lambda",
-                    "last_dt_s",
-                    "estimator_covariance_trace",
-                    "estimator_covariance_min_eigenvalue",
-                    "estimator_covariance_max_eigenvalue",
-                    "estimator_observable_rank",
-                    "marker_timing_rewind_ms",
-                    "marker_timing_correction_ms",
-                    "marker_timing_replay_ms",
-                    "marker_timing_total_ms",
-                    "rls_covariance_trace",
-                    "rls_covariance_min_eigenvalue",
-                    "rls_covariance_max_eigenvalue", "rls_weight", "rls_axis",
-                    "rls_update_norm", "rls_reason", "rls_window_frames",
-                    "rls_motion_intervals", "rls_normalized_action_norm",
-                    "rls_directional_purity",
-                    "rls_response_rotation_deg",
-                    "rls_response_translation_mm",
-                    "rls_rotation_snr", "rls_translation_snr",
-                    "rls_pending_confirmation",
-                    "rls_reversal_holdoff_axis",
-                    "adaptation_reversal_holdoff_normalized_action_by_axis",
-                    "adaptation_enabled",
-                    "adaptation_minimum_observations",
-                    "adaptation_minimum_normalized_action",
-                    "adaptation_minimum_rotation_deg",
-                    "adaptation_minimum_translation_mm",
-                    "adaptation_minimum_response_snr",
-                    "estimator_history_reconciliation_enabled",
-                    "history_equilibrium_correction",
-                    "history_reconciliation_last_delta",
-                    "jacobian_condition_number",
-                    "rewind_entries"):
-                if key in self.model_diagnostics:
-                    values[f"model_{key}"] = str(
-                        self.model_diagnostics[key])
-            for key in ("initialization_inlier_streak",
-                        "initialization_complete"):
-                if key in self.model_diagnostics:
-                    values[f"model_{key}"] = str(
-                        self.model_diagnostics[key])
-            if "jacobian" in self.model_diagnostics:
-                values["model_jacobian"] = json.dumps(
-                    self.model_diagnostics["jacobian"], separators=(",", ":"))
-            for key in ("raw_encoder_counts_first_three", "raw_motor_angle_rad",
-                        "motor_angle_rad", "downstream"):
-                if key in self.model_diagnostics:
-                    values[f"model_{key}"] = json.dumps(
-                        self.model_diagnostics[key], separators=(",", ":"))
-            values["model_valid"] = str(self.model_valid)
+            plan_terminal_error_mm = None
+            if (self.last_plan is not None
+                    and self.last_plan.command_tip_sequence_m is not None
+                    and self.target is not None):
+                terminal = self.last_plan.command_tip_sequence_m[-1]
+                _, plan_terminal_error_mm = tip_tracking_error_mm(
+                    self.target, terminal)
+            values.update(plan_diagnostic_values(
+                self.last_plan, plan_terminal_error_mm))
+            values.update(response_diagnostic_values(
+                self.last_tip_forecast_result,
+                self.tip_forecast_monitor.pending_count))
+            values.update(model_diagnostic_values(
+                self.model_diagnostics, self.model_valid))
             status.values = [
                 KeyValue(key=key, value=value)
                 for key, value in values.items()]

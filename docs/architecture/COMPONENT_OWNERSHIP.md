@@ -9,12 +9,15 @@ to its final package.
 | ROS messages, services, and actions | `robot-infra/control_interface` | Language-neutral contracts only |
 | Manager arbitration and freshness | `robot-infra/control_interface` | Final ROS-side command authority |
 | Serial framing and device telemetry | `robot-infra/control_interface` | Must reject `SET_ZERO`; firmware remains final authority |
+| Shared hardware limits | `robot-infra/control_interface/config` | One canonical safety contract |
+| Launch composition | `robot-infra/bringup` | Functional packages own runtime implementation |
 | MPPI, belief integration, and estimator scheduling | `robot-infra/catheter_control/{planning,transmission,orchestration}` | `node.py` is the ROS composition root |
 | Safety projection and lifecycle gates | `robot-infra/catheter_control/safety` | Manager and firmware remain final authorities |
-| Simulation device, plant, perception, and RViz | `robot-infra/catheter_control/simulation` | Simulation-only endpoints remain under `/sim` |
-| Experiment/task clients | `robot-infra/catheter_control/applications` and `automation/experiments` | Future ROS package: `catheter_experiments` |
-| Marker tracking ROS publisher | `robot-infra/automation/perception` | Future ROS package: `catheter_perception` |
-| Session identity and qualification | `robot-infra/automation/supervision` | Future experiment or supervision package |
+| Simulation device, plant, perception, and RViz | `robot-infra/simulation` | Simulation-only endpoints remain under `/sim` |
+| Experiment schedules and guarded collection | `robot-infra/experiments` | Standalone functional package |
+| Controller task clients | `robot-infra/control_tasks` | Depends one-way on the controller core |
+| Marker tracking and live shape adapters | `robot-infra/perception` | Extracted from the historical `automation` package |
+| Session identity and qualification | `robot-infra/runtime_supervision` | Standalone functional package |
 | Manual operator UI | `robot-infra/teleop` | Not a model or autonomous controller |
 | Learned mechanics and causal state | `cr_meta_lnn` | Includes v171 distal runtime and play/transmission loaders |
 | Estimator rewind/correction/replay implementation | `cr_meta_lnn/deployment` | ROS callback ownership remains in `catheter_control` |
@@ -26,12 +29,9 @@ to its final package.
 
 ## ROS package direction
 
-`catheter_control` is autonomous runtime code and is logically related to
-parts of `automation`, but merging the two current packages would preserve
-the wrong boundary: `automation` mixes perception, experiments, collection,
-and identity tooling. Phase 3 splits those responsibilities internally and
-retains compatibility entry points. Later phases may promote the boundaries
-to separate ROS packages:
+The former `automation` package mixed perception, experiments, collection,
+and identity tooling. Those responsibilities now live in separate ROS packages,
+and the historical package has been retired:
 
 ```text
 control_interface
@@ -39,19 +39,29 @@ control_interface
 ├── manager / command arbitration
 └── serial transport
 
+bringup
+└── launch composition and deployment entry points
+
 catheter_control
 ├── controller composition
 ├── estimator scheduling
-├── MPPI and belief integration
-└── simulation
+└── MPPI and belief integration
 
-catheter_perception
+simulation
+└── isolated plant, device, perception, scenarios, and RViz
+
+control_tasks
+└── action servers and task clients
+
+perception
 └── online marker observations and diagnostics
 
-catheter_experiments
-├── task clients and experiment schedules
-├── session/runtime identity
-└── collection and qualification
+experiments
+├── experiment schedules
+└── guarded data collection
+
+runtime_supervision
+└── session identity and qualification
 ```
 
 The split is structural only. Topic names, service names, source stamps,

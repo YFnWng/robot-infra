@@ -138,7 +138,11 @@ class SlicerHandler(Node):
         self.manager_stream_sub
 
         # --- publisher ---
-        self.intent_pub = self.create_publisher(ControlStream, '/teleop/control', 10)
+        motion_qos = QoSProfile(depth=1)
+        motion_qos.reliability = ReliabilityPolicy.RELIABLE
+        motion_qos.durability = DurabilityPolicy.VOLATILE
+        self.intent_pub = self.create_publisher(
+            ControlStream, '/teleop/control', motion_qos)
         self.teleop_event_pub = self.create_publisher(ManagerEvent, '/teleop/event', 10)
         self.manager_event_pub = self.create_publisher(ros2_igtl_bridge.msg.String,
                                          '/IGTL_STRING_OUT', 10)

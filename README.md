@@ -200,7 +200,7 @@ python -m pip install -r state_estimation/requirements.txt
 python -m pip install -e cr-common
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 cd robot-infra
-python -m colcon build --packages-select automation teleop --symlink-install
+python -m colcon build --packages-select perception experiments runtime_supervision bringup control_tasks simulation teleop --symlink-install
 source install/setup.bash
 ros2 launch teleop slicer.launch.py enable_state_estimator:=true
 ```

@@ -409,7 +409,7 @@ def _parser():
         "real_joint_local_distal_v174.json"))
     parser.add_argument("--distal-tendon-allocation-checkpoint", default="")
     parser.add_argument("--limits-file", default=str(
-        root/"robot-infra/src/automation/config/catheter_limits.yaml"))
+        root/"robot-infra/src/control_interface/config/catheter_limits.yaml"))
     parser.add_argument("--catheter", default="imricor_test")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--samples", type=int, default=32)

@@ -8,13 +8,14 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _default_limits():
-    """Path to the shared catheter limits YAML (lives in the automation
-    package). Resolved at launch time; empty string if automation isn't
-    installed, which makes the production manager fail closed."""
+    """Resolve the shared limits installed by the command authority package.
+
+    An absent contract leaves the default empty so the manager fails closed.
+    """
     try:
         from ament_index_python.packages import get_package_share_directory
         return os.path.join(
-            get_package_share_directory("automation"), "config", "catheter_limits.yaml")
+            get_package_share_directory("control_interface"), "config", "catheter_limits.yaml")
     except Exception:
         return ""
 

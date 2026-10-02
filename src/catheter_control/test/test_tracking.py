@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from catheter_control.tracking import TipForecastMonitor, tip_tracking_error_mm
+from catheter_control.planning.tracking import TipForecastMonitor, tip_tracking_error_mm
 
 
 def test_tip_tracking_error_uses_target_minus_observed_and_mm():

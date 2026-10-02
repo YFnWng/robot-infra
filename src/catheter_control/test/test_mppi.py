@@ -6,17 +6,17 @@ import numpy as np
 import pytest
 import torch
 
-from catheter_control.backlash import BacklashSnapshot
-from catheter_control.engaged_gain import EngagedGainConfig, EngagedGainEstimator
-from catheter_control.hardware_contract import (
+from catheter_control.transmission.backlash import BacklashSnapshot
+from catheter_control.transmission.engaged_gain import EngagedGainConfig, EngagedGainEstimator
+from catheter_control.safety.hardware_contract import (
     MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM, load_hardware_contract)
-from catheter_control.mppi import (
+from catheter_control.planning.mppi import (
     CONTROL_AXES, CatheterMppi, MppiConfig, _synchronize_torch_device,
     _tip_tracking_error_squared)
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LIMITS = ROOT / "automation" / "config" / "catheter_limits.yaml"
+LIMITS = ROOT / "control_interface" / "config" / "catheter_limits.yaml"
 
 
 class LinearRollout:

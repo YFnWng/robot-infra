@@ -7,20 +7,27 @@ active deployment boundary; it does not mean scientifically invalid.
 
 ### `robot-infra`
 
-- `src/control_interface`: ROS contracts, manager, serial transport, limits,
-  freshness, qualification, and safety tests.
+- `src/control_interface`: ROS contracts, manager, serial transport, shared
+  hardware limits, freshness, qualification, and safety tests.
+- `src/bringup`: canonical launch composition and deployment entry points.
 - `src/catheter_control/catheter_control/node.py` and the canonical
-  `orchestration`, `planning`, `transmission`, `safety`, `simulation`, and
-  `applications` subpackages: active controller runtime.
-- `src/catheter_control/launch/control.launch.py`: hardware controller launch;
+  `orchestration`, `planning`, `transmission`, and `safety` subpackages:
+  active controller runtime.
+- `src/bringup/launch/control.launch.py`: hardware controller launch;
   command output defaults to disabled.
-- `src/catheter_control/launch/simulation.launch.py`: isolated `/sim` stack.
+- `src/simulation/simulation`: isolated plant, device, perception, scenario,
+  target, and visualization runtime.
+- `src/bringup/launch/simulation.launch.py`: isolated `/sim` stack.
 - `src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml`: the
   qualified controller profile for the recorded scope.
-- `src/automation/automation/perception`: active online marker and legacy
-  state-estimation adapters pending a ROS perception-package split.
-- `src/automation/automation/experiments` and `supervision`: maintained
-  experiment, collection, identity, and qualification infrastructure.
+- `src/perception/perception`: active online marker tracking, marker UDP input,
+  EM bridge, and legacy live state-estimation adapters.
+- `src/experiments/experiments`: maintained experiment schedules and guarded
+  data-collection runtime.
+- `src/control_tasks/control_tasks`: maintained action servers, target/path
+  clients, camera overlays, and recording helpers.
+- `src/runtime_supervision/runtime_supervision`: maintained runtime identity,
+  finalized-session validation, and stationary-session qualification.
 - `tools/maintenance` and `audits/ros-realtime`: reproducible inventory,
   closure, replay, and audit tooling.
 
@@ -54,11 +61,10 @@ become a runtime default.
 - Legacy checkpoint locations under `cr_meta_lnn/checkpoints` and
   `cr_meta_lnn/evaluation` are compatibility symlinks declared by the selected
   artifact manifest; maintained runtime consumers use canonical bundle paths.
-- Existing ROS console entry-point names remain stable while `automation` is
-  split.
-- Pre-Phase-3 `catheter_control` root modules and `automation.collection`,
-  `automation.estimation`, and `automation.marker_tracking` modules are thin
-  import/CLI compatibility shims; new code imports canonical subpackages.
+- Pre-Phase-3 `catheter_control` root import modules were retired after all
+  maintained consumers migrated to canonical package paths.
+- The retired `automation` package has no active compatibility surface.
+  Historical manifests and commands remain evidence, not supported entry points.
 - Versioned hardware and experiment YAML names remain addressable as
   compatibility aliases for the semantic stacks introduced in Phase 2.
 - Historical absolute paths in audit/session manifests are immutable evidence,

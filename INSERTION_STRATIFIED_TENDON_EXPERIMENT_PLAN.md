@@ -154,7 +154,7 @@ distinction necessary.
 ### Generator and launch
 
 1. Add both schedule names and `phase_2e` alias to
-   `automation/collection/causal_experiment.py`.
+   `experiments/causal_experiment.py`.
 2. Add launch arguments for absolute insertion plateaus, plateau dwell, and
    visit count.  Do not overload the existing insertion half-amplitude.
 3. Add a dedicated episode builder that labels every transition, dwell, and
@@ -186,7 +186,7 @@ Add generator tests that prove:
 - every logical and derived raw endpoint respects its reserve;
 - dry-run metadata and episode labels reconstruct the complete schedule.
 
-Run the automation unit tests and a model-in-loop dry run before generating
+Run the experiment package unit tests and a model-in-loop dry run before generating
 hardware commands.
 
 ## Recorded signals

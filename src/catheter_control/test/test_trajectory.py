@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from catheter_control.trajectory import TrajectorySequencer
+from catheter_control.planning.trajectory import TrajectorySequencer
 
 
 def test_reached_waypoint_advances_and_final_reach_completes():

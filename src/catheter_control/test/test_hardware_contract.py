@@ -4,7 +4,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from catheter_control.hardware_contract import (
+from catheter_control.safety.hardware_contract import (
     ENCODER_RADIANS_PER_COUNT,
     HardwareContract,
     MOTOR_AXIS_UNITS_PER_ENCODER_COUNT,
@@ -14,7 +14,7 @@ from catheter_control.hardware_contract import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LIMITS = ROOT / "automation" / "config" / "catheter_limits.yaml"
+LIMITS = ROOT / "control_interface" / "config" / "catheter_limits.yaml"
 
 
 @pytest.fixture

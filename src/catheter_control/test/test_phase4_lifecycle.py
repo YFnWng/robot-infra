@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from catheter_control.lifecycle import (
+from catheter_control.safety.lifecycle import (
     ControllerState, FreshnessLimits, GateInputs, paired_source_skew_s,
     readiness, recoverable_encoder_processing_lag)
 

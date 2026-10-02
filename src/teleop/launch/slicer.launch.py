@@ -79,12 +79,12 @@ def generate_launch_description():
     )
 
     state_estimator = Node(
-        package="automation",
+        package="perception",
         executable="state_estimator",
         name="state_estimator",
         parameters=[{
             "config_path": os.path.join(
-                get_package_share_directory("automation"),
+                get_package_share_directory("perception"),
                 "config", "live_coil_estimation.yaml",
             ),
         }],

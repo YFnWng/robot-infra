@@ -2,8 +2,9 @@
 
 Phase 3 separates runtime responsibilities without changing ROS names,
 messages, topics, services, actions, parameters, safety behavior, or console
-commands. New code must import the canonical modules below. The former module
-paths remain compatibility shims until Phase 7.
+commands. New code must import the canonical modules below. The temporary
+root-level compatibility modules were retired after all maintained consumers
+migrated to the canonical packages.
 
 ## `catheter_control`
 
@@ -14,53 +15,97 @@ catheter_control/
 │                            # marker validation, configuration, diagnostics
 ├── planning/                # MPPI, path references, trajectories, tip tracking
 ├── transmission/            # play/backlash, engagement/gain belief, reversals
-├── safety/                  # hardware contract, lifecycle gates, validation
-├── simulation/              # plant, device, perception, scenarios, RViz adapter
-├── applications/            # action/task clients, files, overlays, recording
-└── <legacy modules>.py      # import/`python -m` compatibility only
+└── safety/                  # hardware contract, lifecycle gates, validation
 ```
 
 The composition root still owns ROS callback groups, immutable planner
 snapshots, estimator and planner execution, command publication, and fault
-latching. Pure marker-message validation, callback timing instrumentation, and
-learned-runtime loading have moved behind `orchestration` interfaces. This is
-the first seam for the Phase 4 C++ ROS shell; it does not change scheduling.
+latching. Pure marker-message validation, callback timing instrumentation,
+diagnostic value serialization, learned-runtime loading, and the complete ROS
+parameter declaration surface have moved behind `orchestration` interfaces.
+`orchestration/diagnostics.py` owns deterministic string and JSON formatting;
+`node.py` retains ROS diagnostic message construction, publication, locking,
+and callback scheduling.
+`orchestration/parameters.py` is the sole owner of parameter names, defaults,
+and declaration order; launch profiles only assign values. This is the first
+seam for the Phase 4 C++ ROS shell; it does not change scheduling.
 
 Allowed dependency direction is:
 
 ```text
-applications ─┐
-simulation  ──┼──> planning / transmission / safety
-node ─────────┴──> orchestration + planning + transmission + safety
+node ────────> orchestration + planning + transmission + safety
 ```
 
-Canonical implementation modules must not import root compatibility shims.
-The shims may import canonical implementations and expose private names only
-to preserve existing tests and external scripts.
+Canonical implementation modules and maintained consumers import these package
+boundaries directly. Retired root module paths are intentionally unsupported.
 
-## `automation`
+## `simulation`
 
-The historical package is retained, but its mixed responsibilities are now
-separated internally:
+The standalone package owns the isolated plant, device, perception, scenario,
+target, and RViz simulation runtimes. It depends one-way on
+`catheter_control` for shared safety contracts; the controller core does not
+import simulation code. Existing executable names and `/sim` endpoints are
+preserved.
+
+## `bringup`
+
+The standalone package owns all launch composition. Runtime nodes, safety rules,
+and algorithms remain in their functional packages. Hardware and simulation
+stacks are launched through `bringup`.
+
+## `perception`
+
+The standalone ROS package owns online observations and live shape adapters:
 
 ```text
-automation/
-├── perception/              # marker tracking, UDP input, state estimator, EM
-├── experiments/             # collection node and experiment schedules
-├── supervision/             # runtime identity, session checks, analysis
-├── marker_tracking/         # compatibility paths
-├── estimation/              # compatibility paths
-└── collection/              # compatibility paths
+perception/
+├── marker_tracking.py       # dual-rig online marker publisher and diagnostics
+├── marker_udp_receiver.py   # validated remote marker input
+├── em_bridge.py             # EM PointArray to canonical PoseArray bridge
+├── state_estimator.py       # legacy live coil-shape adapter
+└── estimation_protocol.py   # validated live-estimation configuration
 ```
 
-Installed console-command names are unchanged. Their entry points now target
-the canonical responsibility packages. This internal split is the migration
-boundary for future `catheter_perception` and `catheter_experiments` ROS
-packages; no package split is required for Phase 3.
+## `experiments`
 
-## Compatibility and retirement
+The standalone ROS package owns experiment schedules and guarded collection:
 
-Compatibility modules are intentionally small and contain no behavior. Add
-features and fixes only to canonical modules. Compatibility paths are covered
-by identity tests and may be removed only in Phase 7 after downstream callers
-and recorded reproduction instructions have migrated.
+```text
+experiments/
+├── collection.py              # guarded collection runtime
+├── causal_experiment.py       # causal isolation schedules
+└── identification.py          # continuous identification schedules
+```
+
+The package depends only on its declared functional dependencies. Launch
+composition belongs to `bringup`; runtime supervision is independently owned.
+Controller task clients are owned by the standalone `control_tasks` package.
+
+## `runtime_supervision`
+
+The standalone ROS package owns runtime and session qualification:
+
+```text
+runtime_supervision/
+├── runtime_identity.py       # parameter and artifact identity capture
+├── session_check.py          # finalized-bag completeness validation
+└── stationary_analysis.py    # offline stationary-noise qualification
+```
+
+The longer package name avoids collision with the installed third-party Python
+package named `supervision`.
+
+## `control_tasks`
+
+The standalone package owns task-level action servers, target and path clients,
+camera overlays, and recording helpers. It depends one-way on the controller
+core; launch composition belongs to `bringup`. Existing executable names are
+preserved under the `control_tasks` ROS package.
+
+## Retired package
+
+The historical `automation` package and its compatibility imports, executable
+aliases, launch aliases, and configuration symlink were removed after all
+maintained consumers migrated. Historical session manifests remain immutable.
+The root-level `catheter_control` compatibility modules were removed after
+maintained callers migrated to the canonical package paths.

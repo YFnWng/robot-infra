@@ -1,6 +1,6 @@
 import pytest
 
-from catheter_control.timing import PeriodicTimerProbe, TimingWindows
+from catheter_control.orchestration.timing import PeriodicTimerProbe, TimingWindows
 
 
 def test_timing_windows_report_and_reset():

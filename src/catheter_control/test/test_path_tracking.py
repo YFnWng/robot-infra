@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from catheter_control.path_tracking import (
+from catheter_control.planning.path_tracking import (
     ArcLengthPath, GovernorConfig, PathProgressGovernor, ReferenceHorizon)
 
 
