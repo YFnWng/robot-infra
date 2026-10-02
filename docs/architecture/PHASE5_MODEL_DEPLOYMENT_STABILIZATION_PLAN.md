@@ -338,6 +338,10 @@ insertion-allocation loader; that behavior is owned by an experimental
 subclass. The explicit namespaces are packaged so retained forwarding
 imports remain valid, but default production imports do not load them.
 
+Phase 7 follow-up (2026-10-02): the three forwarding aliases were retired after
+the remaining local caller migration; the explicit experimental implementations
+remain packaged. See [the retirement ledger](PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md).
+
 ### P5.6 — Cross-repository conformance and baseline update
 
 - Run focused `cr_meta_lnn` deployment tests and complete fixture replay.

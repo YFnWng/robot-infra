@@ -389,6 +389,9 @@ Representative timing qualification is deferred by decision on 2026-10-01.
 This is not a passed gate: it remains required before any C++ command-authority
 promotion, but it does not block behavior-preserving Phase 5 packaging work.
 
+Further C++ implementation is deferred by user decision on 2026-10-02. The
+existing non-commanding shell is retained; deferred gates are not passed gates.
+
 ### Phase 5 -- `cr_meta_lnn` deployment stabilization
 
 Narrow and version the deployment API, add artifact manifests and hashes,
@@ -396,11 +399,10 @@ package reusable code, and isolate legacy deployment/research pipelines. The
 staged implementation and acceptance gates are defined in the
 [Phase 5 model deployment stabilization plan](PHASE5_MODEL_DEPLOYMENT_STABILIZATION_PLAN.md).
 
-Status: P5.0-P5.3 complete. The selected closure is machine-readable, the
-semantic API wraps the unchanged concrete v171 runtime, schema-v2 manifest
-selection verifies compatibility and artifacts before construction, and the
-model plus its `control` and `cr-common` dependencies build and load as wheels.
-Consumer migration and legacy isolation remain.
+Status: P5.0-P5.6 complete. API, manifest verification, clean wheel packaging,
+consumer migration, legacy isolation, and cross-repository conformance are
+closed at shared tag `catheter-stack-phase5-qualified-20261002`. This does not
+qualify representative live timing or transfer command authority to C++.
 
 
 ### Phase 6 -- promote stable algorithms to C++
@@ -408,10 +410,20 @@ Consumer migration and legacy isolation remain.
 Promote one bounded component at a time with fixture conformance, replay,
 simulation, shadow hardware, and timing qualification.
 
+Status: deferred by user decision on 2026-10-02; no C++ authority promotion.
+
 ### Phase 7 -- archival and deletion
 
 After replacements are proven, remove aliases and retired code from the active
 branch, preserve important history in tags/branches, and leave a legacy index.
+
+Status: verified alias retirement implemented on 2026-10-02. Three root model
+loader shims are removed, their sole remaining source caller is migrated, and
+tests enforce canonical imports. The Phase 5 tag preserves the retired files;
+the research archive branch and unrelated local research remain untouched.
+Supported aliases and reproduction paths remain where consumers still exist.
+See the [Phase 7 retirement ledger](PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md)
+for the deliberately bounded scope and verification evidence.
 
 ## 11. Characterization and conformance gates
 

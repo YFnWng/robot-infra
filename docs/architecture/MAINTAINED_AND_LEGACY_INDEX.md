@@ -87,9 +87,10 @@ become a runtime default.
   They remain installed for deliberate reproduction but are rejected by the
   maintained manifest-only controller.
 - The v150 runtime is available only through the explicit
-  `cr_meta_lnn.deployment.legacy.streaming_runtime` import. Root checkpoint
-  loader modules in `cr_meta_lnn.deployment` are behavior-free compatibility
-  forwarders for preserved research callers.
+  `cr_meta_lnn.deployment.legacy.streaming_runtime` import. The three root
+  checkpoint-loader aliases were retired in Phase 7; research callers use
+  `cr_meta_lnn.deployment.experimental`. See the
+  [retirement ledger](PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md).
 
 ## Research history
 
