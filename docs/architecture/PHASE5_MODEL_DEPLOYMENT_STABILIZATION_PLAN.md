@@ -1,9 +1,9 @@
 # Phase 5 Model Deployment Stabilization Plan
 
-Status: P5.0-P5.5 implemented; P5.6 pending
+Status: P5.0-P5.6 implemented
 Primary repository: `cr_meta_lnn`
 Consumer repository: `robot-infra`
-Baseline: `catheter-stack-pre-cleanup-20261001`
+Baseline: `catheter-stack-phase5-qualified-20261002`
 Selected bundle: `20260929_175554_grouped_no_rotation`
 
 Current gate status:
@@ -31,8 +31,12 @@ Current gate status:
   experimental subclass, and historical ROS profiles live under
   `config/legacy`. Explicit namespaces remain installable for deliberate
   reproduction, while default production imports cannot reach them.
-- P5.6: pending. The schema-v1 manifest is retained only as explicit
-  migration input.
+- P5.6: complete. A deterministic offline fixture replays the selected
+  manifest runtime, delayed correction/replay, marker acceptance/rejection,
+  and grouped, plain-with-take-up, and plain controller decisions. The current
+  code and the detached pre-cleanup tags reproduce it within field-specific
+  tolerances; installed-wheel and installed-ROS entry-point gates pass. The
+  schema-v1 manifest remains explicit migration input only.
 
 Phase 4 representative timing qualification is explicitly deferred. That does
 not block this behavior-preserving packaging and API work, but it remains a
@@ -351,6 +355,15 @@ imports remain valid, but default production imports do not load them.
 Acceptance: clean installs reproduce the baseline behavior and identity from
 the manifest alone. Phase 4 timing remains marked deferred and C++ command
 authority remains unavailable.
+
+Implementation: complete. The non-actuating `phase5_conformance` entry point
+contains no ROS publisher or serial dependency and records
+`READ_ONLY_NEVER_SET_ZERO`. It compares floating-point fields with explicit
+state/geometry/command tolerances and discrete validity, reason, health, and
+mode decisions exactly. The shared software identifier is
+`catheter-stack-phase5-qualified-20261002`; recorded hardware scope is
+unchanged. Phase 4 representative timing remains deferred and the C++ shadow
+still has no command authority.
 
 ## 8. Required tests
 

@@ -6,7 +6,8 @@ runtime definitions.
 
 ## Identity
 
-- Shared source tag: `catheter-stack-pre-cleanup-20261001`
+- Shared software baseline: `catheter-stack-phase5-qualified-20261002`
+- Frozen behavior reference: `catheter-stack-pre-cleanup-20261001`
 - Qualified hardware anchor: `20260929_175554_mppi_demo`
 - Qualification scope: four sparse two-axis targets, rotation disabled
 - Controller profile: `v175_grouped_hardware_no_rotation.yaml`
@@ -25,8 +26,8 @@ not authorize a hardware run.
 
 | Repository | Responsibility | Baseline tag target |
 | --- | --- | --- |
-| `robot-infra` | ROS interfaces, controller integration, manager, transport, safety, launch, and simulation | `39a30090658e834ce65554f953faf1ab88453da2` |
-| `cr_meta_lnn` | v171 runtime, estimator/model state, and artifact loaders | `ae8752b7e140ad913ca2e742b99f5c4da348e01b` |
+| `robot-infra` | ROS interfaces, controller integration, manager, transport, safety, launch, and simulation | `catheter-stack-phase5-qualified-20261002` |
+| `cr_meta_lnn` | v171 runtime, estimator/model state, and artifact loaders | `catheter-stack-phase5-qualified-20261002` |
 | `catheter-shape-tracking` | synchronized dual-rig capture and marker observations | `56980d0d6a382a29d97218dd3a5de6f0793e519f` |
 | `control` | `AdaptiveForwardJacobian` implementation | `af8b10d2b5bf885e4daf5365a0013e3ca30b51f1` |
 | `cr-common` | shared kinematic/model utilities | `db5cdd464c850b07f0a159bc3e984212104ab435` |
@@ -37,7 +38,9 @@ The portable source of truth is
 `cr_meta_lnn/artifacts/manifests/20260929_175554_grouped_no_rotation_v2.json`.
 It declares the v171 distal checkpoint, v174 Jacobian initialization, and v175
 interface-transmission checkpoint by relative path, byte size, SHA-256 digest,
-loader, and role. Binary files remain external to Git.
+loader, and role. The selected qualified bytes are tracked and embedded in
+the deployment wheel so a clean install is self-contained; unrelated research
+checkpoints and generated results remain external to Git.
 
 Do not select an artifact by “latest” filename or directory order. A deployment
 must select a reviewed manifest and verify every file before launch.
@@ -54,9 +57,9 @@ artifact bytes.
 The supported deployment distributions are `cr-meta-lnn==1.0.0`,
 `catheter-control==0.1.0` (import name `control`), and `cr-common==0.1.0`.
 NumPy and PyTorch remain explicit runtime dependencies; plotting, HDF5, pandas,
-SciPy, and YAML experiment tooling are optional research dependencies. Model
-artifacts remain a separate manifest-owned bundle and are not embedded in the
-Python wheel.
+SciPy, and YAML experiment tooling are optional research dependencies. The
+selected manifest-owned bundle is embedded in the Python wheel; no runtime
+directory search or source checkout is required.
 
 ## Configuration boundary
 
@@ -83,6 +86,7 @@ and `command_output_enabled` remains an explicit launch-only interlock. See
 
 ## Qualification evidence
 
+- [P5.6 cross-repository conformance](../../audits/ros-realtime/phase5-cross-repository-conformance-20261002.md)
 - [Clean-source cross-repository gate](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)
 - [Historical active runtime closure](ACTIVE_RUNTIME_CLOSURE_20260929.md)
 - [Machine-readable historical session baseline](production_baselines/20260929_175554_grouped_no_rotation.json)

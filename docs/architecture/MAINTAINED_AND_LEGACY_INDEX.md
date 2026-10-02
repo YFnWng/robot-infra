@@ -33,6 +33,8 @@ active deployment boundary; it does not mean scientifically invalid.
   finalized-session validation, and stationary-session qualification.
 - `tools/maintenance` and `audits/ros-realtime`: reproducible inventory,
   closure, replay, and audit tooling.
+- `catheter_control.safety.conformance` and its packaged fixture: maintained,
+  non-actuating cross-repository state/estimator/planner replay gate.
 
 ### Other repositories
 

@@ -19,10 +19,11 @@ to its final package.
 | Controller task clients | `robot-infra/control_tasks` | Depends one-way on the controller core |
 | Marker tracking and live shape adapters | `robot-infra/perception` | Extracted from the historical `automation` package |
 | Session identity and qualification | `robot-infra/runtime_supervision` | Standalone functional package |
+| Cross-repository numerical conformance | `robot-infra/catheter_control/safety/conformance.py` | Offline only; owns the frozen fixture and never publishes commands |
 | Manual operator UI | `robot-infra/teleop` | Not a model or autonomous controller |
 | Learned mechanics and causal state | `cr_meta_lnn` | Includes v171 distal runtime and play/transmission loaders |
 | Estimator rewind/correction/replay implementation | `cr_meta_lnn/deployment` | ROS callback ownership remains in `catheter_control` |
-| Model artifact manifests | `cr_meta_lnn/artifacts/manifests` | Binaries remain external to Git |
+| Model artifact manifests | `cr_meta_lnn/artifacts/manifests` | Selected qualified bytes ship in the deployment wheel; research outputs remain external |
 | Adaptive forward Jacobian algebra | `control/control/adapj.py` | Reuse; do not duplicate in ROS nodes |
 | Shared kinematics/model utilities | `cr-common` | Must remain importable without optional GTSAM |
 | Camera capture and offline shape reconstruction | `catheter-shape-tracking` | Owns dual-ZED synchronization and observation quality |
