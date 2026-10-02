@@ -14,6 +14,13 @@ def compute_profile():
     return run_in_venv("runtime_supervision.compute_profile")
 
 
+def benchmark_accelerator():
+    """Explicit offline accelerator qualification in the model environment."""
+    from catheter_control.bootstrap import run_in_venv
+
+    return run_in_venv("runtime_supervision.benchmark_accelerator")
+
+
 def runtime_identity():
     root = Path(os.environ.get(
         "CR_VENV", "/home/chen-lab/Yifan/cr-venv")).expanduser().absolute()

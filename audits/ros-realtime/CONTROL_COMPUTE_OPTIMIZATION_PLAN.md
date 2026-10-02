@@ -244,6 +244,15 @@ evolving float64 snapshots, recorded directional gain bounds and the actual
 ROS 1/ROS 2 import-order conflict, not an estimator defect. Live-stack timing
 qualification remains separate from this bounded non-actuating replay.
 
+O3 implementation (2026-10-02): a startup-prepared four-step tensor rollout,
+fixed-shape selection kernel and eager/Inductor/CUDA-graph benchmark are
+available. CUDA graph numerical/frozen-decision tests pass; isolated grouped
+planner P99 improves from 16.49 to 8.36 ms at 512 samples/three scenarios.
+Inductor fails explicitly on the installed Torch build. ROS signature-set
+readiness integration, historical numerical conformance and paced/full-stack
+qualification remain promotion gates; hardware defaults are unchanged. See
+[implementation and evidence](O3_ACCELERATOR_EXECUTION_20261002.md).
+
 ## 6. Where C++ helps, and where it does not
 
 Preferred eventual boundary:

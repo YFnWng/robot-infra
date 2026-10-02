@@ -16,6 +16,7 @@ import torch
 
 from ..safety.hardware_contract import (
     HardwareContract, MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM, N_AXES)
+from .tensor_selection import weighted_selection
 
 
 CONTROL_AXES = 3
@@ -1608,31 +1609,20 @@ class CatheterMppi:
             reversal_mask[constrained_candidate_index])
         direction_lease_applied = (
             constrained_candidate_index != unrestricted_candidate_index)
-        minimum = selection_costs.min()
         # The learned model's displacement over 240 ms varies strongly with
         # operating point. Normalize the rollout spread so one temperature is
         # usable both near a slow distal equilibrium and during insertion.
-        eligible_costs = costs[eligible_t]
-        cost_scale = eligible_costs.std(unbiased=False).clamp_min(1e-6)
-        logits = -(costs-minimum)/(self.config.temperature*cost_scale)
-        logits = torch.where(
-            eligible_t, logits, torch.full_like(logits, -torch.inf))
-        weights = torch.softmax(logits, dim=0)
+        best_t, weights, weighted_tips, weighted_feasible_t = weighted_selection(
+            costs, eligible_t, mean_tips, logical_t, self.config.temperature)
         # A second exact rollout of the weighted command added a 14 ms median
         # compute path and caused real 60 ms deadline faults. The weighted
         # feasible mean is retained only as the next sampling distribution's
         # nominal. When the execution guard is enabled, the actual command is
         # one already-scored candidate (including deterministic candidate 0).
-        weighted_tips = torch.sum(
-            weights[:, None, None]*mean_tips, dim=0)
         # As in the reference controller's g(v) path, update the nominal from
         # the feasible controls that were actually evaluated, never from the
         # raw Gaussian requests. Averaging raw saturated requests biases the
         # nominal and can reintroduce a limit-violating direction.
-        weighted_feasible_t = torch.sum(
-            weights[:, None, None]
-            * logical_t[..., :CONTROL_AXES], dim=0)
-        best_t = torch.argmin(selection_costs)
         best_tips_t = mean_tips[best_t]
         best_cost_t = costs[best_t]
         weighted_tracking_cost_t = torch.sum(weights*tracking_costs)
