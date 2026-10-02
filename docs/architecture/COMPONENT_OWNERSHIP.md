@@ -11,7 +11,8 @@ to its final package.
 | Serial framing and device telemetry | `robot-infra/control_interface` | Must reject `SET_ZERO`; firmware remains final authority |
 | Shared hardware limits | `robot-infra/control_interface/config` | One canonical safety contract |
 | Launch composition | `robot-infra/bringup` | Functional packages own runtime implementation |
-| MPPI, belief integration, and estimator scheduling | `robot-infra/catheter_control/{planning,transmission,orchestration}` | `node.py` is the ROS composition root |
+| MPPI, belief integration, and estimator scheduling | `robot-infra/catheter_control/{planning,transmission,orchestration}` | `node.py` is the Python reference composition root |
+| C++ ROS shell and production migration | `robot-infra/control_cpp` | Shadow-only until separate authority review; no command publisher in the initial node |
 | Safety projection and lifecycle gates | `robot-infra/catheter_control/safety` | Manager and firmware remain final authorities |
 | Simulation device, plant, perception, and RViz | `robot-infra/simulation` | Simulation-only endpoints remain under `/sim` |
 | Experiment schedules and guarded collection | `robot-infra/experiments` | Standalone functional package |
@@ -43,9 +44,14 @@ bringup
 └── launch composition and deployment entry points
 
 catheter_control
-├── controller composition
+├── Python reference controller composition
 ├── estimator scheduling
 └── MPPI and belief integration
+
+control_cpp
+├── non-commanding shadow shell
+├── versioned result validation
+└── isolated heartbeat and timing executors
 
 simulation
 └── isolated plant, device, perception, scenarios, and RViz

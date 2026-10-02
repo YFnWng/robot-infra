@@ -18,6 +18,10 @@ catheter_control/
 └── safety/                  # hardware contract, lifecycle gates, validation
 ```
 
+The non-commanding `orchestration/shadow_worker.py` adapter is an explicit
+Phase 4 migration surface: it mirrors only a post-request Python plan into the
+versioned shadow contract and owns no manager or device command publisher.
+
 The composition root still owns ROS callback groups, immutable planner
 snapshots, estimator and planner execution, command publication, and fault
 latching. Pure marker-message validation, callback timing instrumentation,

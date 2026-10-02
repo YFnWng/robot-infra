@@ -13,6 +13,8 @@ active deployment boundary; it does not mean scientifically invalid.
 - `src/catheter_control/catheter_control/node.py` and the canonical
   `orchestration`, `planning`, `transmission`, and `safety` subpackages:
   active controller runtime.
+- `src/control_cpp`: non-commanding C++ Phase 4 shell, result-contract
+  validation, isolated heartbeat timing, and C++ conformance tests.
 - `src/bringup/launch/control.launch.py`: hardware controller launch;
   command output defaults to disabled.
 - `src/simulation/simulation`: isolated plant, device, perception, scenario,

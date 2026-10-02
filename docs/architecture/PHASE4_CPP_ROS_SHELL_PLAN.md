@@ -1,8 +1,18 @@
 # Phase 4 C++ ROS Shell and Shadow Deployment Plan
 
-Status: planned
+Status: shadow foundation implemented; conformance and timing qualification pending
 Owning repository: `robot-infra`
 Depends on: completed Phase 3 package cleanup (`dd8d048`)
+
+Implementation audit: [Phase 4 shadow-shell static audit](../../audits/ros-realtime/phase4-shadow-shell-static-audit-20261001.md)
+
+Current gate status:
+
+- P4.0: contract reason fixtures implemented; behavior replay fixtures pending.
+- P4.1: non-commanding C++ shell implemented and graph-smoke verified.
+- P4.2: versioned request/decision protocol and Python adapter implemented.
+- P4.3-P4.5: conformance, simulation, and representative timing qualification pending.
+- P4.6-P4.7: not authorized; Python retains command authority.
 
 ## 1. Objective
 

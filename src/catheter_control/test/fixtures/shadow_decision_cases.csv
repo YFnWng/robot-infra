@@ -1,0 +1,12 @@
+name,req_epoch,req_seq,req_target,req_device,req_marker,req_manager,dec_schema,dec_epoch,dec_seq,dec_target,dec_device,dec_marker,dec_manager,valid,start_ns,end_ns,now_ns,max_age_ns,v0,current_epoch,current_target,last_accepted,expected
+accepted,7,11,3,5,6,7,1,7,11,3,5,6,7,1,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,accepted
+schema_mismatch,7,11,3,5,6,7,2,7,11,3,5,6,7,1,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,schema_version_mismatch
+epoch_mismatch,7,11,3,5,6,7,1,6,11,3,5,6,7,1,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,shell_epoch_mismatch
+request_stale,7,10,3,5,6,7,1,7,10,3,5,6,7,1,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,request_sequence_stale
+target_mismatch,7,11,2,5,6,7,1,7,11,2,5,6,7,1,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,target_revision_mismatch
+watermark_mismatch,7,11,3,5,6,7,1,7,11,3,4,6,7,1,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,input_watermark_mismatch
+worker_invalid,7,11,3,5,6,7,1,7,11,3,5,6,7,0,1000000000,1500000000,2000000000,1000000000,0.2,7,3,10,worker_decision_invalid
+compute_time_invalid,7,11,3,5,6,7,1,7,11,3,5,6,7,1,1500000000,1000000000,2000000000,1000000000,0.2,7,3,10,computation_time_invalid
+result_future,7,11,3,5,6,7,1,7,11,3,5,6,7,1,1900000000,2100000000,2000000000,1000000000,0.2,7,3,10,result_from_future
+result_stale,7,11,3,5,6,7,1,7,11,3,5,6,7,1,500000000,900000000,2000000000,1000000000,0.2,7,3,10,result_stale
+velocity_nonfinite,7,11,3,5,6,7,1,7,11,3,5,6,7,1,1000000000,1500000000,2000000000,1000000000,nan,7,3,10,velocity_nonfinite

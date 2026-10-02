@@ -60,6 +60,11 @@ def catheter_mppi():
     return run_in_venv("catheter_control.node")
 
 
+def control_shadow_worker():
+    """Console entry point for the non-commanding shadow adapter."""
+    return run_in_venv("catheter_control.orchestration.shadow_worker")
+
+
 def phase5_preflight():
     """Console entry point for the offline validation harness."""
     return run_in_venv("catheter_control.safety.validation")

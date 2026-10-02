@@ -44,6 +44,11 @@ RECORD_TOPICS = [
     "/catheter_mppi/estimator_trace",
     "/catheter_mppi/control_cycle_timing",
     "/catheter_mppi/status",
+    "/catheter_mppi/shadow_request",
+    "/catheter_mppi/shadow_decision",
+    "/catheter_mppi/shadow_timing",
+    "/catheter_mppi/shadow_status",
+    "/catheter_mppi/shadow_worker_status",
     "/catheter_mppi/track_tip_trajectory/_action/feedback",
     "/catheter_mppi/track_tip_trajectory/_action/status",
     "/catheter_mppi/track_tip_path/_action/feedback",
@@ -122,6 +127,13 @@ def _setup(context, *_args, **_kwargs):
         "distal_tendon_allocation_checkpoint")
     command_output_enabled = value(
         "command_output_enabled").lower() in ("1", "true", "yes")
+    start_cpp_shadow = value(
+        "start_cpp_shadow").lower() in ("1", "true", "yes")
+    start_shadow_worker = value(
+        "start_shadow_worker").lower() in ("1", "true", "yes")
+    if start_shadow_worker and not start_cpp_shadow:
+        raise RuntimeError(
+            "start_shadow_worker=true requires start_cpp_shadow=true")
     parameters = {
             "cr_meta_lnn_root": value("cr_meta_lnn_root"),
             "cr_common_root": value("cr_common_root"),
@@ -361,6 +373,34 @@ def _setup(context, *_args, **_kwargs):
             "preview_duration_s": path_preview_duration_s,
         }])
     actions = [node, trajectory_node, path_node]
+    if start_cpp_shadow:
+        identity = stack_config or controller_config or "launch_parameters"
+        actions.append(Node(
+            package="control_cpp",
+            executable="control_shadow",
+            name="control_shadow",
+            output="screen",
+            parameters=[{
+                "request_rate_hz": float(value("plan_rate_hz")),
+                "heartbeat_rate_hz": float(value("command_rate_hz")),
+                "maximum_result_age_s": max(
+                    0.20, 2.0*float(value("planning_deadline_s"))),
+                "marker_topic": "/shape_tracking/markers",
+                "controller_mode": (
+                    "cpp_shadow_with_worker" if start_shadow_worker
+                    else "cpp_shadow"),
+                "configuration_identity": identity,
+            }]))
+    if start_shadow_worker:
+        actions.append(Node(
+            package="catheter_control",
+            executable="control_shadow_worker",
+            name="control_shadow_worker",
+            output="screen",
+            parameters=[{
+                "maximum_input_age_s": max(
+                    0.20, 2.0*float(value("planning_deadline_s"))),
+            }]))
     if value("record").lower() in ("1", "true", "yes"):
         root = os.path.abspath(os.path.expanduser(value("session_root")))
         os.makedirs(root, exist_ok=True)
@@ -621,6 +661,15 @@ def generate_launch_description():
             "feedback_pair_max_skew_s", default_value="0.15"),
         DeclareLaunchArgument(
             "maximum_planner_deadline_misses", default_value="3"),
+        DeclareLaunchArgument(
+            "start_cpp_shadow", default_value="false",
+            description=(
+                "Start the non-commanding C++ Phase 4 shadow shell.")),
+        DeclareLaunchArgument(
+            "start_shadow_worker", default_value="false",
+            description=(
+                "Mirror fresh Python reference plans into the C++ shadow "
+                "contract; requires start_cpp_shadow=true.")),
         DeclareLaunchArgument(
             "record", default_value="true",
             description=(

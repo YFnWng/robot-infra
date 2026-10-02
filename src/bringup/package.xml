@@ -16,6 +16,7 @@
   <exec_depend>catheter_control</exec_depend>
   <exec_depend>control_tasks</exec_depend>
   <exec_depend>control_interface</exec_depend>
+  <exec_depend>control_cpp</exec_depend>
   <exec_depend>experiments</exec_depend>
   <exec_depend>perception</exec_depend>
   <exec_depend>runtime_supervision</exec_depend>

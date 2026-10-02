@@ -380,6 +380,11 @@ explicitly reviewed. The implementation sequence and qualification gates are
 defined in the
 [Phase 4 C++ ROS shell plan](PHASE4_CPP_ROS_SHELL_PLAN.md).
 
+Status: the non-commanding shell, versioned worker contract, Python reference
+adapter, opt-in launch surface, shared cross-language fixtures, and static audit
+are implemented. Replay/simulation conformance and representative full-stack
+timing qualification remain open; no command authority has moved.
+
 ### Phase 5 -- `cr_meta_lnn` deployment stabilization
 
 Narrow and version the deployment API, add artifact manifests and hashes,

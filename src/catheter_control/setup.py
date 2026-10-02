@@ -32,6 +32,7 @@ setup(
         "console_scripts": [
             "catheter_mppi = catheter_control.bootstrap:catheter_mppi",
             "phase5_preflight = catheter_control.bootstrap:phase5_preflight",
+            "control_shadow_worker = catheter_control.bootstrap:control_shadow_worker",
         ],
     },
 )

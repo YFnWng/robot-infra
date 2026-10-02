@@ -1,0 +1,13 @@
+# One non-actuating C++ shadow heartbeat timing record.
+std_msgs/Header header
+uint64 shell_epoch
+uint64 heartbeat_sequence
+uint64 latest_request_sequence
+uint64 latest_accepted_decision_sequence
+float64 heartbeat_lateness_ms
+float64 heartbeat_callback_ms
+float64 latest_result_receive_age_ms
+float64 latest_result_compute_ms
+float64 latest_request_to_result_ms
+bool decision_fresh
+string decision_reason
