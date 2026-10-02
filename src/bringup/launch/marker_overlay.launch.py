@@ -19,20 +19,19 @@ def generate_launch_description():
                 "SHAPE_TRACKING_ROOT",
                 "/home/chen-lab/Yifan/catheter-shape-tracking")),
         DeclareLaunchArgument(
-            "cr_meta_lnn_root",
+            "model_manifest",
             default_value=os.environ.get(
-                "CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn")),
-        DeclareLaunchArgument(
-            "cr_common_root",
-            default_value=os.environ.get(
-                "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")),
+                "CATHETER_MODEL_MANIFEST",
+                os.path.join(
+                    os.environ.get("CR_VENV", "/home/chen-lab/Yifan/cr-venv"),
+                    "lib/python3.10/site-packages/cr_meta_lnn/artifacts/"
+                    "manifests/20260929_175554_grouped_no_rotation_v2.json"))),
         DeclareLaunchArgument(
             "camera_config",
             default_value=[shape_root, "/camera_config_hd720.yaml"]),
         DeclareLaunchArgument(
             "registration_file",
             default_value=os.environ.get("CATHETER_REGISTRATION_FILE", "")),
-        DeclareLaunchArgument("v171_distal_checkpoint", default_value=""),
         DeclareLaunchArgument("preview_rate_hz", default_value="5.0"),
         DeclareLaunchArgument("preview_maximum_width", default_value="640"),
         DeclareLaunchArgument("preview_jpeg_quality", default_value="70"),
@@ -69,13 +68,8 @@ def generate_launch_description():
             name="catheter_camera_overlay",
             output="screen",
             parameters=[{
-                "shape_tracking_root": shape_root,
-                "cr_meta_lnn_root": LaunchConfiguration(
-                    "cr_meta_lnn_root"),
-                "cr_common_root": LaunchConfiguration("cr_common_root"),
+                "model_manifest": LaunchConfiguration("model_manifest"),
                 "registration_file": registration,
-                "v171_distal_checkpoint": LaunchConfiguration(
-                    "v171_distal_checkpoint"),
                 "rig_ids": ["primary", "oblique"],
                 "preview_eye": preview_eye,
                 "display_rate_hz": ParameterValue(

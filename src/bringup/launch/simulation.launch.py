@@ -1,5 +1,6 @@
 """Launch the isolated exact-model catheter MPPI simulation."""
 from datetime import datetime
+from importlib import metadata
 import fcntl
 import json
 import os
@@ -17,6 +18,59 @@ import yaml
 
 from catheter_control.orchestration.configuration import (
     ACTIVE_CONTROLLER_PARAMETERS, locate_stack, resolve_stack)
+from catheter_control.orchestration.runtime import resolve_model_selection
+
+
+def _default_model_manifest():
+    venv = Path(os.environ.get(
+        "CR_VENV", "/home/chen-lab/Yifan/cr-venv")).expanduser()
+    return str(
+        venv / "lib/python3.10/site-packages/cr_meta_lnn/artifacts/manifests"
+        / "20260929_175554_grouped_no_rotation_v2.json")
+
+
+def _file_identity(path_value):
+    import hashlib
+    path = Path(path_value).expanduser().resolve()
+    result = {"path": str(path), "exists": path.is_file()}
+    if path.is_file():
+        payload = path.read_bytes()
+        result.update({"bytes": len(payload),
+                       "sha256": hashlib.sha256(payload).hexdigest()})
+        raw = json.loads(payload)
+        result.update({
+            "schema_version": raw.get("schema_version"),
+            "bundle_name": raw.get("bundle_name"),
+            "deployment_api_version": raw.get("deployment_api_version"),
+            "runtime_family": raw.get("runtime_family"),
+            "artifacts": [
+                {key: item.get(key) for key in ("id", "bytes", "sha256")}
+                for item in raw.get("artifacts", [])
+                if isinstance(item, dict)
+            ],
+        })
+    return result
+
+
+def _installed_package_identity():
+    names = ("catheter-control", "cr-meta-lnn", "cr-common")
+    result = {}
+    venv_site = (Path(os.environ.get(
+        "CR_VENV", "/home/chen-lab/Yifan/cr-venv"))
+        / "lib/python3.10/site-packages")
+    distributions = {
+        str(item.metadata.get("Name", "")).lower(): item.version
+        for item in metadata.distributions(
+            path=[str(venv_site)] if venv_site.is_dir() else None)
+    }
+    for name in names:
+        result[name] = distributions.get(name.lower())
+        if result[name] is None:
+            try:
+                result[name] = metadata.version(name)
+            except metadata.PackageNotFoundError:
+                pass
+    return result
 
 
 SIM_RECORD_TOPICS = [
@@ -189,45 +243,22 @@ def _setup(context, *_args, **_kwargs):
             f"{domain_id}") from exc
     _DOMAIN_LOCK = lock_file
 
-    meta_root = value("cr_meta_lnn_root")
-    distal = value("v171_distal_checkpoint") or os.path.join(
-        meta_root, "artifacts", "deployed",
-        "20260929_175554_grouped_no_rotation",
-        "real_distal_first_order_v171_multistep_map_em.pt")
-    jacobian = value("jacobian_initialization_json") or os.path.join(
-        meta_root, "evaluation", "real_joint_local_distal_causal_v2.json")
-    interface_transmission_checkpoint = value(
-        "interface_transmission_checkpoint")
-    distal_tendon_allocation_checkpoint = value(
-        "distal_tendon_allocation_checkpoint")
-    if interface_transmission_checkpoint:
-        if value("backlash_compensation_enabled").lower() not in (
-                "1", "true", "yes"):
-            raise RuntimeError(
-                "v175 simulation requires backlash_compensation_enabled")
-        if value("takeup_transaction_enabled").lower() not in (
-                "1", "true", "yes"):
-            raise RuntimeError(
-                "v175 simulation requires takeup_transaction_enabled")
-        actuator_widths = (
-            float_list("actuator_reversal_backlash_rad", 6)
-            +float_list("actuator_reversal_backlash_positive_rad", 6)
-            +float_list("actuator_reversal_backlash_negative_rad", 6))
-        if any(width > 0.0 for width in (
-                actuator_widths[:3]+actuator_widths[6:9]
-                +actuator_widths[12:15])):
-            raise RuntimeError(
-                "v175 simulation truth owns proximal play; actuator "
-                "reversal backlash for axes 0-2 must be zero")
+    selection = resolve_model_selection(
+        value("model_manifest"), legacy={
+            "cr_meta_lnn_root": value("cr_meta_lnn_root"),
+            "cr_common_root": value("cr_common_root"),
+            "v171_distal_checkpoint": value("v171_distal_checkpoint"),
+            "jacobian_initialization_json": value(
+                "jacobian_initialization_json"),
+            "interface_transmission_checkpoint": value(
+                "interface_transmission_checkpoint"),
+            "distal_tendon_allocation_checkpoint": value(
+                "distal_tendon_allocation_checkpoint"),
+        })
+    effective_model_manifest = str(controller_profile_parameters.get(
+        "model_manifest", selection.manifest_path))
     common_parameters = {
-        "cr_meta_lnn_root": meta_root,
-        "cr_common_root": value("cr_common_root"),
-        "v171_distal_checkpoint": distal,
-        "jacobian_initialization_json": jacobian,
-        "interface_transmission_checkpoint": (
-            interface_transmission_checkpoint),
-        "distal_tendon_allocation_checkpoint": (
-            distal_tendon_allocation_checkpoint),
+        "model_manifest": effective_model_manifest,
         "limits_file": value("limits_file"),
         "catheter": value("catheter"),
         "device": value("device"),
@@ -320,14 +351,7 @@ def _setup(context, *_args, **_kwargs):
             parameters=[{
                 "simulation_only": True,
                 "frame_id": value("frame_id"),
-                "cr_meta_lnn_root": meta_root,
-                "cr_common_root": value("cr_common_root"),
-                "v171_distal_checkpoint": distal,
-                "jacobian_initialization_json": jacobian,
-                "interface_transmission_checkpoint": (
-                    interface_transmission_checkpoint),
-                "distal_tendon_allocation_checkpoint": (
-                    distal_tendon_allocation_checkpoint),
+                "model_manifest": effective_model_manifest,
                 # Simulation truth is an independent workload, not part of
                 # the controller under test. Keep it off the controller GPU
                 # by default so it cannot serialize CUDA work and distort the
@@ -560,6 +584,10 @@ def _setup(context, *_args, **_kwargs):
             "resolved_configuration": (
                 resolved_configuration.as_manifest()
                 if resolved_configuration is not None else None),
+            "model_manifest": _file_identity(effective_model_manifest),
+            "model_selection_compatibility_alias": (
+                selection.compatibility_alias),
+            "installed_packages": _installed_package_identity(),
         }
         with open(output + "_manifest.json", "x", encoding="utf-8") as stream:
             json.dump(manifest, stream, indent=2, sort_keys=True)
@@ -578,13 +606,16 @@ def generate_launch_description():
         simulation_share, "config", "rviz", "simulation.rviz")
     return LaunchDescription([
         DeclareLaunchArgument(
-            "cr_meta_lnn_root",
+            "model_manifest",
             default_value=os.environ.get(
-                "CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn")),
+                "CATHETER_MODEL_MANIFEST", _default_model_manifest()),
+            description="Qualified schema-v2 deployment manifest."),
         DeclareLaunchArgument(
-            "cr_common_root",
-            default_value=os.environ.get(
-                "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")),
+            "cr_meta_lnn_root", default_value="",
+            description="Deprecated manifest-selection compatibility alias."),
+        DeclareLaunchArgument(
+            "cr_common_root", default_value="",
+            description="Deprecated compatibility input; import paths are immutable."),
         DeclareLaunchArgument("v171_distal_checkpoint", default_value=""),
         DeclareLaunchArgument(
             "stack_config", default_value="",

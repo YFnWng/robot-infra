@@ -10,8 +10,8 @@ import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -99,14 +99,6 @@ def _maximum_state_difference(first, second) -> float:
 
     visit(first, second)
     return max(differences, default=0.0)
-
-
-def _load_runtime(meta_root: Path, common_root: Path):
-    for path in (meta_root.parent, common_root):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
-    from cr_meta_lnn.deployment import V171StreamingCatheterRuntime
-    return V171StreamingCatheterRuntime
 
 
 class _NonfiniteBackend:
@@ -324,16 +316,12 @@ def _planner_gate(runtime, state, position, target, contract,
 
 def run_preflight(args) -> dict[str, Any]:
     """Run all non-actuating Phase-5 gates and return a JSON-ready report."""
-    meta_root = Path(args.cr_meta_lnn_root).expanduser().resolve()
-    common_root = Path(args.cr_common_root).expanduser().resolve()
     compute_device = resolve_compute_device(args.device)
-    runtime_type = _load_runtime(meta_root, common_root)
-    runtime = runtime_type(
-        Path(args.v171_distal_checkpoint).expanduser().resolve(),
-        Path(args.jacobian_initialization_json).expanduser().resolve(),
-        distal_tendon_allocation_checkpoint=str(
-            args.distal_tendon_allocation_checkpoint),
-        device=str(compute_device.device), adaptation_enabled=False)
+    from cr_meta_lnn.deployment import load_runtime_bundle
+    runtime_bundle = load_runtime_bundle(
+        args.model_manifest, device=str(compute_device.device),
+        options={"adaptation_enabled": False})
+    runtime = runtime_bundle.runtime
     contract = load_hardware_contract(args.limits_file, args.catheter)
     counts = np.asarray(args.encoder_counts, dtype=np.float64)
     position = np.asarray(args.joint_position, dtype=np.float64)
@@ -373,13 +361,12 @@ def run_preflight(args) -> dict[str, Any]:
             "catheter": args.catheter,
             "encoder_counts": counts.tolist(),
             "joint_position": position.tolist(),
-            "v171_distal_checkpoint": str(
-                Path(args.v171_distal_checkpoint).resolve()),
-            "jacobian_initialization_json": str(
-                Path(args.jacobian_initialization_json).resolve()),
-            "distal_tendon_allocation_checkpoint": (
-                str(Path(args.distal_tendon_allocation_checkpoint).resolve())
-                if args.distal_tendon_allocation_checkpoint else ""),
+            "model_manifest": runtime_bundle.identity.manifest_path,
+            "model_manifest_sha256": (
+                runtime_bundle.identity.manifest_sha256),
+            "model_bundle_name": runtime_bundle.identity.bundle_name,
+            "model_artifacts": [asdict(artifact) for artifact in (
+                runtime_bundle.identity.artifacts)],
             "jacobian_adaptation": "SHADOW_WEIGHT_ZERO",
         },
         "gates": [asdict(gate) for gate in gates],
@@ -396,18 +383,12 @@ def run_preflight(args) -> dict[str, Any]:
 
 def _parser():
     root = Path("/home/chen-lab/Yifan")
-    meta = root/"cr_meta_lnn"
     parser = argparse.ArgumentParser(
         description="Run non-actuating minimal Phase-5 preflight")
-    parser.add_argument("--cr-meta-lnn-root", default=str(meta))
-    parser.add_argument("--cr-common-root", default=str(root/"cr-common"))
-    parser.add_argument("--v171-distal-checkpoint", default=str(
-        meta/"artifacts/deployed/20260929_175554_grouped_no_rotation"/
-        "real_distal_first_order_v171_multistep_map_em.pt"))
-    parser.add_argument("--jacobian-initialization-json", default=str(
-        meta/"artifacts/deployed/20260929_175554_grouped_no_rotation"/
-        "real_joint_local_distal_v174.json"))
-    parser.add_argument("--distal-tendon-allocation-checkpoint", default="")
+    parser.add_argument("--model-manifest", default=str(
+        Path(sys.prefix) / "lib/python3.10/site-packages/cr_meta_lnn"
+        / "artifacts/manifests"
+        / "20260929_175554_grouped_no_rotation_v2.json"))
     parser.add_argument("--limits-file", default=str(
         root/"robot-infra/src/control_interface/config/catheter_limits.yaml"))
     parser.add_argument("--catheter", default="imricor_test")

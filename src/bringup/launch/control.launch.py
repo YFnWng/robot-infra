@@ -1,5 +1,6 @@
 """Launch the guarded MPPI node and optional external-drive rosbag."""
 from datetime import datetime
+from importlib import metadata
 import hashlib
 import json
 import os
@@ -17,6 +18,36 @@ from launch_ros.parameter_descriptions import Parameter
 from catheter_control.orchestration.configuration import (
     ACTIVE_CONTROLLER_PARAMETERS, load_ros_parameters, locate_stack,
     resolve_stack)
+from catheter_control.orchestration.runtime import resolve_model_selection
+
+
+def _default_model_manifest():
+    venv = Path(os.environ.get(
+        "CR_VENV", "/home/chen-lab/Yifan/cr-venv")).expanduser()
+    return str(
+        venv / "lib/python3.10/site-packages/cr_meta_lnn/artifacts/manifests"
+        / "20260929_175554_grouped_no_rotation_v2.json")
+
+
+def _installed_package_identity():
+    names = ("catheter-control", "cr-meta-lnn", "cr-common")
+    result = {}
+    venv_site = (Path(os.environ.get(
+        "CR_VENV", "/home/chen-lab/Yifan/cr-venv"))
+        / "lib/python3.10/site-packages")
+    distributions = {
+        str(item.metadata.get("Name", "")).lower(): item.version
+        for item in metadata.distributions(
+            path=[str(venv_site)] if venv_site.is_dir() else None)
+    }
+    for name in names:
+        result[name] = distributions.get(name.lower())
+        if result[name] is None:
+            try:
+                result[name] = metadata.version(name)
+            except metadata.PackageNotFoundError:
+                pass
+    return result
 
 
 RECORD_TOPICS = [
@@ -71,6 +102,25 @@ def _artifact_manifest(path):
     return result
 
 
+def _model_manifest_identity(path):
+    result = _artifact_manifest(path)
+    resolved = Path(result["path"])
+    if resolved.is_file():
+        raw = json.loads(resolved.read_text(encoding="utf-8"))
+        result.update({
+            "schema_version": raw.get("schema_version"),
+            "bundle_name": raw.get("bundle_name"),
+            "deployment_api_version": raw.get("deployment_api_version"),
+            "runtime_family": raw.get("runtime_family"),
+            "artifacts": [
+                {key: item.get(key) for key in ("id", "bytes", "sha256")}
+                for item in raw.get("artifacts", [])
+                if isinstance(item, dict)
+            ],
+        })
+    return result
+
+
 def _default_limits():
     try:
         return os.path.join(
@@ -112,19 +162,18 @@ def _setup(context, *_args, **_kwargs):
     def value(name):
         return LaunchConfiguration(name).perform(context)
 
-    meta_root = value("cr_meta_lnn_root")
-    distal_checkpoint = value("v171_distal_checkpoint") or os.path.join(
-        meta_root, "artifacts", "deployed",
-        "20260929_175554_grouped_no_rotation",
-        "real_distal_first_order_v171_multistep_map_em.pt")
-    jacobian_json = value("jacobian_initialization_json") or os.path.join(
-        meta_root, "artifacts", "deployed",
-        "20260929_175554_grouped_no_rotation",
-        "real_joint_local_distal_v174.json")
-    interface_transmission_checkpoint = value(
-        "interface_transmission_checkpoint")
-    distal_tendon_allocation_checkpoint = value(
-        "distal_tendon_allocation_checkpoint")
+    selection = resolve_model_selection(
+        value("model_manifest"), legacy={
+            "cr_meta_lnn_root": value("cr_meta_lnn_root"),
+            "cr_common_root": value("cr_common_root"),
+            "v171_distal_checkpoint": value("v171_distal_checkpoint"),
+            "jacobian_initialization_json": value(
+                "jacobian_initialization_json"),
+            "interface_transmission_checkpoint": value(
+                "interface_transmission_checkpoint"),
+            "distal_tendon_allocation_checkpoint": value(
+                "distal_tendon_allocation_checkpoint"),
+        })
     command_output_enabled = value(
         "command_output_enabled").lower() in ("1", "true", "yes")
     start_cpp_shadow = value(
@@ -135,14 +184,7 @@ def _setup(context, *_args, **_kwargs):
         raise RuntimeError(
             "start_shadow_worker=true requires start_cpp_shadow=true")
     parameters = {
-            "cr_meta_lnn_root": value("cr_meta_lnn_root"),
-            "cr_common_root": value("cr_common_root"),
-            "v171_distal_checkpoint": distal_checkpoint,
-            "jacobian_initialization_json": jacobian_json,
-            "interface_transmission_checkpoint": (
-                interface_transmission_checkpoint),
-            "distal_tendon_allocation_checkpoint": (
-                distal_tendon_allocation_checkpoint),
+            "model_manifest": selection.manifest_path,
             "adaptation_enabled": value(
                 "adaptation_enabled").lower() in ("1", "true", "yes"),
             "adaptation_minimum_observations": int(value(
@@ -339,18 +381,8 @@ def _setup(context, *_args, **_kwargs):
     path_preview_duration_s = max(
         0.60,
         effective_horizon_steps*effective_rollout_step_s+0.20)
-    effective_distal_checkpoint = str(effective_parameters.get(
-        "v171_distal_checkpoint", distal_checkpoint))
-    effective_jacobian_json = str(effective_parameters.get(
-        "jacobian_initialization_json", jacobian_json))
-    effective_interface_transmission_checkpoint = str(
-        effective_parameters.get(
-            "interface_transmission_checkpoint",
-            interface_transmission_checkpoint))
-    effective_distal_tendon_allocation_checkpoint = str(
-        effective_parameters.get(
-            "distal_tendon_allocation_checkpoint",
-            distal_tendon_allocation_checkpoint))
+    effective_model_manifest = str(
+        effective_parameters.get("model_manifest", selection.manifest_path))
     node = Node(
         package="catheter_control",
         executable="catheter_mppi",
@@ -421,20 +453,11 @@ def _setup(context, *_args, **_kwargs):
             "performance_config": (
                 _artifact_manifest(performance_config)
                 if performance_config else None),
-            "artifacts": {
-                "v171_distal_checkpoint": _artifact_manifest(
-                    effective_distal_checkpoint),
-                "jacobian_initialization_json": _artifact_manifest(
-                    effective_jacobian_json),
-                "interface_transmission_checkpoint": (
-                    _artifact_manifest(
-                        effective_interface_transmission_checkpoint)
-                    if effective_interface_transmission_checkpoint else None),
-                "distal_tendon_allocation_checkpoint": (
-                    _artifact_manifest(
-                        effective_distal_tendon_allocation_checkpoint)
-                    if effective_distal_tendon_allocation_checkpoint else None),
-            },
+            "model_manifest": _model_manifest_identity(
+                effective_model_manifest),
+            "model_selection_compatibility_alias": (
+                selection.compatibility_alias),
+            "installed_packages": _installed_package_identity(),
         }
         with open(output + "_manifest.json", "x", encoding="utf-8") as stream:
             json.dump(manifest, stream, indent=2, sort_keys=True)
@@ -449,13 +472,16 @@ def _setup(context, *_args, **_kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            "cr_meta_lnn_root",
+            "model_manifest",
             default_value=os.environ.get(
-                "CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn")),
+                "CATHETER_MODEL_MANIFEST", _default_model_manifest()),
+            description="Qualified schema-v2 deployment manifest."),
         DeclareLaunchArgument(
-            "cr_common_root",
-            default_value=os.environ.get(
-                "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")),
+            "cr_meta_lnn_root", default_value="",
+            description="Deprecated manifest-selection compatibility alias."),
+        DeclareLaunchArgument(
+            "cr_common_root", default_value="",
+            description="Deprecated compatibility input; import paths are immutable."),
         DeclareLaunchArgument("v171_distal_checkpoint", default_value=""),
         DeclareLaunchArgument(
             "jacobian_initialization_json", default_value=""),

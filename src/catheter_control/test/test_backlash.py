@@ -1058,10 +1058,11 @@ def test_v175_hardware_profile_loads_atomic_transmission_artifact():
         ROOT / "catheter_control" / "config"
         / "v175_grouped_hardware.yaml").read_text())
     parameters = profile["catheter_mppi"]["ros__parameters"]
-    assert parameters["interface_transmission_checkpoint"].endswith(
-        "real_interface_transmission_v175.pt")
-    assert parameters["jacobian_initialization_json"].endswith(
-        "real_joint_local_distal_v174.json")
+    assert "interface_transmission_checkpoint" not in parameters
+    assert "jacobian_initialization_json" not in parameters
+    launch = (ROOT / "bringup" / "launch"
+              / "control.launch.py").read_text()
+    assert "20260929_175554_grouped_no_rotation_v2.json" in launch
     assert parameters["backlash_compensation_enabled"] is True
     assert parameters["takeup_transaction_enabled"] is True
     assert parameters["backlash_width_rad"] == [0.0, 0.0, 0.0]

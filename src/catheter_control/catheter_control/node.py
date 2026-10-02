@@ -211,17 +211,7 @@ class CatheterControlNode(Node):
         self.compute_device = resolve_compute_device(
             str(self.get_parameter("device").value))
 
-        runtime_type = load_runtime(
-            str(self.get_parameter("cr_meta_lnn_root").value),
-            str(self.get_parameter("cr_common_root").value))
-        self.runtime = runtime_type(
-            str(self.get_parameter("v171_distal_checkpoint").value),
-            str(self.get_parameter("jacobian_initialization_json").value),
-            interface_transmission_checkpoint=str(self.get_parameter(
-                "interface_transmission_checkpoint").value),
-            distal_tendon_allocation_checkpoint=str(self.get_parameter(
-                "distal_tendon_allocation_checkpoint").value),
-            device=str(self.compute_device.device),
+        runtime_options = dict(
             estimator_initialization_observations=self.required_observations,
             estimator_initialization_consecutive_inliers=(
                 self.required_initialization_inliers),
@@ -281,6 +271,10 @@ class CatheterControlNode(Node):
             adaptation_maximum_direction_deviation_deg=float(
                 self.get_parameter(
                     "adaptation_maximum_direction_deviation_deg").value))
+        self.runtime_bundle = load_runtime(
+            str(self.get_parameter("model_manifest").value),
+            device=str(self.compute_device.device), options=runtime_options)
+        self.runtime = self.runtime_bundle.runtime
         self.model_diagnostics = self.runtime.diagnostics()
         self.model_valid = True
         self.contract = load_hardware_contract(
@@ -333,21 +327,19 @@ class CatheterControlNode(Node):
         self.raw_response_during_interface_takeup = np.zeros(3, dtype=bool)
         self.takeup_response_free_mask = np.ones(3, dtype=bool)
         if interface_artifacts is not None:
-            if not self.backlash_compensation_enabled:
-                raise ValueError(
-                    "v175 interface transmission requires backlash "
-                    "compensation")
             fitted_width = tuple(float(value) for value in (
                 interface_artifacts.symmetric_reversal_width_rad.detach()
                 .cpu().double().tolist()))
-            symmetric_backlash_width = fitted_width
-            positive_backlash_width = (0.0, 0.0, 0.0)
-            negative_backlash_width = (0.0, 0.0, 0.0)
-            directional_widths_present = False
+            if self.backlash_compensation_enabled:
+                symmetric_backlash_width = fitted_width
+                positive_backlash_width = (0.0, 0.0, 0.0)
+                negative_backlash_width = (0.0, 0.0, 0.0)
+                directional_widths_present = False
             self.get_logger().info(
                 "v175 interface transmission loaded: symmetric shaft "
                 f"take-up={list(round(value, 6) for value in fitted_width)} "
-                "rad; using refit shaft-equivalent Jacobian")
+                "rad; external compensation="
+                f"{self.backlash_compensation_enabled}")
         backlash_config = BacklashConfig(
             width_rad=symmetric_backlash_width,
             width_positive_rad=(

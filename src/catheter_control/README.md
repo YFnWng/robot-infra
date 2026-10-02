@@ -294,8 +294,10 @@ silently enable commands nor mask an explicit
 `performance_config` together with `command_output_enabled:=true` is rejected;
 performance overlays are shadow-only.
 
-The active artifact arguments are `v171_distal_checkpoint` and
-`jacobian_initialization_json`; there is no chart checkpoint in this path.
+The active model selector is the single `model_manifest` parameter. The
+qualified schema-v2 manifest and its three hash-verified artifacts are shipped
+inside the installed `cr-meta-lnn` wheel. Individual checkpoint parameters and
+model source-root imports are not part of the maintained runtime boundary.
 `adaptation_enabled` defaults to `false`, which retains causal accepted-pose
 anchors and diagnostics but leaves the qualified v174 `J0` unchanged. Enable
 bounded RLS only after reviewing a causal shadow-mode bag.
@@ -570,7 +572,6 @@ apply the same deadzone twice and launch rejects it.
 ```bash
 export ROS_DOMAIN_ID=43
 ros2 launch bringup simulation.launch.py \
-  interface_transmission_checkpoint:=/home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_interface_transmission_v175.pt \
   backlash_compensation_enabled:=true \
   takeup_transaction_enabled:=true \
   mppi_variant:=grouped \

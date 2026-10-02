@@ -317,7 +317,6 @@ def test_plain_hardware_profiles_are_controlled_ablations():
     assert {
         key for key in grouped if uncompensated[key] != grouped[key]
     } == {
-        "interface_transmission_checkpoint",
         "backlash_compensation_enabled",
         "takeup_transaction_enabled",
         "engaged_gain_enabled",
@@ -327,7 +326,7 @@ def test_plain_hardware_profiles_are_controlled_ablations():
         "mppi_takeup_risk_weight",
         "reversal_scheduler_enabled",
     }
-    assert uncompensated["interface_transmission_checkpoint"] == ""
+    # Planner/compensator ablations share the launch-selected model bundle.
 
 
 def test_decoupled_tendon_prehome_holds_physical_chassis_axis():

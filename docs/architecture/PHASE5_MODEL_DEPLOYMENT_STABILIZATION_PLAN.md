@@ -1,6 +1,6 @@
 # Phase 5 Model Deployment Stabilization Plan
 
-Status: P5.0-P5.3 implemented; P5.4-P5.6 pending
+Status: P5.0-P5.4 implemented; P5.5-P5.6 pending
 Primary repository: `cr_meta_lnn`
 Consumer repository: `robot-infra`
 Baseline: `catheter-stack-pre-cleanup-20261001`
@@ -19,7 +19,13 @@ Current gate status:
   `cr-common==0.1.0` build as wheels with explicit runtime dependencies. An
   isolated install loads a relocated bundle and runs a rollout from `/tmp`
   without source checkout or current-working-directory assumptions.
-- P5.4-P5.6: pending. The schema-v1 manifest is retained only as explicit
+- P5.4: maintained ROS consumers use one `model_manifest` parameter, the
+  selected immutable bundle ships in the `cr-meta-lnn` wheel, overlays use the
+  deployment geometry API, and session identity records the manifest and
+  installed package versions. Old launch selectors are empty-by-default,
+  fail-closed compatibility inputs; arbitrary checkpoint combinations are no
+  longer accepted.
+- P5.5-P5.6: pending. The schema-v1 manifest is retained only as explicit
   migration input.
 
 Phase 4 representative timing qualification is explicitly deferred. That does
@@ -71,7 +77,8 @@ prediction, and batched control rollout.
 The current deployment works, but the boundary is not yet stable:
 
 1. At phase start, `cr_meta_lnn` had no installable package metadata. P5.3
-   added the wheel boundary; ROS source-path injection remains until P5.4.
+   added the wheel boundary and P5.4 removed learned-model source-path
+   injection from maintained ROS consumers.
 2. ROS launch and controller parameters expose a repository root plus separate
    artifact paths. A manifest exists, but it is not the single load authority.
 3. `robot-infra/control_tasks/camera_overlay.py` imports
@@ -387,13 +394,8 @@ Stop and investigate if:
 
 ## 11. Immediate next implementation slice
 
-The safest first implementation slice is P5.0 plus P5.1:
-
-1. write a machine-readable active import/API closure;
-2. add missing delayed-correction and rewind/replay characterization fixtures;
-3. introduce semantic typed exports around the existing runtime without moving
-   its implementation;
-4. retain and test the `V171StreamingCatheterRuntime` alias;
-5. make no edits to unrelated research files and no artifact changes.
-
-P5.0-P5.3 are complete. The next gate is P5.4 consumer migration.
+P5.0-P5.4 are complete. The next gate is P5.5: isolate research and legacy
+surfaces without moving or deleting the preserved dirty research tree. Start
+by classifying concrete deployment imports, compatibility aliases, and
+historical reproduction entry points, then retire only callers already routed
+through the semantic deployment API.

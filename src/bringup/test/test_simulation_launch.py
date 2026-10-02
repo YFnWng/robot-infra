@@ -89,9 +89,9 @@ def test_robustness_parameters_are_plant_side_and_truth_is_recorded():
     assert all(item in source for item in required)
 
 
-def test_simulation_defaults_to_causal_j_and_exposes_mppi_exploration():
+def test_simulation_defaults_to_manifest_and_exposes_mppi_exploration():
     source = LAUNCH.read_text(encoding="utf-8")
-    assert '"real_joint_local_distal_causal_v2.json"' in source
+    assert "20260929_175554_grouped_no_rotation_v2.json" in source
     for parameter in (
             '"mppi_noise_std"', '"mppi_noise_correlation"',
             '"mppi_exploration_fraction"',
@@ -130,39 +130,33 @@ def test_simulated_truth_compute_is_isolated_from_controller_device():
     assert '"device": value("device")' in source
 
 
-def test_v175_interface_transmission_routes_to_truth_and_controller_once():
+def test_model_manifest_routes_to_truth_and_controller():
     launch = LAUNCH.read_text(encoding="utf-8")
     perception = (SIMULATION_PACKAGE/"sim_perception.py"
                   ).read_text(encoding="utf-8")
     controller = (CATHETER_PACKAGE/"node.py"
                   ).read_text(encoding="utf-8")
-    assert launch.count('"interface_transmission_checkpoint"') >= 3
-    assert "v175 simulation truth owns proximal play" in launch
-    assert "artifacts.transmission.advance" in perception
-    assert "interface_motor_angle_rad=interface_motor" in perception
-    assert "symmetric_reversal_width_rad" in controller
+    assert launch.count('"model_manifest"') >= 4
+    assert '"model_manifest": effective_model_manifest' in launch
+    assert "load_runtime_bundle" in perception
+    assert 'get_parameter("model_manifest")' in perception
+    assert "self.runtime_bundle = load_runtime" in controller
+    assert 'get_parameter("model_manifest")' in controller
 
 
-def test_insertion_tendon_allocation_routes_to_truth_and_controller():
+def test_legacy_model_launch_aliases_are_empty_and_fail_closed():
     launch = LAUNCH.read_text(encoding="utf-8")
-    perception = (SIMULATION_PACKAGE/"sim_perception.py"
-                  ).read_text(encoding="utf-8")
-    controller = (CATHETER_PACKAGE/"node.py"
-                  ).read_text(encoding="utf-8")
     control_launch = CONTROL_LAUNCH.read_text(encoding="utf-8")
-    parameter = '"distal_tendon_allocation_checkpoint"'
-    assert launch.count(parameter) >= 4
-    assert parameter in perception
-    assert parameter in controller
-    assert '"distal_tendon_allocation_checkpoint", default_value=""' in (
-        control_launch)
-
+    for source in (launch, control_launch):
+        assert '"cr_meta_lnn_root", default_value=""' in source
+        assert '"cr_common_root", default_value=""' in source
+        assert '"v171_distal_checkpoint", default_value=""' in source
+        assert "resolve_model_selection" in source
 
 def test_hardware_launch_exposes_robust_adaptation_but_defaults_fixed():
     source = CONTROL_LAUNCH.read_text(encoding="utf-8")
     assert '"adaptation_enabled", default_value="false"' in source
-    assert '"interface_transmission_checkpoint", default_value=""' in source
-    assert '"interface_transmission_checkpoint": (' in source
+    assert '"model_manifest"' in source
     required = (
         '"adaptation_minimum_observations"',
         '"adaptation_minimum_normalized_action"',

@@ -1,33 +1,13 @@
 """Declare the controller ROS parameter surface in one place."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 
 def declare_parameters(node, *, source_name):
-    root = os.environ.get(
-        "CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn")
-    common = os.environ.get(
-        "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")
     node.declare_parameter("source_name", source_name)
     node.declare_parameter("command_output_enabled", False)
     node.declare_parameter("simulation_state_reset_enabled", False)
     node.declare_parameter("frame_id", "robot_base")
-    node.declare_parameter("cr_meta_lnn_root", root)
-    node.declare_parameter("cr_common_root", common)
-    node.declare_parameter(
-        "v171_distal_checkpoint",
-        str(Path(root) / "artifacts" / "deployed"
-            / "20260929_175554_grouped_no_rotation"
-            / "real_distal_first_order_v171_multistep_map_em.pt"))
-    node.declare_parameter(
-        "jacobian_initialization_json",
-        str(Path(root) / "artifacts" / "deployed"
-            / "20260929_175554_grouped_no_rotation"
-            / "real_joint_local_distal_v174.json"))
-    node.declare_parameter("interface_transmission_checkpoint", "")
-    node.declare_parameter("distal_tendon_allocation_checkpoint", "")
+    node.declare_parameter("model_manifest", "")
     # Stay in prequential shadow mode until causal replay is reviewed.
     node.declare_parameter("adaptation_enabled", False)
     node.declare_parameter("adaptation_minimum_observations", 4)

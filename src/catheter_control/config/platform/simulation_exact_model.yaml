@@ -1,6 +1,4 @@
 /**:
   ros__parameters:
     marker_estimator: ukf
-    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/evaluation/real_joint_local_distal_causal_v2.json
-    interface_transmission_checkpoint: ""
     controller_velocity_max: [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]

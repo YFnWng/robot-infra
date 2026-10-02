@@ -3,8 +3,6 @@ catheter_mppi:
     # v175 changes only the motor-to-interface branch. Raw motor 2 still
     # drives the frozen v171 tendon-history/distal model in parallel.
     marker_estimator: ukf
-    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_joint_local_distal_v174.json
-    interface_transmission_checkpoint: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_interface_transmission_v175.pt
     adaptation_enabled: false
 
     # Inherit reviewed manager limits on every axis. Hardware output remains

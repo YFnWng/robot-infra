@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from importlib import metadata
 import json
 import os
 from pathlib import Path
@@ -14,11 +15,44 @@ from rclpy.node import Node
 from rclpy.parameter import parameter_value_to_python
 
 
-ARTIFACT_PARAMETERS = frozenset({
-    "v171_distal_checkpoint", "jacobian_initialization_json", "limits_file",
-    "interface_transmission_checkpoint",
-    "distal_tendon_allocation_checkpoint",
-})
+ARTIFACT_PARAMETERS = frozenset({"model_manifest", "limits_file"})
+RUNTIME_DISTRIBUTIONS = (
+    "catheter-control", "cr-meta-lnn", "cr-common",
+    "numpy", "torch",
+)
+
+
+def _package_identity():
+    result = {}
+    for distribution in RUNTIME_DISTRIBUTIONS:
+        try:
+            result[distribution] = metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            result[distribution] = None
+    return result
+
+
+def _manifest_identity(path_value):
+    identity = _artifact(path_value)
+    path = Path(identity["path"])
+    if not path.is_file():
+        return identity
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        identity.update({
+            "schema_version": raw.get("schema_version"),
+            "bundle_name": raw.get("bundle_name"),
+            "deployment_api_version": raw.get("deployment_api_version"),
+            "runtime_family": raw.get("runtime_family"),
+            "artifacts": [
+                {key: entry.get(key) for key in ("id", "bytes", "sha256")}
+                for entry in raw.get("artifacts", [])
+                if isinstance(entry, dict)
+            ],
+        })
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        identity["metadata_error"] = f"{type(exc).__name__}: {exc}"
+    return identity
 
 
 def _artifact(path_value):
@@ -69,11 +103,17 @@ class RuntimeIdentityCollector(Node):
             for name, value in zip(names, values)
         }
         artifacts = {
-            name: _artifact(parameters[name])
+            name: (_manifest_identity(parameters[name])
+                   if name == "model_manifest"
+                   else _artifact(parameters[name]))
             for name in ARTIFACT_PARAMETERS
             if parameters.get(name)
         }
-        return {"parameters": parameters, "artifacts": artifacts}
+        return {
+            "parameters": parameters,
+            "artifacts": artifacts,
+            "installed_packages": _package_identity(),
+        }
 
 
 def _parser():

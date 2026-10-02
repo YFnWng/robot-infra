@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
-import sys
 import threading
 
 from control_interface.msg import DeviceStream
@@ -33,20 +30,6 @@ DEFAULT_TRUTH_INTERFACE_POSE = [
     0.165448815, 0.157062665, 0.973631382, 0.009205841,
     0.0, 0.0, 0.0, 1.0,
 ]
-
-
-def _load_runtime(meta_root, common_root):
-    meta = Path(meta_root).expanduser().resolve()
-    common = Path(common_root).expanduser().resolve()
-    if not (meta/"deployment"/"v171_streaming_runtime.py").is_file():
-        raise ValueError(f"invalid cr_meta_lnn_root: {meta}")
-    if not (common/"cr_common"/"__init__.py").is_file():
-        raise ValueError(f"invalid cr_common_root: {common}")
-    for path in (meta.parent, common):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
-    from cr_meta_lnn.deployment import V171StreamingCatheterRuntime
-    return V171StreamingCatheterRuntime
 
 
 def _stamp_ns(message):
@@ -91,26 +74,9 @@ def _quaternion_from_rotation(rotation):
 class SimulatedPerceptionNode(Node):
     def __init__(self):
         super().__init__("catheter_sim_perception")
-        root = os.environ.get(
-            "CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn")
-        common = os.environ.get(
-            "CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common")
         self.declare_parameter("simulation_only", True)
         self.declare_parameter("frame_id", "robot_base")
-        self.declare_parameter("cr_meta_lnn_root", root)
-        self.declare_parameter("cr_common_root", common)
-        self.declare_parameter(
-            "v171_distal_checkpoint", str(
-                Path(root) / "artifacts" / "deployed"
-                / "20260929_175554_grouped_no_rotation"
-                / "real_distal_first_order_v171_multistep_map_em.pt"))
-        self.declare_parameter(
-            "jacobian_initialization_json", str(
-                Path(root) / "artifacts" / "deployed"
-                / "20260929_175554_grouped_no_rotation"
-                / "real_joint_local_distal_v174.json"))
-        self.declare_parameter("interface_transmission_checkpoint", "")
-        self.declare_parameter("distal_tendon_allocation_checkpoint", "")
+        self.declare_parameter("model_manifest", "")
         self.declare_parameter("device", "cpu")
         self.declare_parameter("marker_rate_hz", 30.0)
         self.declare_parameter("torch_intraop_threads", 1)
@@ -136,18 +102,12 @@ class SimulatedPerceptionNode(Node):
             self.get_parameter("torch_intraop_threads").value))
         torch.set_num_interop_threads(int(
             self.get_parameter("torch_interop_threads").value))
-        runtime_type = _load_runtime(
-            self.get_parameter("cr_meta_lnn_root").value,
-            self.get_parameter("cr_common_root").value)
-        self.runtime = runtime_type(
-            self.get_parameter("v171_distal_checkpoint").value,
-            self.get_parameter("jacobian_initialization_json").value,
-            interface_transmission_checkpoint=self.get_parameter(
-                "interface_transmission_checkpoint").value,
-            distal_tendon_allocation_checkpoint=self.get_parameter(
-                "distal_tendon_allocation_checkpoint").value,
+        from cr_meta_lnn.deployment import load_runtime_bundle
+        self.runtime_bundle = load_runtime_bundle(
+            self.get_parameter("model_manifest").value,
             device=self.get_parameter("device").value,
-            adaptation_enabled=False)
+            options={"adaptation_enabled": False})
+        self.runtime = self.runtime_bundle.runtime
         self.jacobian_config = JacobianConfig(
             angular_column_gain=tuple(self.get_parameter(
                 "plant_jacobian_angular_column_gain").value),

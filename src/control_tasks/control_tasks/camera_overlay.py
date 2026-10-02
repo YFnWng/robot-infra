@@ -1,16 +1,14 @@
 """Low-rate camera overlay for measured markers and estimated catheter shape.
 
 This node is intentionally outside the control process. It consumes decimated
-JPEG previews and the already-published estimator trace, reconstructs the v171
-PCS centerline on CPU, and drops visualization work whenever it falls behind.
+JPEG previews and the already-published estimator trace, reconstructs the
+manifest-selected distal centerline on CPU through the deployment API, and
+drops visualization work whenever it falls behind.
 """
 from __future__ import annotations
 
 from collections import deque
-import os
-from pathlib import Path
 import re
-import sys
 
 import cv2
 from control_interface.msg import EstimatorStateTrace
@@ -35,40 +33,6 @@ _MARKER_COLORS = (
 def _stamp_ns(message) -> int:
     return (int(message.header.stamp.sec)*1_000_000_000
             + int(message.header.stamp.nanosec))
-
-
-def _add_source_paths(cr_meta_root: str, cr_common_root: str,
-                      shape_tracking_root: str):
-    meta = Path(cr_meta_root).expanduser().resolve()
-    common = Path(cr_common_root).expanduser().resolve()
-    shape = Path(shape_tracking_root).expanduser().resolve()
-    if not (meta/"deployment"/"v171_streaming_runtime.py").is_file():
-        raise ValueError(f"invalid cr_meta_lnn_root: {meta}")
-    if not (common/"cr_common"/"__init__.py").is_file():
-        raise ValueError(f"invalid cr_common_root: {common}")
-    shape_source = shape/"src" if (shape/"src").is_dir() else shape
-    if not (shape_source/"shape_tracking"/"session.py").is_file():
-        raise ValueError(f"invalid shape_tracking_root: {shape}")
-    for path in (meta.parent, common, shape_source):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
-
-
-def load_visualization_model(checkpoint: str | Path):
-    """Load only frozen distal kinematics; no estimator or CUDA context."""
-    from cr_meta_lnn.networks.hybrid.distal_first_order import (
-        build_first_order_distal_nominal)
-
-    path = Path(checkpoint).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"v171 checkpoint does not exist: {path}")
-    saved = torch.load(path, map_location="cpu", weights_only=False)
-    if saved.get("experiment") != "real_distal_first_order_standalone_em":
-        raise ValueError("distal checkpoint is not the selected v171 schema")
-    model = build_first_order_distal_nominal(saved["config"]["model"])
-    model.load_state_dict(saved["model"], strict=True)
-    return model.to(device="cpu", dtype=torch.float32).eval().requires_grad_(
-        False)
 
 
 def nearest_sample(samples, timestamp_ns: int, maximum_skew_ns: int):
@@ -182,18 +146,7 @@ class CameraOverlayNode(Node):
 
     def __init__(self):
         super().__init__("catheter_camera_overlay")
-        self.declare_parameter(
-            "cr_meta_lnn_root",
-            os.environ.get("CR_META_LNN_ROOT", "/home/chen-lab/Yifan/cr_meta_lnn"))
-        self.declare_parameter(
-            "cr_common_root",
-            os.environ.get("CR_COMMON_ROOT", "/home/chen-lab/Yifan/cr-common"))
-        self.declare_parameter(
-            "shape_tracking_root",
-            os.environ.get(
-                "SHAPE_TRACKING_ROOT",
-                "/home/chen-lab/Yifan/catheter-shape-tracking"))
-        self.declare_parameter("v171_distal_checkpoint", "")
+        self.declare_parameter("model_manifest", "")
         self.declare_parameter("registration_file", "")
         self.declare_parameter("rig_ids", ["primary", "oblique"])
         self.declare_parameter("preview_eye", "left")
@@ -212,21 +165,10 @@ class CameraOverlayNode(Node):
         self.declare_parameter("target_path_line_width", 1)
         self.declare_parameter("show_window", True)
 
-        meta_root = str(self.get_parameter("cr_meta_lnn_root").value)
-        common_root = str(self.get_parameter("cr_common_root").value)
-        shape_root = str(self.get_parameter("shape_tracking_root").value)
-        _add_source_paths(meta_root, common_root, shape_root)
+        from cr_meta_lnn.deployment import load_runtime_bundle
         from shape_tracking.session import (
             load_session_registration, project_points)
         self.project_points = project_points
-
-        checkpoint = str(
-            self.get_parameter("v171_distal_checkpoint").value)
-        if not checkpoint:
-            checkpoint = str(
-                Path(meta_root)/"artifacts"/"deployed"/
-                "20260929_175554_grouped_no_rotation"/
-                "real_distal_first_order_v171_multistep_map_em.pt")
         registration_file = str(
             self.get_parameter("registration_file").value)
         if not registration_file:
@@ -242,7 +184,10 @@ class CameraOverlayNode(Node):
             for rig in self.rig_ids
         }
         torch.set_num_threads(1)
-        self.model = load_visualization_model(checkpoint)
+        self.runtime_bundle = load_runtime_bundle(
+            self.get_parameter("model_manifest").value,
+            device="cpu", options={"adaptation_enabled": False})
+        self.runtime = self.runtime_bundle.runtime
 
         rate = float(self.get_parameter("display_rate_hz").value)
         self.maximum_skew_ns = int(round(
@@ -334,9 +279,7 @@ class CameraOverlayNode(Node):
 
     def _centerline(self, sample):
         _, pose, strain, _ = sample
-        with torch.inference_mode():
-            points = self.model.points(
-                torch.as_tensor(pose), torch.as_tensor(strain))
+        points = self.runtime.centerline_from_estimate(pose, strain)
         return points.detach().cpu().numpy()*1e3
 
     def _render(self):

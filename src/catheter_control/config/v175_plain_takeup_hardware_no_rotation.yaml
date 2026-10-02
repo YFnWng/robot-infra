@@ -5,8 +5,6 @@ catheter_mppi:
     # response-terminated physical take-up transaction as the grouped
     # controller.
     marker_estimator: ukf
-    jacobian_initialization_json: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_joint_local_distal_v174.json
-    interface_transmission_checkpoint: /home/chen-lab/Yifan/cr_meta_lnn/artifacts/deployed/20260929_175554_grouped_no_rotation/real_interface_transmission_v175.pt
     adaptation_enabled: false
 
     # Logical axis 1 is rotation.  Its exact zero is independently checked by

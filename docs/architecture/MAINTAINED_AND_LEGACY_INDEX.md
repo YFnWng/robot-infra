@@ -20,8 +20,9 @@ active deployment boundary; it does not mean scientifically invalid.
 - `src/simulation/simulation`: isolated plant, device, perception, scenario,
   target, and visualization runtime.
 - `src/bringup/launch/simulation.launch.py`: isolated `/sim` stack.
-- `src/catheter_control/config/v175_grouped_hardware_no_rotation.yaml`: the
-  qualified controller profile for the recorded scope.
+- `src/catheter_control/config/stacks/hardware_grouped_no_rotation_farther_tendon_12.yaml`:
+  the qualified controller composition for the recorded scope; the installed
+  `cr-meta-lnn` manifest owns model artifact selection.
 - `src/perception/perception`: active online marker tracking, marker UDP input,
   EM bridge, and legacy live state-estimation adapters.
 - `src/experiments/experiments`: maintained experiment schedules and guarded
@@ -69,9 +70,19 @@ become a runtime default.
 - The retired `automation` package has no active compatibility surface.
   Historical manifests and commands remain evidence, not supported entry points.
 - Versioned hardware and experiment YAML names remain addressable as
-  compatibility aliases for the semantic stacks introduced in Phase 2.
+  compatibility aliases for the semantic stacks introduced in Phase 2. They
+  vary controller policy only; all maintained A/B stacks share the launch-
+  selected qualified model manifest.
+- `cr_meta_lnn_root`, `cr_common_root`, and individual checkpoint launch names
+  are temporary empty-by-default migration inputs. Only the reviewed root-to-
+  manifest alias is accepted; mixed or arbitrary artifact selection fails.
 - Historical absolute paths in audit/session manifests are immutable evidence,
   not templates for new code.
+- `causal_v2_shadow.yaml`, `causal_v2_fixed_hardware.yaml`, and
+  `v174_fixed_hardware_no_rotation.yaml` are historical reproduction profiles
+  with independent artifact selectors. They are not accepted by the maintained
+  manifest-only controller and will move to the explicit legacy surface in
+  P5.5.
 
 ## Research history
 
