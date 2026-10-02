@@ -36,10 +36,12 @@ active deployment boundary; it does not mean scientifically invalid.
 
 ### Other repositories
 
-- `cr_meta_lnn/deployment` semantic API and its selected v171 implementation,
-  `interface_transmission_checkpoint.py`, and `artifact_manifest.py`: supported
-  runtime/model loading surface. The `V171StreamingCatheterRuntime` export is a
-  temporary compatibility alias for `CatheterRuntime`.
+- `cr_meta_lnn/deployment` semantic API, manifest/bundle loaders, selected
+  v171 implementation, and interface-transmission loader: supported runtime
+  surface. `deployment.experimental` and `deployment.legacy` are explicit
+  non-default namespaces for deliberate qualification or reproduction. The
+  `V171StreamingCatheterRuntime`
+  export remains a temporary compatibility alias for `CatheterRuntime`.
 - `cr_meta_lnn/artifacts/manifests`: reviewed artifact metadata.
 - `control/control/adapj.py`: adaptive forward Jacobian.
 - `cr-common/utils.py`: shared deployment utility required by the runtime.
@@ -78,11 +80,14 @@ become a runtime default.
   manifest alias is accepted; mixed or arbitrary artifact selection fails.
 - Historical absolute paths in audit/session manifests are immutable evidence,
   not templates for new code.
-- `causal_v2_shadow.yaml`, `causal_v2_fixed_hardware.yaml`, and
-  `v174_fixed_hardware_no_rotation.yaml` are historical reproduction profiles
-  with independent artifact selectors. They are not accepted by the maintained
-  manifest-only controller and will move to the explicit legacy surface in
-  P5.5.
+- The three YAML files under `src/catheter_control/config/legacy/` are
+  historical reproduction profiles with independent artifact selectors.
+  They remain installed for deliberate reproduction but are rejected by the
+  maintained manifest-only controller.
+- The v150 runtime is available only through the explicit
+  `cr_meta_lnn.deployment.legacy.streaming_runtime` import. Root checkpoint
+  loader modules in `cr_meta_lnn.deployment` are behavior-free compatibility
+  forwarders for preserved research callers.
 
 ## Research history
 

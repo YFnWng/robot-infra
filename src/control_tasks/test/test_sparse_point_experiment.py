@@ -51,8 +51,8 @@ V175_PLAIN_TAKEUP_PROFILE = (
 V171_PLAIN_PROFILE = (
     CONFIG_ROOT
     / "v171_plain_hardware_no_rotation.yaml")
-V174_PROFILE = (CONFIG_ROOT / "v174_fixed_hardware_no_rotation.yaml")
-CAUSAL_V2_PROFILE = (CONFIG_ROOT / "causal_v2_fixed_hardware.yaml")
+V174_PROFILE = (CONFIG_ROOT / "legacy/v174_fixed_hardware_no_rotation.yaml")
+CAUSAL_V2_PROFILE = (CONFIG_ROOT / "legacy/causal_v2_fixed_hardware.yaml")
 V175_NO_ROTATION_PROFILE = (
     CONFIG_ROOT
     / "v175_grouped_hardware_no_rotation.yaml")

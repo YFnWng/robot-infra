@@ -182,7 +182,7 @@ separate estimator-only controller process:
 
 ```bash
 ros2 launch bringup control.launch.py \
-  controller_config:=$(ros2 pkg prefix catheter_control)/share/catheter_control/config/v174_fixed_hardware_no_rotation.yaml \
+  controller_config:=$(ros2 pkg prefix catheter_control)/share/catheter_control/config/legacy/v174_fixed_hardware_no_rotation.yaml \
   marker_estimator:=ukf \
   adaptation_enabled:=false \
   command_output_enabled:=false \

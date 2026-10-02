@@ -1038,7 +1038,7 @@ def test_saturated_physical_direction_restores_only_after_limit_clearance():
 def test_hardware_profile_keeps_takeup_separate_from_adaptation_holdoff():
     profile = yaml.safe_load((
         ROOT / "catheter_control" / "config"
-        / "causal_v2_fixed_hardware.yaml").read_text())
+        / "legacy/causal_v2_fixed_hardware.yaml").read_text())
     parameters = profile["catheter_mppi"]["ros__parameters"]
     assert parameters["backlash_width_rad"] == [0.0, 0.0, 0.0]
     assert parameters["backlash_width_positive_rad"] == [

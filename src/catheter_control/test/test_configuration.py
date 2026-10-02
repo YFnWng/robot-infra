@@ -166,3 +166,18 @@ def test_simulation_semantic_stack_resolves_references():
     assert resolved.name == "simulation.grouped.circle"
     assert resolved.references["experiment"].name == "circle_trajectory_sim.yaml"
     assert resolved.references["visualization"].name == "simulation.rviz"
+
+
+def test_historical_artifact_selecting_profiles_are_explicitly_legacy():
+    names = (
+        "causal_v2_shadow.yaml",
+        "causal_v2_fixed_hardware.yaml",
+        "v174_fixed_hardware_no_rotation.yaml",
+    )
+    for name in names:
+        assert not (CONFIG / name).exists()
+        assert (CONFIG / "legacy" / name).is_file()
+
+    for stack in (CONFIG / "stacks").glob("*.yaml"):
+        content = stack.read_text(encoding="utf-8")
+        assert all(name not in content for name in names), stack

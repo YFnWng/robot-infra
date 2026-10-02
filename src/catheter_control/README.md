@@ -94,7 +94,7 @@ unknown or multiply-owned parameters, and records the complete result in the
 session manifest. See [`config/README.md`](config/README.md). Legacy replay
 profiles can still be applied with
 `controller_config:=/absolute/path/to/profile.yaml`. The causal-v2 calibration
-is installed as `config/causal_v2_shadow.yaml`; it deliberately keeps both
+is installed as `config/legacy/causal_v2_shadow.yaml`; it deliberately keeps both
 hardware command output and adaptation disabled. Reversal holdoff can be set
 independently for physical shafts 0, 1, and 2. A negative per-shaft value uses
 the legacy scalar `adaptation_reversal_holdoff_normalized_action` fallback.
@@ -275,7 +275,7 @@ profile with the non-actuating performance overlay:
 
 ```bash
 ros2 launch bringup control.launch.py \
-  controller_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/causal_v2_fixed_hardware.yaml \
+  controller_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/legacy/causal_v2_fixed_hardware.yaml \
   performance_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/gpu_mppi_1024_shadow.yaml \
   record:=true
 ```
@@ -427,7 +427,7 @@ The utility never changes encoder zero and does not bypass manager limits,
 freshness checks, fault latching, or firmware safeguards.
 
 For the fixed-J axial A/B test, launch the controller with
-`v174_fixed_hardware_no_rotation.yaml` and run
+`legacy/v174_fixed_hardware_no_rotation.yaml` and run
 `axial_points_v174_hardware.yaml`.  The latter homes to `[20,0,0]` before each
 independent target and freezes two targets at `+5 mm` and `-5 mm` base Z from
 the first measured home tip.  This test preserves physical tendon history and
@@ -607,7 +607,7 @@ work. Enabling real commands is intentionally explicit:
 
 ```bash
 ros2 launch bringup control.launch.py \
-  controller_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/causal_v2_fixed_hardware.yaml \
+  controller_config:=/home/chen-lab/Yifan/robot-infra/src/catheter_control/config/legacy/causal_v2_fixed_hardware.yaml \
   command_output_enabled:=true record:=true
 ```
 
@@ -973,7 +973,7 @@ take-up-occupancy, and deadline analysis.
 
 ### Post-take-up MPPI and take-up transaction
 
-The reviewed hardware profile `causal_v2_fixed_hardware.yaml` separates the
+The reviewed hardware profile `legacy/causal_v2_fixed_hardware.yaml` separates the
 optimizer from physical backlash. MPPI samples and scores desired
 post-engagement motion only. Measured gap, take-up phase, prior transmission
 direction, and nominal take-up duration do not alter its samples, rollout, or

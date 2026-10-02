@@ -1,6 +1,6 @@
 # Phase 5 Model Deployment Stabilization Plan
 
-Status: P5.0-P5.4 implemented; P5.5-P5.6 pending
+Status: P5.0-P5.5 implemented; P5.6 pending
 Primary repository: `cr_meta_lnn`
 Consumer repository: `robot-infra`
 Baseline: `catheter-stack-pre-cleanup-20261001`
@@ -25,7 +25,13 @@ Current gate status:
   installed package versions. Old launch selectors are empty-by-default,
   fail-closed compatibility inputs; arbitrary checkpoint combinations are no
   longer accepted.
-- P5.5-P5.6: pending. The schema-v1 manifest is retained only as explicit
+- P5.5: production, supported-experiment, research, compatibility, and
+  historical deployment surfaces are explicit. The v150 runtime lives only
+  under `deployment.legacy`, optional tendon allocation is owned by an
+  experimental subclass, and historical ROS profiles live under
+  `config/legacy`. Explicit namespaces remain installable for deliberate
+  reproduction, while default production imports cannot reach them.
+- P5.6: pending. The schema-v1 manifest is retained only as explicit
   migration input.
 
 Phase 4 representative timing qualification is explicitly deferred. That does
@@ -318,6 +324,16 @@ cover the temporary aliases.
 Acceptance: production imports form a small acyclic closure and cannot reach
 training datasets, evaluation CLIs, plotting stacks, or historical runtimes.
 
+Implementation: complete. Import-boundary tests prove the default semantic API
+loads neither experimental nor legacy namespaces or plotting/data stacks.
+The archive-verified v150 runtime moved to the explicit source-only legacy
+namespace. Tracked research loaders moved to `deployment.experimental`;
+behavior-free forwarding modules remain temporarily for preserved research
+callers. The selected production runtime no longer imports the optional
+insertion-allocation loader; that behavior is owned by an experimental
+subclass. The explicit namespaces are packaged so retained forwarding
+imports remain valid, but default production imports do not load them.
+
 ### P5.6 — Cross-repository conformance and baseline update
 
 - Run focused `cr_meta_lnn` deployment tests and complete fixture replay.
@@ -394,8 +410,7 @@ Stop and investigate if:
 
 ## 11. Immediate next implementation slice
 
-P5.0-P5.4 are complete. The next gate is P5.5: isolate research and legacy
-surfaces without moving or deleting the preserved dirty research tree. Start
-by classifying concrete deployment imports, compatibility aliases, and
-historical reproduction entry points, then retire only callers already routed
-through the semantic deployment API.
+P5.0-P5.5 are complete. The next gate is P5.6: run cross-repository
+conformance, installed-runtime replay, and baseline renewal using the
+manifest-selected bundle. Phase 4 timing qualification remains deferred and
+C++ command authority remains unavailable.
