@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from control_tasks.sparse_point_experiment import (
-    decoupled_tendon_prehome_target, load_sparse_point_experiment,
+    accepted_home_target, decoupled_tendon_prehome_target, load_sparse_point_experiment,
     sparse_circle_targets)
 
 
@@ -337,6 +337,68 @@ def test_decoupled_tendon_prehome_holds_physical_chassis_axis():
 
     assert target == pytest.approx([13.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     assert target[0]-target[2] == pytest.approx(position[0]-position[2])
+
+
+def test_limit_projected_tendon_prehome_endpoint_and_exact_final_home():
+    requested = [-12.5139, 0., 0., 0., 0., 0.]
+    approved = [-10., 0., 0., 0., 0., 0.]
+    assert accepted_home_target(requested, approved, True) == pytest.approx(approved)
+    with pytest.raises(ValueError):
+        accepted_home_target(requested, approved)
+    with pytest.raises(ValueError):
+        accepted_home_target(requested, [-10., 0., .1, 0., 0., 0.], True)
+    with pytest.raises(ValueError):
+        accepted_home_target(requested, [float("nan")] * 6, True)
+
+
+def test_manager_acknowledgement_is_source_and_stamp_matched():
+    from types import SimpleNamespace
+    from control_interface.msg import DeviceStream
+    from control_tasks.sparse_point_experiment import SparsePointExperiment
+    node = SimpleNamespace(spec=SimpleNamespace(source_name="autonomy"),
+                           home_request_stamp=123, home_accepted_target=None,
+                           monitor_rotation=False)
+    message = DeviceStream(predicate=DeviceStream.POS, data=[0.] * 12)
+    message.header.stamp.nanosec = 122
+    message.header.frame_id = "autonomy"
+    SparsePointExperiment._manager_control_cb(node, message)
+    assert node.home_accepted_target is None
+    message.header.stamp.nanosec = 123
+    message.header.frame_id = "other"
+    SparsePointExperiment._manager_control_cb(node, message)
+    assert node.home_accepted_target is None
+    message.header.frame_id = "autonomy"
+    SparsePointExperiment._manager_control_cb(node, message)
+    assert node.home_accepted_target == pytest.approx([0.] * 6)
+
+
+def test_prehome_settles_at_projected_endpoint_then_requires_exact_home(monkeypatch):
+    from types import SimpleNamespace
+    from control_tasks import sparse_point_experiment as module
+    now = [0.]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    warnings = []
+    node = SimpleNamespace(manager_ready=True, safety_time=0., position_time=0.,
+                           position=np.asarray([-9.9985, 0., .0001, 0., 0., 0.]),
+                           spec=SimpleNamespace(home_tolerance=np.asarray([.1] * 6),
+                                                home_settle_s=.1))
+    node.get_logger = lambda: SimpleNamespace(info=lambda *_: None, warn=warnings.append)
+    def publish(target):
+        node.home_accepted_target = np.asarray(target).copy()
+        node.home_accepted_target[0] = max(-10., target[0])
+    node._publish_home = publish
+    def spin(*args, **kwargs):
+        now[0] += .02
+        node.safety_time = node.position_time = now[0]
+    monkeypatch.setattr(module.rclpy, "spin_once", spin)
+    module.SparsePointExperiment._run_home_stage(
+        node, [-12.5139, 0., 0., 0., 0., 0.], [0, 2], 1., "prehome", True)
+    assert len(warnings) == 1
+    # Final home must not falsely succeed just because tendon is already zero.
+    with pytest.raises(RuntimeError, match="home timed out"):
+        module.SparsePointExperiment._run_home_stage(
+            node, [20., 0., 0., 0., 0., 0.], range(6), now[0] + .2, "home")
 
 
 def test_v175_no_rotation_profile_only_disables_rotation_velocity():

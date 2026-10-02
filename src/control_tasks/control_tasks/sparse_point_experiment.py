@@ -263,6 +263,20 @@ def decoupled_tendon_prehome_target(position, home_position):
     return target
 
 
+def accepted_home_target(requested, accepted, allow_insertion_projection=False):
+    """Validate the manager-approved endpoint without duplicating its limits."""
+    requested = np.asarray(requested, dtype=np.float64)
+    accepted = np.asarray(accepted, dtype=np.float64)
+    if (requested.shape != (6,) or accepted.shape != (6,)
+            or not np.all(np.isfinite(requested))
+            or not np.all(np.isfinite(accepted))):
+        raise ValueError("home endpoints must contain six finite values")
+    axes = slice(1, None) if allow_insertion_projection else slice(None)
+    if not np.allclose(requested[axes], accepted[axes], rtol=0.0, atol=1.0e-9):
+        raise ValueError("manager projected a required home endpoint")
+    return accepted.copy()
+
+
 def sparse_circle_targets(spec: SparsePointSpec, home_tip_m):
     """Freeze absolute nonduplicated targets from the first home tip."""
     if spec.generator["type"] == "circle_yz_from_current_tip":
@@ -298,6 +312,8 @@ class SparsePointExperiment(Node):
         self.active_goal_handle = None
         self.monitor_rotation = False
         self.rotation_guard_violation = None
+        self.home_request_stamp = None
+        self.home_accepted_target = None
         self.control_pub = self.create_publisher(
             ControlStream, spec.control_topic, 10)
         self.event_pub = self.create_publisher(
@@ -314,9 +330,9 @@ class SparsePointExperiment(Node):
             self.create_subscription(
                 ControlStream, spec.planned_control_topic,
                 self._planned_control_cb, 10)
-            self.create_subscription(
-                DeviceStream, spec.manager_control_topic,
-                self._manager_control_cb, 10)
+        self.create_subscription(
+            DeviceStream, spec.manager_control_topic,
+            self._manager_control_cb, 10)
         safety_qos = QoSProfile(depth=1)
         safety_qos.reliability = ReliabilityPolicy.RELIABLE
         safety_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -396,6 +412,14 @@ class SparsePointExperiment(Node):
                 f"{self.spec.rotation_guard_tolerance:.9g}")
 
     def _manager_control_cb(self, message):
+        stamp = (int(message.header.stamp.sec)*1_000_000_000
+                 + int(message.header.stamp.nanosec))
+        if (message.predicate == DeviceStream.POS
+                and message.header.frame_id == self.spec.source_name
+                and stamp == self.home_request_stamp
+                and len(message.data) == 12
+                and all(math.isfinite(value) for value in message.data)):
+            self.home_accepted_target = np.asarray(message.data[:6], dtype=np.float64)
         if not self.monitor_rotation or message.predicate != DeviceStream.VEL:
             return
         axis = self.spec.rotation_guard_axis
@@ -606,14 +630,21 @@ class SparsePointExperiment(Node):
             target = self.spec.home_position
         message.joint_pos = np.asarray(target, dtype=np.float64).tolist()
         message.joint_vel = self.spec.home_speed.tolist()
+        self.home_request_stamp = (int(message.header.stamp.sec)*1_000_000_000
+                                   + int(message.header.stamp.nanosec))
         self.control_pub.publish(message)
 
-    def _run_home_stage(self, target, axes, deadline, label):
+    def _run_home_stage(self, target, axes, deadline, label,
+                        allow_insertion_projection=False):
         """Drive one guarded position stage without leaving position mode."""
         target = np.asarray(target, dtype=np.float64)
         axes = np.asarray(axes, dtype=np.int64)
         within_since = None
         next_publish = 0.0
+        self.home_accepted_target = None
+        self.home_request_stamp = None
+        effective_target = None
+        projection_logged = False
         while rclpy.ok() and time.monotonic() < deadline:
             now = time.monotonic()
             if (not self.manager_ready or self.safety_time is None
@@ -625,12 +656,30 @@ class SparsePointExperiment(Node):
                 next_publish = now+0.10
             rclpy.spin_once(self, timeout_sec=0.02)
             now = time.monotonic()
+            if self.home_accepted_target is None:
+                within_since = None
+                continue
+            try:
+                accepted = accepted_home_target(
+                    target, self.home_accepted_target, allow_insertion_projection)
+            except ValueError as exc:
+                raise RuntimeError(f"{label}: {exc}") from exc
+            if effective_target is None or not np.array_equal(accepted, effective_target):
+                within_since = None
+                effective_target = accepted
+            if not projection_logged and not np.allclose(
+                    target, effective_target, rtol=0.0, atol=1.0e-9):
+                self.get_logger().warn(
+                    f"{label}: manager-approved insertion endpoint "
+                    f"{effective_target[0]:.4f} replaces {target[0]:.4f}; "
+                    "physical chassis hold cannot be preserved at this limit")
+                projection_logged = True
             if (self.position is None or self.position_time is None
                     or now-self.position_time > 0.5):
                 within_since = None
                 continue
             within = np.all(
-                np.abs(self.position[axes]-target[axes])
+                np.abs(self.position[axes]-effective_target[axes])
                 <= self.spec.home_tolerance[axes])
             if not within:
                 within_since = None
@@ -641,11 +690,15 @@ class SparsePointExperiment(Node):
                     "%s complete: %s" % (
                         label, np.round(self.position, 4).tolist()))
                 return
-        if self.position is None:
+        if effective_target is None:
+            detail = "no matching manager-approved POS command received"
+        elif self.position is None:
             detail = "no POS feedback"
         else:
-            residual = target-self.position
+            residual = effective_target-self.position
             detail = (
+                f"requested={np.round(target, 4).tolist()} "
+                f"approved={np.round(effective_target, 4).tolist()} "
                 f"position={np.round(self.position, 4).tolist()} "
                 f"residual={np.round(residual, 4).tolist()} "
                 f"tolerance={self.spec.home_tolerance.tolist()}")
@@ -713,13 +766,14 @@ class SparsePointExperiment(Node):
                 prehome = decoupled_tendon_prehome_target(
                     self.position, self.spec.home_position)
                 self.get_logger().info(
-                    "point %d tendon prehome: target=%s; physical axis 0 "
-                    "held at %.4f" % (
+                    "point %d tendon prehome: requested target=%s; desired physical axis 0 "
+                    "hold=%.4f (subject to manager limits)" % (
                         index+1, np.round(prehome, 4).tolist(),
                         self.position[0]-self.position[2]))
                 self._run_home_stage(
                     prehome, [0, 2], deadline,
-                    f"point {index+1} tendon prehome")
+                    f"point {index+1} tendon prehome",
+                    allow_insertion_projection=True)
             self._run_home_stage(
                 self.spec.home_position, range(6), deadline,
                 f"point {index+1} home")

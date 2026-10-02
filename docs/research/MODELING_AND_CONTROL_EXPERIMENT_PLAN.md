@@ -296,6 +296,25 @@ tools; do not duplicate their parsers or mathematical implementations.
 
 ## Required analysis and result-generation scripts
 
+### Limit-aware tendon prehome correction (2026-10-02)
+
+The guarded sparse task observes manager-approved POS commands, matched to
+its own source and exact publication timestamp. During tendon prehome only,
+axis-0 projection is allowed and convergence is checked against that approved
+endpoint. This handles physical chassis holds that would require logical
+insertion below the manager limit (the observed request was -12.5139 mm;
+the manager approved -10 mm). The log explicitly reports when physical chassis
+hold cannot be maintained. All other axes must match the request, and the final
+home still requires the exact configured six-axis endpoint. Missing manager
+acknowledgement times out; an unexpected projection fails closed. Existing
+manager limits, shared home deadline, settling and feedback freshness checks
+remain unchanged. No limit values are duplicated in task configuration.
+
+Regression tests cover the observed projection, source/stamp matching,
+unsupported-axis projection rejection and exact-final-home enforcement.
+Hardware verification remains pending; the interrupted fourth target must
+not be counted as a controller reaching failure.
+
 ### Recording readiness correction (2026-10-02)
 
 The initial coordinated session failed with rosbag SQLite `database is locked`.
