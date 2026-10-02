@@ -5,6 +5,7 @@
 - [Maintained and legacy index](MAINTAINED_AND_LEGACY_INDEX.md)
 - [Python runtime package layout](PYTHON_RUNTIME_PACKAGE_LAYOUT.md)
 - [Codebase cleanup and production migration plan](CODEBASE_CLEANUP_AND_PRODUCTION_MIGRATION_PLAN.md)
+- [Phase 4 C++ ROS shell plan](PHASE4_CPP_ROS_SHELL_PLAN.md)
 - [Pre-cleanup repository inventory (2026-09-30)](PRE_CLEANUP_INVENTORY_20260930.md)
 - [Active full-stack runtime closure (2026-09-29)](ACTIVE_RUNTIME_CLOSURE_20260929.md)
 - [Pre-cleanup logical commit plan](PRE_CLEANUP_COMMIT_PLAN.md)

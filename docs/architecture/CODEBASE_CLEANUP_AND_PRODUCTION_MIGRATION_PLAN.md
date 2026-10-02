@@ -375,7 +375,10 @@ retired; historical session manifests remain unchanged.
 
 Define language-neutral snapshots and results, implement the C++ shell, run
 Python/C++ on identical recordings, and qualify timing. Python retains command
-authority until C++ shadow conformance passes.
+authority until C++ shadow conformance passes and a separate authority change is
+explicitly reviewed. The implementation sequence and qualification gates are
+defined in the
+[Phase 4 C++ ROS shell plan](PHASE4_CPP_ROS_SHELL_PLAN.md).
 
 ### Phase 5 -- `cr_meta_lnn` deployment stabilization
 
