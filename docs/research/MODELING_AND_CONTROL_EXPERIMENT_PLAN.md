@@ -296,6 +296,49 @@ tools; do not duplicate their parsers or mathematical implementations.
 
 ## Required analysis and result-generation scripts
 
+### Implemented next gate: journaled frozen-target reaching
+
+The coordinated recorder remains non-actuating by default. Once an operator
+has reviewed the target YAML and explicitly enabled/qualified the hardware
+controller using the existing procedure, a separate opt-in task command binds
+the reaching run to the ready recording:
+
+```bash
+# In a ROS Humble terminal with the rebuilt workspace sourced.
+ros2 run experiments reaching_session \
+  --session "$RESEARCH_SESSION" \
+  --targets "$REVIEWED_TARGET_YAML" --execute
+```
+
+`--execute` authorizes actual guarded homing and reaching; do not use it just
+to test recording. The task snapshots the YAML and SHA-256 identity, refuses
+session reuse and non-ready/disabled recordings, and invokes the canonical
+`control_tasks/catheter_sparse_point_experiment` client. Its existing live
+startup, manager, controller identity, homing and rotation guards remain
+authoritative. Recorder readiness does not qualify motor power. There is no
+automatic controller arming by the recorder itself.
+
+The optional `--trial-records PATH` on the generic sparse task writes exclusive,
+flushed JSONL events for task start, homing, frozen targets, reaching, outcomes,
+faults and interruption. ROS and monotonic timestamps are both recorded.
+After stopping the coordinated recording normally:
+
+```bash
+ros2 run experiments reaching_analysis --session "$RESEARCH_SESSION"
+```
+
+This offline command produces `analysis/trial_metrics.csv`, JSON, integrity
+evidence and `report.md`. Time to result excludes homing and includes action
+admission/settling. Latest received marker position is explicitly labeled as
+an unsynchronized endpoint snapshot; controller-reported final error remains
+separate. Incomplete and unattempted trials are retained. Missing bag-derived
+maximum errors, reversals, travel, timing and stream coverage are **null**, not
+zero. Full time-aligned bag metrics, plots, cross-controller comparisons and
+continuous-path protocols are later gates, not implemented by this slice.
+
+Verification is non-actuating unit/package tests and installed CLI checks;
+the first operator-reviewed hardware session remains pending.
+
 The suite must include usable, tested offline analysis commands, not only
 collection scripts. Research-specific analysis belongs in `experiments`;
 reuse existing bag readers, reconstruction tools, and runtime/session

@@ -25,6 +25,8 @@ setup(
         "console_scripts": [
             "collection = experiments.collection:main",
             "session_recording = experiments.session_recording:main",
+            "reaching_session = experiments.reaching_session:main",
+            "reaching_analysis = experiments.reaching_analysis:main",
         ],
     },
 )

@@ -27,6 +27,7 @@ import yaml
 
 from .target_offset import controller_status, measured_tip
 from .trajectory_file import _circle_waypoints
+from .trial_records import TrialRecords, finite_error
 
 
 @dataclass(frozen=True)
@@ -812,6 +813,7 @@ def _arguments(argv):
         "Home before each independent sparse-circle tip target"))
     parser.add_argument("yaml_file")
     parser.add_argument("--startup-timeout-s", type=float, default=10.0)
+    parser.add_argument("--trial-records", help="New JSONL task journal path")
     result = parser.parse_args(remove_ros_args(args=argv)[1:])
     if (not math.isfinite(result.startup_timeout_s)
             or result.startup_timeout_s <= 0.0):
@@ -823,17 +825,39 @@ def main(args=None):
     argv = sys.argv if args is None else args
     parsed = _arguments(argv)
     spec = load_sparse_point_experiment(parsed.yaml_file)
+    records = TrialRecords(parsed.trial_records)
     rclpy.init(args=argv)
     node = SparsePointExperiment(spec)
     results = []
+    def record(event, **fields):
+        records.write(event, node.get_clock().now().nanoseconds, **fields)
+
+    def home(index):
+        record("home_started", trial=index + 1)
+        node.home(index)
+        record("home_completed", trial=index + 1,
+               measured_tip_m=None if node.tip is None else node.tip.tolist())
+
+    def reach(index, count, target):
+        record("trial_started", trial=index + 1, target_m=target.tolist(),
+               measured_tip_m=None if node.tip is None else node.tip.tolist())
+        result = node.run_target(index, count, target)
+        record("trial_completed", trial=index + 1,
+               reached=int(result.reached_waypoints),
+               timed_out=int(result.timed_out_waypoints),
+               controller_final_error_mm=finite_error(result.final_error_mm),
+               measured_tip_m=None if node.tip is None else node.tip.tolist())
+        return result
+
     try:
+        record("task_started")
         node.wait_for_inputs(parsed.startup_timeout_s)
         regenerate = bool(spec.generator.get(
             "regenerate_after_each_home", False))
         if regenerate:
             count = len(spec.generator["logical_displacements"])
             for index in range(count):
-                node.home(index)
+                home(index)
                 if node.tip is None:
                     raise RuntimeError(
                         f"no measured tip after point {index+1} home")
@@ -844,36 +868,41 @@ def main(args=None):
                     "generated point %d/%d after its guarded home "
                     "tip=[%.3f, %.3f, %.3f] mm" % (
                         index+1, count, *(1000.0*home_tip)))
-                results.append(node.run_target(index, count, target))
+                results.append(reach(index, count, target))
         else:
-            node.home(0)
+            home(0)
             if node.tip is None:
                 raise RuntimeError("no measured tip after initial home")
             home_tip = node.tip.copy()
             targets = node.generate_targets(home_tip)
+            record("targets_frozen", targets_m=[target.tolist() for target in targets])
             node.get_logger().info(
                 "froze %d sparse targets from home "
                 "tip=[%.3f, %.3f, %.3f] mm" % (
                     len(targets), *(1000.0*home_tip)))
             for index, target in enumerate(targets):
                 if index:
-                    node.home(index)
-                results.append(node.run_target(
+                    home(index)
+                results.append(reach(
                     index, len(targets), target))
         reached = sum(result.reached_waypoints for result in results)
         timed_out = sum(result.timed_out_waypoints for result in results)
         node.get_logger().info(
             f"sparse-point experiment complete: {reached} reached, "
             f"{timed_out} timed out")
+        record("task_completed", reached=int(reached), timed_out=int(timed_out))
     except KeyboardInterrupt:
         node.cancel_active()
         node._publish_mode(ManagerEvent.NONE)
         node.get_logger().warn("sparse-point experiment interrupted")
-    except Exception:
+        record("task_interrupted")
+    except Exception as exc:
         node.cancel_active()
         node._publish_mode(ManagerEvent.NONE)
+        record("task_failed", reason=str(exc))
         raise
     finally:
+        records.close()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -87,6 +87,12 @@ process lifecycle and recording readiness. It owns no motor command surface.
 `bringup/research_session.launch.py` defines process composition; reusable
 control task clients remain in `control_tasks`.
 
+`reaching_session.py` binds a reviewed frozen target file to an explicitly
+enabled, ready recording; it executes the existing guarded `control_tasks`
+client rather than owning motion logic. `reaching_analysis.py` owns offline
+journal metrics and reports. `control_tasks/trial_records.py` owns optional
+durable task event serialization without depending on the research package.
+
 The package depends only on its declared functional dependencies. Launch
 composition belongs to `bringup`; runtime supervision is independently owned.
 Controller task clients are owned by the standalone `control_tasks` package.

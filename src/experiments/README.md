@@ -14,5 +14,24 @@ ros2 run experiments collection
 manifest; `bringup/research_session.launch.py` composes its camera, controller,
 and bag commands. The recorder has no robot command publishers or device
 services. `recording_session.py` owns filesystem identity and finalized
-evidence, independently testable without ROS. Task execution and research
-analysis/report generation remain separate gates.
+evidence, independently testable without ROS.
+
+## Journaled research reaching
+
+After coordinated recording is ready, the operator can explicitly run the
+existing guarded sparse-point task against a reviewed frozen Cartesian target
+YAML. This is actuating; recording alone never starts the task:
+
+```bash
+ros2 run experiments reaching_session \
+  --session "$RESEARCH_SESSION" --targets "$REVIEWED_TARGET_YAML" --execute
+```
+
+Stop the recorder normally after the task, then generate offline results:
+
+```bash
+ros2 run experiments reaching_analysis --session "$RESEARCH_SESSION"
+```
+
+See the [research experiment plan](../../docs/research/MODELING_AND_CONTROL_EXPERIMENT_PLAN.md)
+for metric definitions and the explicit limits of this journal-based gate.
