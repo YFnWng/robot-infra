@@ -296,6 +296,51 @@ tools; do not duplicate their parsers or mathematical implementations.
 
 ## Required analysis and result-generation scripts
 
+### Implemented bag-evidence gate
+
+After the coordinated recorder is finalized, use a sourced ROS Humble terminal:
+
+```bash
+ros2 run experiments reaching_analysis \
+  --session "$RESEARCH_SESSION" --bag-metrics
+```
+
+This command is offline: it initializes no ROS node and opens no device links.
+It reuses the ROS storage/CDR APIs and the canonical marker-ID-3 validation.
+Target-file identity is checked before analysis. Source timestamps define each
+trial window from reaching admission to result/fault/interruption; homing is
+excluded. Missing terminal timestamps are reported rather than guessed.
+
+Metric definition version 2 adds:
+
+- Observed maximum and sample-RMS Cartesian marker error, and a source-time
+  final marker error only if the last sample is within 250 ms of trial end.
+  Journal endpoint and controller-reported error remain separate columns.
+- Separate reversal counts for planned velocities, transmitted device VEL
+  commands, and raw encoder counts. Physical-axis velocity deadbands are
+  `[0.02 mm/s, 0.2 deg/s, 0.02 mm/s]`; encoder deadband is 2 counts per axis.
+  Two non-deadband directional samples confirm direction, zeros do not reverse
+  it, and gaps longer than 250 ms reset direction evidence. Initial direction
+  acquisition is not a reversal.
+- Motor travel from physical POS telemetry in `[mm, deg, mm]`, excluding pairs
+  separated by gaps over 250 ms. This is partial observed travel, not a lower
+  uncertainty claim about unobserved motion.
+- Per-stream sample counts, maximum gaps including trial boundaries and
+  coverage flags; missing/wrong message types, invalid marker samples/source
+  timestamps and non-monotonic source timestamps are reported explicitly.
+- `trial_NN.png` plots of measured XYZ with target lines, motor position and
+  transmitted velocity; missing spans are broken instead of interpolated.
+  Figures are linked from the generated Markdown report.
+
+The maximum error is the maximum **observed** error, not a bound across missing
+spans. RMS is sample-weighted, not time-weighted. No UKF shape estimate is used
+as control ground truth. There is no assumption that all streams are precisely
+synchronized: source-time membership and coverage are exposed for review.
+Unattempted/incomplete trials and missing metrics remain explicit. Full timing,
+take-up-state attribution, matched study comparison and continuous-path tasks
+remain subsequent gates. Validation includes deterministic metric tests and a
+synthetic finalized-bag decode/plot smoke test; no hardware was operated.
+
 ### Implemented next gate: journaled frozen-target reaching
 
 The coordinated recorder remains non-actuating by default. Once an operator
@@ -333,8 +378,9 @@ admission/settling. Latest received marker position is explicitly labeled as
 an unsynchronized endpoint snapshot; controller-reported final error remains
 separate. Incomplete and unattempted trials are retained. Missing bag-derived
 maximum errors, reversals, travel, timing and stream coverage are **null**, not
-zero. Full time-aligned bag metrics, plots, cross-controller comparisons and
-continuous-path protocols are later gates, not implemented by this slice.
+zero when running in journal-only mode. The bag-evidence gate above adds
+source-time metrics and plots with `--bag-metrics`. Cross-controller comparison,
+full timing attribution and continuous-path protocols remain later gates.
 
 Verification is non-actuating unit/package tests and installed CLI checks;
 the first operator-reviewed hardware session remains pending.

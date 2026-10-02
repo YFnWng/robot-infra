@@ -33,5 +33,15 @@ Stop the recorder normally after the task, then generate offline results:
 ros2 run experiments reaching_analysis --session "$RESEARCH_SESSION"
 ```
 
+For source-time finalized-bag errors, planned/transmitted/encoder reversals,
+observed motor travel, gap evidence and per-trial plots:
+
+```bash
+ros2 run experiments reaching_analysis --session "$RESEARCH_SESSION" --bag-metrics
+```
+
+Use a sourced ROS Humble terminal; analysis does not start a ROS node or device.
+Missing streams and stale endpoints are reported, not filled with zeros.
+
 See the [research experiment plan](../../docs/research/MODELING_AND_CONTROL_EXPERIMENT_PLAN.md)
 for metric definitions and the explicit limits of this journal-based gate.

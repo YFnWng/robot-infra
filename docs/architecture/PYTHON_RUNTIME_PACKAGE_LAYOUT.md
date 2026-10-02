@@ -92,6 +92,9 @@ enabled, ready recording; it executes the existing guarded `control_tasks`
 client rather than owning motion logic. `reaching_analysis.py` owns offline
 journal metrics and reports. `control_tasks/trial_records.py` owns optional
 durable task event serialization without depending on the research package.
+`experiments/reaching_bag.py` owns study-specific bag evidence, reversal metric
+definitions and diagnostic plots, reusing ROS deserialization and the canonical
+marker validator. It never owns estimator or controller runtime logic.
 
 The package depends only on its declared functional dependencies. Launch
 composition belongs to `bringup`; runtime supervision is independently owned.
