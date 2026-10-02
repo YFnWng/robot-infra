@@ -23,6 +23,7 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
+            "compute_profile = runtime_supervision.bootstrap:compute_profile",
             "causal_runtime_identity = runtime_supervision.bootstrap:runtime_identity",
             "causal_session_check = runtime_supervision.session_check:main",
             "causal_stationary_analysis = runtime_supervision.stationary_analysis:main",

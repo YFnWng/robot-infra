@@ -108,11 +108,17 @@ The standalone ROS package owns runtime and session qualification:
 runtime_supervision/
 ├── runtime_identity.py       # parameter and artifact identity capture
 ├── session_check.py          # finalized-bag completeness validation
-└── stationary_analysis.py    # offline stationary-noise qualification
+├── stationary_analysis.py    # offline stationary-noise qualification
+└── compute_profile.py        # non-actuating recorded-input compute profiling
 ```
 
 The longer package name avoids collision with the installed third-party Python
 package named `supervision`.
+
+Offline compute profiling depends one-way on `catheter_control` and reuses its
+model-loading environment. It is not imported by live controller orchestration;
+`catheter_control.orchestration.timing` remains the lightweight online probe.
+Run the profiler with `ros2 run runtime_supervision compute_profile`.
 
 ## `control_tasks`
 

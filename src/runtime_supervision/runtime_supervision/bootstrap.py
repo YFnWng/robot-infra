@@ -7,6 +7,13 @@ from pathlib import Path
 import sys
 
 
+def compute_profile():
+    """Run offline profiling with the controller's established environment."""
+    from catheter_control.bootstrap import run_in_venv
+
+    return run_in_venv("runtime_supervision.compute_profile")
+
+
 def runtime_identity():
     root = Path(os.environ.get(
         "CR_VENV", "/home/chen-lab/Yifan/cr-venv")).expanduser().absolute()

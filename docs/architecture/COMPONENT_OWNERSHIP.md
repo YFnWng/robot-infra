@@ -18,7 +18,7 @@ to its final package.
 | Experiment schedules and guarded collection | `robot-infra/experiments` | Standalone functional package |
 | Controller task clients | `robot-infra/control_tasks` | Depends one-way on the controller core |
 | Marker tracking and live shape adapters | `robot-infra/perception` | Extracted from the historical `automation` package |
-| Session identity and qualification | `robot-infra/runtime_supervision` | Standalone functional package |
+| Session identity and qualification | `robot-infra/runtime_supervision` | Includes offline recorded-input compute profiling; depends one-way on controller APIs |
 | Cross-repository numerical conformance | `robot-infra/catheter_control/safety/conformance.py` | Offline only; owns the frozen fixture and never publishes commands |
 | Manual operator UI | `robot-infra/teleop` | Not a model or autonomous controller |
 | Learned mechanics and causal state | `cr_meta_lnn` | Includes v171 distal runtime and play/transmission loaders |

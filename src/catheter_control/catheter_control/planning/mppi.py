@@ -1007,14 +1007,10 @@ class CatheterMppi:
         axis = int(belief.tendon_axis)
         if not 0 <= axis < CONTROL_AXES:
             raise ValueError("invalid engaged gain tendon axis")
-        for candidate in range(len(first_direction)):
-            direction = int(first_direction[candidate, axis])
-            if direction == 0:
-                continue
-            index = 1 if direction > 0 else 0
-            if belief.status[axis][index] != "CONFIDENT":
-                result[candidate] = configured
-        return result
+        directions = first_direction[:, axis]
+        status = np.asarray(belief.status[axis])
+        uncertain = status[(directions > 0).astype(np.intp)] != "CONFIDENT"
+        return np.where((directions != 0) & uncertain, configured, result)
 
     def _engaged_gain_scenarios(self, first_direction, transmission_state):
         """Return candidate-wise mean/lower/upper engaged gain scenarios."""
@@ -1028,18 +1024,16 @@ class CatheterMppi:
         axis = int(belief.tendon_axis)
         if not 0 <= axis < CONTROL_AXES:
             raise ValueError("invalid engaged gain tendon axis")
-        result = np.empty((count, 3), dtype=np.float64)
         engaged_direction = np.asarray(
             transmission_state.engaged_direction, dtype=np.int8)
         active_direction = np.asarray(
             belief.active_direction, dtype=np.int8)
-        for candidate in range(count):
-            direction = int(first_direction[candidate, axis])
-            if direction == 0:
-                direction = int(engaged_direction[axis])
-            if direction == 0:
-                direction = int(active_direction[axis])
-            result[candidate] = belief.scenarios(axis, direction)
+        directions = first_direction[:, axis].copy()
+        directions[directions == 0] = engaged_direction[axis]
+        directions[directions == 0] = active_direction[axis]
+        table = np.stack([belief.scenarios(axis, direction)
+                          for direction in (-1, 0, 1)])
+        result = table[np.sign(directions).astype(np.intp)+1]
         if not np.isfinite(result).all() or np.any(result <= 0.0):
             raise ValueError("invalid engaged gain scenarios")
         return result
@@ -1496,16 +1490,19 @@ class CatheterMppi:
         mode_best_total_cost = np.full(
             1 << CONTROL_AXES, np.inf, dtype=np.float64)
         mode_best_index = np.full(1 << CONTROL_AXES, -1, dtype=np.int64)
-        for mode in range(1 << CONTROL_AXES):
-            member = ((reversal_mask == mode) & ~blocked_candidate)
-            if not np.any(member):
-                continue
-            member_t = torch.as_tensor(member, device=device, dtype=torch.bool)
-            index_t = torch.argmin(torch.where(
-                member_t, costs, torch.full_like(costs, torch.inf)))
-            index = int(index_t.detach().cpu())
-            mode_best_index[mode] = index
-            mode_best_total_cost[mode] = float(costs[index_t].detach().cpu())
+        members = ((reversal_mask[None, :] ==
+                    np.arange(1 << CONTROL_AXES)[:, None])
+                   & ~blocked_candidate[None, :])
+        member_t = torch.as_tensor(members, device=device, dtype=torch.bool)
+        mode_costs_t, mode_indices_t = torch.min(torch.where(
+            member_t, costs[None, :], torch.full_like(costs[None, :], torch.inf)),
+            dim=1)
+        # Eight modes cross the device boundary together, not one at a time.
+        mode_record = torch.stack((mode_indices_t.to(torch.float64),
+                                   mode_costs_t.to(torch.float64))).detach().cpu().numpy()
+        valid_modes = members.any(axis=1)
+        mode_best_index[valid_modes] = mode_record[0, valid_modes].astype(np.int64)
+        mode_best_total_cost[valid_modes] = mode_record[1, valid_modes]
 
         no_reversal_index = int(mode_best_index[0])
         if no_reversal_index < 0:

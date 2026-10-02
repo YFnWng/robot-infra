@@ -60,6 +60,8 @@ are not imported by the controller's production path:
 - v175 interface-transmission fitting and validation committed in M3;
 - engagement/gain pipeline scripts committed in M3;
 - shape-tracking session post-processing and overlay CLIs.
+- `runtime_supervision.compute_profile`: offline O0 recorded-input profiling;
+  not part of live controller orchestration.
 
 A reproduction script may retain historical filenames. It must not silently
 become a runtime default.
