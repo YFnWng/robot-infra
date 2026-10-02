@@ -68,3 +68,8 @@ def control_shadow_worker():
 def phase5_preflight():
     """Console entry point for the offline validation harness."""
     return run_in_venv("catheter_control.safety.validation")
+
+
+def phase5_conformance():
+    """Console entry point for deterministic non-actuating replay."""
+    return run_in_venv("catheter_control.safety.conformance")

@@ -16,6 +16,7 @@ setup(
     name=package_name,
     version="0.1.0",
     packages=find_packages(exclude=["test"]),
+    package_data={"catheter_control": ["safety/fixtures/*.json"]},
     data_files=[
         ("share/ament_index/resource_index/packages",
          [f"resource/{package_name}"]),
@@ -32,6 +33,7 @@ setup(
         "console_scripts": [
             "catheter_mppi = catheter_control.bootstrap:catheter_mppi",
             "phase5_preflight = catheter_control.bootstrap:phase5_preflight",
+            "phase5_conformance = catheter_control.bootstrap:phase5_conformance",
             "control_shadow_worker = catheter_control.bootstrap:control_shadow_worker",
         ],
     },

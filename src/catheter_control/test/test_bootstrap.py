@@ -31,8 +31,10 @@ def test_controller_entry_points_use_canonical_modules(monkeypatch):
 
     bootstrap.catheter_mppi()
     bootstrap.phase5_preflight()
+    bootstrap.phase5_conformance()
 
     assert calls == [
         "catheter_control.node",
         "catheter_control.safety.validation",
+        "catheter_control.safety.conformance",
     ]

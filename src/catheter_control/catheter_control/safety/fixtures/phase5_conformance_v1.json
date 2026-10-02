@@ -1,0 +1,584 @@
+{
+  "controller": {
+    "modes": {
+      "grouped": {
+        "best_candidate_selected": true,
+        "best_cost": 196.96939086914062,
+        "best_tip_sequence_m": [
+          [
+            -0.000346384069416672,
+            -0.019546804949641228,
+            0.05114766210317612
+          ],
+          [
+            -0.00040968297980725765,
+            -0.019446246325969696,
+            0.051779888570308685
+          ],
+          [
+            -0.00047277595149353147,
+            -0.019345447421073914,
+            0.05241210386157036
+          ],
+          [
+            -0.0005356623441912234,
+            -0.01924440637230873,
+            0.05304429307579994
+          ]
+        ],
+        "command_logical_velocity": [
+          3.9830906391143794,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "effective_samples": 7.856593132019043,
+        "logical_velocity_sequence": [
+          [
+            3.9830906391143794,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            3.9830906391143794,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            3.9830906391143794,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            3.9830906391143794,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "reason": "ok",
+        "transaction_preview": {
+          "command_motor_rad_s": [
+            [
+              -0.5,
+              0.0,
+              -0.3
+            ],
+            [
+              -0.5,
+              0.0,
+              -0.3
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ]
+          ],
+          "policy": "response_terminated_takeup",
+          "remaining_rad": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "takeup_delay_s": 0.4,
+          "transmitted_motor_rad_s": [
+            [
+              -0.0,
+              0.0,
+              -0.0
+            ],
+            [
+              -0.10000000000000009,
+              0.0,
+              -0.0
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.20000000000000004
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.20000000000000004
+            ]
+          ]
+        },
+        "valid": true
+      },
+      "plain": {
+        "best_candidate_selected": false,
+        "best_cost": 196.96939086914062,
+        "best_tip_sequence_m": [
+          [
+            -0.000346384069416672,
+            -0.019546804949641228,
+            0.05114766210317612
+          ],
+          [
+            -0.00040968297980725765,
+            -0.019446246325969696,
+            0.051779888570308685
+          ],
+          [
+            -0.00047277595149353147,
+            -0.019345447421073914,
+            0.05241210386157036
+          ],
+          [
+            -0.0005356623441912234,
+            -0.01924440637230873,
+            0.05304429307579994
+          ]
+        ],
+        "command_logical_velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "effective_samples": 6.310319423675537,
+        "logical_velocity_sequence": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "reason": "ok",
+        "transaction_preview": {
+          "command_motor_rad_s": [
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ]
+          ],
+          "policy": "direct",
+          "transmitted_motor_rad_s": [
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ]
+          ]
+        },
+        "valid": true
+      },
+      "plain_with_takeup": {
+        "best_candidate_selected": false,
+        "best_cost": 196.96939086914062,
+        "best_tip_sequence_m": [
+          [
+            -0.000346384069416672,
+            -0.019546804949641228,
+            0.05114766210317612
+          ],
+          [
+            -0.00040968297980725765,
+            -0.019446246325969696,
+            0.051779888570308685
+          ],
+          [
+            -0.00047277595149353147,
+            -0.019345447421073914,
+            0.05241210386157036
+          ],
+          [
+            -0.0005356623441912234,
+            -0.01924440637230873,
+            0.05304429307579994
+          ]
+        ],
+        "command_logical_velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "effective_samples": 6.310319423675537,
+        "logical_velocity_sequence": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "reason": "ok",
+        "transaction_preview": {
+          "command_motor_rad_s": [
+            [
+              -0.5,
+              0.0,
+              -0.3
+            ],
+            [
+              -0.5,
+              0.0,
+              -0.3
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.2
+            ]
+          ],
+          "policy": "response_terminated_takeup",
+          "remaining_rad": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "takeup_delay_s": 0.4,
+          "transmitted_motor_rad_s": [
+            [
+              -0.0,
+              0.0,
+              -0.0
+            ],
+            [
+              -0.10000000000000009,
+              0.0,
+              -0.0
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.20000000000000004
+            ],
+            [
+              -0.3,
+              0.0,
+              -0.20000000000000004
+            ]
+          ]
+        },
+        "valid": true
+      }
+    },
+    "target_tip_m": [
+      0.0037171200811862946,
+      -0.01964711956679821,
+      0.05451540955901146
+    ]
+  },
+  "delayed_observation": {
+    "estimator_status": "INITIALIZING",
+    "present_timestamp_ns": 1140000000,
+    "present_tip_m": [
+      -0.0001810889516491443,
+      -0.019703097641468048,
+      0.05054984614253044
+    ],
+    "result": {
+      "accepted": true,
+      "distal_lambda_posterior": 0.0,
+      "distal_lambda_prior": 0.0,
+      "health": "INITIALIZING",
+      "innovation_dof": 12,
+      "innovation_nis": null,
+      "innovation_nis_per_dof": null,
+      "maximum_residual_after_mm": 0.006398676305252593,
+      "maximum_residual_before_mm": 0.6575352745130658,
+      "normalized_innovation": 1.36367782488378e-06,
+      "observable_rank": 9,
+      "reason": "accepted",
+      "rms_after_mm": 0.003351137365825707,
+      "rms_before_mm": 0.37670464371331036,
+      "visible_markers": 4
+    }
+  },
+  "encoder_zero_policy": "READ_ONLY_NEVER_SET_ZERO",
+  "runtime": {
+    "final_state": {
+      "accepted_observations": 12,
+      "consecutive_rejections": 1,
+      "downstream": [
+        9.774588761501946e-06,
+        0.0,
+        -7.441406069119694e-07
+      ],
+      "health": "DEGRADED",
+      "interface_pose": [
+        [
+          1.0,
+          -7.25018689990975e-05,
+          -1.957037966349162e-06,
+          -1.3157605849301035e-07
+        ],
+        [
+          7.246930181281641e-05,
+          1.0,
+          1.9737201000680216e-05,
+          1.2821086556868977e-06
+        ],
+        [
+          1.9567694380384637e-06,
+          -1.9737995899049565e-05,
+          1.0,
+          7.777615792292636e-06
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "motor_angle_rad": [
+        3.854734182357788,
+        0.0,
+        0.003926991019397974
+      ],
+      "raw_motor_angle_rad": [
+        3.854734182357788,
+        0.0,
+        0.003926991019397974
+      ],
+      "strain": [
+        3.5852036476135254,
+        1.131628155708313,
+        0.0,
+        -2.1474356651306152,
+        -1.5743985176086426,
+        0.0,
+        3.3702189922332764,
+        -2.7288734912872314,
+        0.0,
+        15.922683715820312,
+        -1.5857278108596802,
+        0.0,
+        29.435894012451172,
+        0.18252567946910858,
+        0.0,
+        38.19801330566406,
+        1.7022463083267212,
+        0.0,
+        35.89330291748047,
+        2.3482491970062256,
+        0.0,
+        17.128292083740234,
+        0.7232354283332825,
+        0.0
+      ],
+      "timestamp_ns": 1140000000
+    },
+    "identity": {
+      "artifact_sha256": {
+        "v171_distal_checkpoint": "adfbe11f58d409c9a24fdbdef23ef38b32c83fcc692ef77fa68c52508254ac1a",
+        "v174_jacobian_initialization": "6d3f8573d10511dcbea3c27c97141f132b95cc42c450d3aec3702db33430ad2c",
+        "v175_interface_transmission_checkpoint": "c07960295808ccfe34a79297630a06e6edd53e71181859b2831de0fef700cfc7"
+      },
+      "bundle_name": "20260929_175554_grouped_no_rotation",
+      "deployment_api_version": "1.0",
+      "manifest_sha256": "2e9f1ccdade740fcbaae4c941eb992e15e9561f3b8b059f247182fccde9b1dd5",
+      "runtime_family": "v171_distal_v174_interface_v175_transmission"
+    },
+    "initial_markers_m": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        2.742602191574406e-05,
+        -0.00010676201054593548,
+        0.009046809747815132
+      ],
+      [
+        -0.0003176638565491885,
+        -0.0022968794219195843,
+        0.028717705979943275
+      ],
+      [
+        -0.00028287991881370544,
+        -0.01964711956679821,
+        0.05051540955901146
+      ]
+    ],
+    "marker_updates": {
+      "accepted": 12,
+      "health": [
+        "INITIALIZING",
+        "INITIALIZING",
+        "INITIALIZING",
+        "INITIALIZING",
+        "INITIALIZING",
+        "INITIALIZING",
+        "INITIALIZING",
+        "TRACKING",
+        "TRACKING",
+        "TRACKING",
+        "TRACKING",
+        "TRACKING"
+      ],
+      "reasons": [
+        "accepted",
+        "accepted",
+        "accepted",
+        "accepted",
+        "accepted",
+        "accepted",
+        "accepted",
+        "accepted",
+        "accepted_noop",
+        "accepted_noop",
+        "accepted_noop",
+        "accepted_noop"
+      ],
+      "rejected": {
+        "accepted": false,
+        "distal_lambda_posterior": null,
+        "distal_lambda_prior": null,
+        "health": "DEGRADED",
+        "innovation_dof": 0,
+        "innovation_nis": null,
+        "innovation_nis_per_dof": null,
+        "maximum_residual_after_mm": null,
+        "maximum_residual_before_mm": 86.60253882408142,
+        "normalized_innovation": null,
+        "observable_rank": 0,
+        "reason": "marker_outlier",
+        "rms_after_mm": null,
+        "rms_before_mm": 43.30126941204071,
+        "visible_markers": 4
+      }
+    },
+    "tip_trace_m": [
+      [
+        -0.00028287991881370544,
+        -0.01964711956679821,
+        0.05051540955901146
+      ],
+      [
+        -0.00028320716228336096,
+        -0.0196458101272583,
+        0.05051933974027634
+      ],
+      [
+        -0.00028372748056426644,
+        -0.01964341104030609,
+        0.05052587389945984
+      ],
+      [
+        -0.0002835933701135218,
+        -0.01964467763900757,
+        0.05052363872528076
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "scope": "OFFLINE_NON_ACTUATING_CONFORMANCE"
+}
