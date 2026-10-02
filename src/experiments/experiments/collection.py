@@ -19,8 +19,11 @@ Safety
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
+from pathlib import Path
+import sys
 
 from control_interface.msg import (
     CausalExperimentTrace, ControlStream, DeviceEvent, DeviceStream,
@@ -39,6 +42,41 @@ from .identification import IdentificationConfig, IdentificationGenerator
 from .causal_experiment import (
     CausalExperimentConfig, CausalExperimentGenerator,
     resolve_tolerance_qualified_start)
+
+
+def _load_sofa_generators(sofa_path: str):
+    """Load the two legacy generator modules without mutating import paths."""
+    root = Path(sofa_path).expanduser().resolve()
+    package_root = root / "data_collection"
+    generators_root = package_root / "generators"
+    required = (
+        package_root / "__init__.py",
+        generators_root / "__init__.py",
+        generators_root / "base.py",
+        generators_root / "sinusoidal.py",
+    )
+    if not all(path.is_file() for path in required):
+        raise ImportError(
+            f"SOFA_SIM_PATH does not contain data_collection generators: {root}")
+
+    def load(name, path, *, package_dir=None):
+        options = ({} if package_dir is None else
+                   {"submodule_search_locations": [str(package_dir)]})
+        spec = importlib.util.spec_from_file_location(name, path, **options)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot create module spec for {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    load("data_collection", required[0], package_dir=package_root)
+    load("data_collection.generators", required[1],
+         package_dir=generators_root)
+    base = load("data_collection.generators.base", required[2])
+    sinusoidal = load("data_collection.generators.sinusoidal", required[3])
+    return base.InputGenerator, sinusoidal.SinusoidalGenerator
+
 
 # Joint order matches teleop/config/params.yaml
 JOINTS = [
@@ -1158,18 +1196,15 @@ class CollectionNode(Node):
     # -- command generation ---------------------------------------------- #
     def _build_generator(self) -> None:
         import os
-        import sys
         sofa_path = self.get_parameter("sofa_sim_path").value or os.environ.get(
             "SOFA_SIM_PATH", "")
-        if sofa_path and sofa_path not in sys.path:
-            sys.path.insert(0, sofa_path)
         try:
-            from data_collection.generators.base import InputGenerator
-            from data_collection.generators.sinusoidal import SinusoidalGenerator
+            InputGenerator, SinusoidalGenerator = _load_sofa_generators(
+                sofa_path)
         except ImportError as exc:  # pragma: no cover
             raise ImportError(
-                f"cannot import SOFA generator from '{sofa_path}'; set sofa_sim_path "
-                f"or SOFA_SIM_PATH: {exc}")
+                f"cannot import SOFA generator from '{sofa_path}'; set "
+                f"sofa_sim_path or SOFA_SIM_PATH: {exc}") from exc
 
         self._shortest_delta = InputGenerator.shortest_rotation_delta
         idx = self._target_idx

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import sys
 import time
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -90,13 +89,7 @@ def encode_preview_frames(frames, eye: str, maximum_width: int,
 
 
 def _load_shape_tracking(shape_tracking_root: str):
-    """Load camera/marker code from an installed package or source tree."""
-    if shape_tracking_root:
-        root = Path(shape_tracking_root).expanduser().resolve()
-        source = root / "src"
-        import_path = source if source.is_dir() else root
-        if str(import_path) not in sys.path:
-            sys.path.insert(0, str(import_path))
+    """Load camera/marker code from the installed deployment package."""
     try:
         from shape_tracking.multi_camera import (
             CameraCaptureWorker, LiveFrameSynchronizer,
@@ -112,11 +105,11 @@ def _load_shape_tracking(shape_tracking_root: str):
         from shape_tracking.session import load_session_registration
         from shape_tracking.zed_capture import ZedCamera
     except ImportError as exc:
-        location = shape_tracking_root or "the active Python environment"
         raise ImportError(
-            "could not import the shape_tracking camera/marker library from "
-            f"{location}; set shape_tracking_root to the repository root. "
-            f"Underlying import error: {exc}"
+            "could not import the installed shape_tracking camera/marker "
+            "library; install its wheel in the active Python environment. "
+            f"The legacy shape_tracking_root value {shape_tracking_root!r} "
+            f"is configuration-only. Underlying import error: {exc}"
         ) from exc
     return {
         "CameraCaptureWorker": CameraCaptureWorker,
