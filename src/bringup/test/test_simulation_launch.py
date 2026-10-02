@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from bringup.recording import RECORD_TOPICS
+
 
 LAUNCH = (Path(__file__).resolve().parents[1]
           / "launch" / "simulation.launch.py")
@@ -46,8 +48,10 @@ def test_trajectory_action_is_launched_and_recorded_in_both_stacks():
     hardware = CONTROL_LAUNCH.read_text(encoding="utf-8")
     for source in (simulation, hardware):
         assert 'executable="catheter_tip_trajectory"' in source
-        assert "track_tip_trajectory/_action/feedback" in source
-        assert "track_tip_trajectory/_action/status" in source
+    for suffix in ("feedback", "status"):
+        assert f"track_tip_trajectory/_action/{suffix}" in simulation
+        assert f"/catheter_mppi/track_tip_trajectory/_action/{suffix}" in RECORD_TOPICS
+    assert "from bringup.recording import RECORD_TOPICS" in hardware
     assert "remappings=TRAJECTORY_REMAPS" in simulation
     assert ('"action_name": (\n'
             '                    "/sim/catheter_mppi/track_tip_trajectory")'
@@ -221,7 +225,8 @@ def test_hardware_launch_records_complete_response_path_by_default():
         '"/catheter_mppi/status"',
         '"/rosout"',
     )
-    assert all(topic in source for topic in required_topics)
+    assert all(topic.strip('"') in RECORD_TOPICS for topic in required_topics)
+    assert "from bringup.recording import RECORD_TOPICS" in source
     assert '"record", default_value="true"' in source
     assert 'output + "_manifest.json"' in source
 

@@ -2212,3 +2212,28 @@ then use the no-rotation axial and near two-axis experiments. Promotion to
 rotation or a continuous path requires an audit of take-up/MPPI mutual
 exclusion, gain updates, first-step cap rejections, deadline misses, overshoot,
 and reversal count from those hardware sessions.
+
+## Research comparison baseline and bibliography (2026-10-02)
+
+Use **AdapJ** as an existing comparison baseline, not a new implementation task.
+The adaptive extended Jacobian controller from Chen et al.,
+[DOI 10.1109/TMECH.2025.3612503](https://doi.org/10.1109/TMECH.2025.3612503),
+is implemented in `control/adapj.py` as `AdapJController`. This inverse
+controller is distinct from `AdaptiveForwardJacobian`, the forward mapping
+used inside the current model-based stack.
+
+Compare native AdapJ against plain MPPI, plain MPPI with take-up compensation,
+and grouped MPPI with take-up compensation. An AdapJ-with-compensation ablation
+can additionally separate benefits of the controller from benefits of the
+shared take-up layer. Reuse the existing implementation and give baselines
+matched observations, targets, encoder/velocity limits, control-rate budgets,
+and initialization/calibration data budgets. Existing implementation does not
+by itself establish qualification of its current ROS integration.
+
+The local reference collection is
+`docs/research/catheter_modeling_control.bib`, including the AdapJ paper and
+Wang et al.'s compact concentric-catheter robot,
+[DOI 10.1109/TMECH.2025.3602061](https://doi.org/10.1109/TMECH.2025.3602061).
+All `*.bib` files are intentionally Git-ignored; the bibliography remains a
+local working artifact rather than a tracked source file. Published journal
+records and preprints are distinguished in its entries.

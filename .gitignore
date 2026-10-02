@@ -27,6 +27,9 @@ __pycache__/
 # Misc
 *.pdf
 
+# Local research bibliographies
+*.bib
+
 # Local test, type-check, and lint caches
 .pytest_cache/
 .ruff_cache/

@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "collection = experiments.collection:main",
+            "session_recording = experiments.session_recording:main",
         ],
     },
 )

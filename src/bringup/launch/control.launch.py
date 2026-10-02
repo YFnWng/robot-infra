@@ -19,6 +19,7 @@ from catheter_control.orchestration.configuration import (
     ACTIVE_CONTROLLER_PARAMETERS, load_ros_parameters, locate_stack,
     resolve_stack)
 from catheter_control.orchestration.runtime import resolve_model_selection
+from bringup.recording import RECORD_TOPICS
 
 
 def _default_model_manifest():
@@ -48,45 +49,6 @@ def _installed_package_identity():
             except metadata.PackageNotFoundError:
                 pass
     return result
-
-
-RECORD_TOPICS = [
-    "/teleop/control",
-    "/teleop/event",
-    "/manager/control",
-    "/manager/event",
-    "/manager/safety_status",
-    "/manager/state",
-    "/device/state",
-    "/device/event",
-    "/device/command_tx",
-    "/device/transport_status",
-    "/shape_tracking/markers",
-    "/shape_tracking/marker_status",
-    "/collection/events",
-    "/catheter_mppi/target_tip",
-    "/catheter_mppi/reference_horizon",
-    "/catheter_mppi/reference_path",
-    "/catheter_mppi/path_reference_point",
-    "/catheter_mppi/path_tracking_trace",
-    "/catheter_mppi/planned_control",
-    "/catheter_mppi/predicted_tip",
-    "/catheter_mppi/response_trace",
-    "/catheter_mppi/estimator_trace",
-    "/catheter_mppi/control_cycle_timing",
-    "/catheter_mppi/status",
-    "/catheter_mppi/shadow_request",
-    "/catheter_mppi/shadow_decision",
-    "/catheter_mppi/shadow_timing",
-    "/catheter_mppi/shadow_status",
-    "/catheter_mppi/shadow_worker_status",
-    "/catheter_mppi/track_tip_trajectory/_action/feedback",
-    "/catheter_mppi/track_tip_trajectory/_action/status",
-    "/catheter_mppi/track_tip_path/_action/feedback",
-    "/catheter_mppi/track_tip_path/_action/status",
-    "/parameter_events",
-    "/rosout",
-]
 
 
 def _artifact_manifest(path):
@@ -433,11 +395,16 @@ def _setup(context, *_args, **_kwargs):
                 "maximum_input_age_s": max(
                     0.20, 2.0*float(value("planning_deadline_s"))),
             }]))
-    if value("record").lower() in ("1", "true", "yes"):
-        root = os.path.abspath(os.path.expanduser(value("session_root")))
-        os.makedirs(root, exist_ok=True)
-        output = os.path.join(
-            root, datetime.now().strftime("%Y%m%d_%H%M%S_mppi_demo"))
+    recording = value("record").lower() in ("1", "true", "yes")
+    manifest_path = value("recording_manifest_path")
+    if recording or manifest_path:
+        if recording:
+            root = os.path.abspath(os.path.expanduser(value("session_root")))
+            os.makedirs(root, exist_ok=True)
+            output = os.path.join(
+                root, datetime.now().strftime("%Y%m%d_%H%M%S_mppi_demo"))
+        else:
+            output = str(Path(manifest_path).expanduser().resolve().parent / "robot_bag")
         manifest = {
             "schema_version": 1,
             "bag_output": output,
@@ -459,13 +426,14 @@ def _setup(context, *_args, **_kwargs):
                 selection.compatibility_alias),
             "installed_packages": _installed_package_identity(),
         }
-        with open(output + "_manifest.json", "x", encoding="utf-8") as stream:
+        with open(manifest_path or output + "_manifest.json", "x", encoding="utf-8") as stream:
             json.dump(manifest, stream, indent=2, sort_keys=True)
             stream.write("\n")
-        actions.append(ExecuteProcess(
-            cmd=["ros2", "bag", "record", "--include-hidden-topics",
-                 "-o", output, *RECORD_TOPICS],
-            output="screen"))
+        if recording:
+            actions.append(ExecuteProcess(
+                cmd=["ros2", "bag", "record", "--include-hidden-topics",
+                     "-o", output, *RECORD_TOPICS],
+                output="screen"))
     return actions
 
 
@@ -701,6 +669,9 @@ def generate_launch_description():
             description=(
                 "Record the complete hardware control path and response trace. "
                 "Set false only for a deliberate non-recorded run.")),
+        DeclareLaunchArgument(
+            "recording_manifest_path", default_value="",
+            description="Explicit identity-manifest path for coordinated recording."),
         DeclareLaunchArgument(
             "session_root",
             default_value=(

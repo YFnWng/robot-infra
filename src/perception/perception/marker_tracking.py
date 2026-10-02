@@ -674,6 +674,11 @@ class MarkerTrackingNode(Node):
             values)
 
     def _publish_diagnostic(self, level: int, message: str, values: dict):
+        values = dict(values)
+        values.update({
+            "recording_active": str(self.recording_active).lower(),
+            "recording_session_dir": str(self.recording_session_dir or ""),
+        })
         report = DiagnosticArray()
         report.header.stamp = self.get_clock().now().to_msg()
         status = DiagnosticStatus()

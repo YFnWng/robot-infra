@@ -81,6 +81,12 @@ experiments/
 └── identification.py          # continuous identification schedules
 ```
 
+Research recording additionally uses `recording_session.py` for descriptive
+session allocation/finalized evidence and `session_recording.py` for owned
+process lifecycle and recording readiness. It owns no motor command surface.
+`bringup/research_session.launch.py` defines process composition; reusable
+control task clients remain in `control_tasks`.
+
 The package depends only on its declared functional dependencies. Launch
 composition belongs to `bringup`; runtime supervision is independently owned.
 Controller task clients are owned by the standalone `control_tasks` package.

@@ -2,13 +2,33 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from builtin_interfaces.msg import Time
+from diagnostic_msgs.msg import DiagnosticStatus
 
 from perception.marker_tracking import (
+    MarkerTrackingNode,
     encode_preview_frames,
     load_live_camera_config,
     marker_point_cloud,
     rig_liveness_values,
 )
+
+
+def test_diagnostics_report_owned_recording_readiness_without_mutating_input():
+    messages = []
+    node = SimpleNamespace(
+        recording_active=True, recording_session_dir=Path("/tmp/descriptive_video"),
+        cameras={"primary": object(), "oblique": object()},
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(to_msg=Time)),
+        diagnostic_publisher=SimpleNamespace(publish=messages.append),
+    )
+    values = {"accepted_frames": "4"}
+    MarkerTrackingNode._publish_diagnostic(node, DiagnosticStatus.OK, "TRACKING", values)
+    report = {item.key: item.value for item in messages[0].status[0].values}
+    assert report["recording_active"] == "true"
+    assert report["recording_session_dir"] == "/tmp/descriptive_video"
+    assert values == {"accepted_frames": "4"}
 
 
 def test_preview_encoding_is_decimated_and_timestamped():
