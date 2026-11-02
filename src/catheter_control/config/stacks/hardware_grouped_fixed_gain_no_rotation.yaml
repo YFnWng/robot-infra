@@ -1,0 +1,12 @@
+schema_version: 1
+name: hardware.grouped_fixed_gain.no_rotation
+node_name: catheter_mppi
+description: Grouped MPPI with take-up and fixed gain.
+layers:
+  controller:
+  - controller/base.yaml
+  - controller/modes/grouped_fixed_gain.yaml
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/sparse_points/grouped_fixed_gain.yaml
+compatibility_aliases: []

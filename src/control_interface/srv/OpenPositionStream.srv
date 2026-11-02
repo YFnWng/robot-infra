@@ -1,0 +1,6 @@
+# Manager-only guarded session opening; never initiates motion.
+string source
+---
+bool success
+uint32 session_id
+string message

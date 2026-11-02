@@ -39,6 +39,24 @@ def test_missing_selection_fails_closed():
         resolve_model_selection("")
 
 
+def test_experimental_pair_is_explicit_and_does_not_load_cuda_in_parent(monkeypatch):
+    from types import SimpleNamespace
+    from catheter_control.orchestration import runtime
+    calls=[]
+    bundle=SimpleNamespace(identity=SimpleNamespace(runtime_family='experimental_joint_engagement'),
+                           runtime=SimpleNamespace(command_capable=True))
+    def load(*args,**kwargs):
+        calls.append(kwargs)
+        return bundle
+    monkeypatch.setattr(runtime,'load_runtime',load)
+    with pytest.raises(ValueError,match='engagement_control_enabled'):
+        runtime.load_runtime_pair('manifest',estimator_device='cpu',planner_device='cuda')
+    calls.clear()
+    a,b=runtime.load_runtime_pair('manifest',estimator_device='cpu',planner_device='cuda',
+        experimental_engagement=True,options={'baseline_only_option':True})
+    assert a is b and len(calls)==1 and calls[0]['options']=={}
+
+
 def test_runtime_pair_reuses_same_device_and_checks_split_identity(monkeypatch):
     from types import SimpleNamespace
     from catheter_control.orchestration import runtime

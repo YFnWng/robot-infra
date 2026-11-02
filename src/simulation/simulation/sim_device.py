@@ -11,6 +11,13 @@ from control_interface.srv import DeviceCmd
 from control_interface_py.command_freshness import validate_command_stamp
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 import numpy as np
+from pathlib import Path
+from ament_index_python.packages import get_package_prefix
+from control_interface_py.streamed_position import (
+    CAPABILITY, OPEN_SESSION, STREAM_COMMAND, STREAM_STATUS, PositionEnvelope,
+    STATUS_PAYLOAD, decode_status,
+)
+from control_interface_py.streamed_position_native import Config, NativePositionSession
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -29,6 +36,7 @@ class SimulatedDeviceNode(Node):
     def __init__(self):
         super().__init__("catheter_sim_device")
         self.declare_parameter("simulation_only", True)
+        self.declare_parameter('position_stream_enabled', False)
         self.declare_parameter("frame_id", "robot_base")
         self.declare_parameter("limits_file", "")
         self.declare_parameter("catheter", "imricor_test")
@@ -111,6 +119,23 @@ class SimulatedDeviceNode(Node):
         self._position_within_since = None
         self._position_mask = 0
         self._plant_reset_count = 0
+        self.position_stream = None
+        self._stream_active = False
+        self._stream_applied_rpm = [0]*6
+        self._stream_session_id = 0
+        self._stream_status_key = None
+        self._stream_status_time_ns = 0
+        if self.get_parameter('position_stream_enabled').value:
+            config = Config()
+            config.native_position = 1
+            for a in range(6):
+                config.lower[a], config.upper[a] = -2147483648, 2147483647
+                config.step[a], config.tolerance[a] = 8334, 67
+                config.minimum_rpm[a], config.maximum_rpm[a] = 1, 250
+            library = Path(get_package_prefix('control_interface'))/'lib/libcatheter_position_stream.so'
+            self.position_stream = NativePositionSession(library, config)
+            self._stream_native_targets = self.plant.encoder_counts.copy()
+            self._stream_applied_rpm = [0]*6
 
         motion_qos = QoSProfile(depth=1)
         motion_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -154,9 +179,42 @@ class SimulatedDeviceNode(Node):
     def _transport_ready(self):
         message = String()
         message.data = "SERIAL_READY:SIMULATED_V171"
+        if getattr(self, 'position_stream', None) is not None:
+            message.data += '|'+CAPABILITY
         self.transport_pub.publish(message)
 
     def _control_cb(self, message):
+        if message.predicate == STREAM_COMMAND:
+            with self._lock:
+                try:
+                    if self.position_stream is None:
+                        raise ValueError('simulated position stream disabled')
+                    envelope = PositionEnvelope.from_data(message.data)
+                    valid, reason, stamp_ns = validate_command_stamp(
+                        message, now_ns=self.get_clock().now().nanoseconds,
+                        last_stamp_ns=self._last_stamp_ns,
+                        maximum_age_s=float(self.get_parameter('command_max_age_s').value),
+                        future_tolerance_s=float(self.get_parameter('command_future_tolerance_s').value))
+                    if not valid:
+                        raise ValueError(reason)
+                    envelope = PositionEnvelope(envelope.session_id,
+                        envelope.remaining_us-max(0, (self.get_clock().now().nanoseconds-stamp_ns)//1000),
+                        envelope.command)
+                    if not self.contract.position_is_valid(
+                            self.contract.encoder_counts_to_logical_position(envelope.command.target_counts)):
+                        raise ValueError('simulated streamed endpoint outside hard limits')
+                    result = self.position_stream.submit(envelope,
+                        self.get_clock().now().nanoseconds//1000,
+                        [int(x) for x in self.plant.encoder_counts])
+                    if result not in (0, 1):
+                        raise ValueError(f'simulated endpoint admission failed: {result}')
+                    self._stream_active = True
+                    self._last_arrival, self._last_stamp_ns = time.monotonic(), stamp_ns
+                except ValueError as error:
+                    self._cancel_position()
+                    self.plant.stop()
+                    self.get_logger().error(str(error))
+            return
         expected = {DeviceStream.VEL: 6, DeviceStream.POS: 12}
         if (message.predicate not in expected
                 or len(message.data) != expected[message.predicate]
@@ -234,6 +292,10 @@ class SimulatedDeviceNode(Node):
                 self._last_stamp_ns = stamp_ns
 
     def _cancel_position(self):
+        if getattr(self, 'position_stream', None) is not None:
+            self.position_stream.cancel()
+        self._stream_active = False
+        self._stream_applied_rpm = [0]*6
         self._position_target = None
         self._position_speed = None
         self._position_active = False
@@ -259,9 +321,31 @@ class SimulatedDeviceNode(Node):
             *[float(value) for value in error]]
         self.event_pub.publish(message)
 
+    def _apply_native_stream_update(self, update):
+        for a in range(6):
+            if update.stop_mask & (1 << a):
+                self._stream_applied_rpm[a] = 0
+            if update.native_start_mask & (1 << a):
+                sign = 1 if update.rpm[a] > 0 else -1
+                self._stream_native_targets[a] = self.plant.encoder_counts[a]+sign*update.native_deci_degrees[a]/.45
+                self._stream_applied_rpm[a] = update.rpm[a]
+        if update.native_start_mask:
+            self.position_stream.native_started(update.native_start_mask)
+        self.plant.set_native_position(self._stream_native_targets, self._stream_applied_rpm)
+
     def _device_command_cb(self, request, response):
         predicate = int(request.predicate)
-        if predicate == ManagerEvent.SET_ZERO:
+        if predicate == OPEN_SESSION:
+            with self._lock:
+                session = (self.position_stream.open(
+                    not self._position_active and not np.any(self.plant.requested_velocity),
+                    int(request.data[0]) if len(request.data) == 1 else 0)
+                           if self.position_stream is not None else 0)
+                self._stream_session_id = session
+                self._stream_active = False
+            response.success = bool(session)
+            response.response = f'STREAM_SESSION:{session}' if session else 'ERR_STREAM_NOT_READY'
+        elif predicate == ManagerEvent.SET_ZERO:
             response.success = False
             response.response = "SET_ZERO_FORBIDDEN"
         elif predicate == ManagerEvent.CONNECTION:
@@ -322,6 +406,27 @@ class SimulatedDeviceNode(Node):
                 int(self.get_clock().now().nanoseconds))
             integration_step_s = (
                 timestamp_ns-self.plant.timestamp_ns) * 1e-9
+            if getattr(self, 'position_stream', None) is not None:
+                applied = np.rint(self.plant.last_projection.motor_radians_per_second/(2*np.pi/60)).astype(int)
+                if getattr(self, '_stream_active', False):
+                    applied = np.asarray(self._stream_applied_rpm, dtype=int)
+                update = self.position_stream.update(timestamp_ns//1000,
+                    [int(x) for x in self.plant.encoder_counts], applied.tolist())
+            if getattr(self, '_stream_active', False):
+                self._apply_native_stream_update(update)
+                reported_status = 12 if update.native_start_mask else update.status
+                key = (update.command_id, reported_status)
+                if key != self._stream_status_key or timestamp_ns-self._stream_status_time_ns >= 50000000:
+                    event = DeviceEvent()
+                    event.header.stamp = self.get_clock().now().to_msg()
+                    event.predicate = STREAM_STATUS
+                    event.text, event.data = decode_status(STATUS_PAYLOAD.pack(
+                        self._stream_session_id, update.command_id, (timestamp_ns//1000)&0xffffffff,
+                        (self.plant.timestamp_ns//1000)&0xffffffff,
+                        reported_status, update.reversal_mask | update.overshoot_mask,
+                        *[int(x) for x in self.plant.encoder_counts], *applied.tolist()))
+                    self.event_pub.publish(event)
+                    self._stream_status_key, self._stream_status_time_ns = key, timestamp_ns
             if (self._last_arrival is not None
                     and time.monotonic()-self._last_arrival > self.timeout_s
                     and np.any(self.plant.requested_velocity != 0.0)):

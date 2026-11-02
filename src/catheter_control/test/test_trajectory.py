@@ -62,3 +62,30 @@ def test_invalid_trajectory_is_rejected(waypoints, timeouts):
     with pytest.raises(ValueError):
         TrajectorySequencer(
             waypoints, timeouts, tolerance_mm=.5, settle_time_s=0.1)
+
+
+def test_pause_resets_settling_but_does_not_extend_wall_timeout():
+    sequence = TrajectorySequencer([[0, 0, 0]], [1.], tolerance_mm=.5, settle_time_s=.2)
+    sequence.start(0.)
+    sequence.update([0, 0, 0], .1)
+    held = sequence.update([0, 0, 0], .3, external_hold=True)
+    assert not held.complete and not held.within_tolerance
+    assert not sequence.update([0, 0, 0], .4).complete
+    assert sequence.update([0, 0, 0], .61).complete
+    sequence = TrajectorySequencer([[0, 0, 0]], [1.], tolerance_mm=.5, settle_time_s=.2)
+    sequence.start(0.)
+    expired = sequence.update([0, 0, 0], 1., external_hold=True)
+    assert expired.complete and expired.timed_out_waypoints == 1
+
+
+def test_adapj_response_wait_does_not_reset_geometric_settling():
+    from catheter_control.safety.lifecycle import controller_motion_held
+    sequence = TrajectorySequencer([[0, 0, 0]], [1.], tolerance_mm=.5, settle_time_s=.25)
+    sequence.start(0.)
+    for t, reason in [(0., "active"), (.1, "adapj_response_hold"),
+                      (.2, "active"), (.3, "adapj_response_hold")]:
+        result = sequence.update([0, 0, 0], t,
+                                 external_hold=controller_motion_held(reason))
+    assert result.complete and result.reached_waypoints == 1
+    assert controller_motion_held("takeup_active")
+    assert controller_motion_held("takeup_confirmation_hold")

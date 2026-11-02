@@ -19,6 +19,107 @@ ROOT = Path(__file__).resolve().parents[2]
 LIMITS = ROOT / "control_interface" / "config" / "catheter_limits.yaml"
 
 
+@pytest.mark.parametrize("temperature", [0.0, -0.3, float("nan"), float("inf")])
+def test_temperature_requires_positive_finite_value(temperature):
+    with pytest.raises(ValueError, match="temperature"):
+        MppiConfig(temperature=temperature)
+
+
+def test_temperature_default_and_trial_value():
+    assert MppiConfig().temperature == 1.0
+    assert MppiConfig(temperature=0.3).temperature == 0.3
+
+
+@pytest.mark.parametrize("path_target", [False, True])
+def test_point_execution_rejects_deferred_motion_but_preserves_timed_paths(
+        contract, monkeypatch, path_target):
+    class RankedRollout(LinearRollout):
+        def predict_sequence(self, state, rates, dt):
+            # Delayed candidate has the best endpoint; immediate motion is
+            # second best; genuine hold remains a valid fallback.
+            tips = torch.zeros(3, 4, 3)
+            tips[0, :, 0] = .010
+            tips[2, :, 0] = .005
+            return SimpleNamespace(tip_base_m=tips,
+                                   markers_base_m=tips[..., None, :].repeat(1, 1, 4, 1))
+
+    planner = CatheterMppi(RankedRollout(), contract, config(
+        samples=3, horizon_steps=4, grouped_mode_sampling=False))
+    samples = np.zeros((3, 4, 3))
+    samples[1, 1:, 2] = 4.0
+    samples[2, :, 2] = 4.0
+    monkeypatch.setattr(planner, '_samples', lambda: samples.copy())
+    attribution = []
+    result = planner.plan(object(), [20, 0, 7, 0, 0, 0], [0, 0, 0],
+        target_tangent_base=[0, 1, 0] if path_target else None,
+        candidate_diagnostics=attribution.append)
+    assert result.valid, result.reason
+    assert result.selected_candidate_index == (1 if path_target else 2)
+    assert attribution[0]['deferred_motion'].tolist() == (
+        [False, False, False] if path_target else [False, True, False])
+    assert attribution[0]['eligible'][0]
+    if not path_target:
+        assert np.any(result.command_logical_velocity)
+
+
+def test_guard_executes_exact_scored_minimum_speed_command(contract, monkeypatch):
+    minimum = contract.velocity_min.copy()
+    minimum[2] = 2.0
+    planner = CatheterMppi(LinearRollout(),
+        replace(contract, velocity_min=minimum), config(
+            samples=2, horizon_steps=4, grouped_mode_sampling=False))
+    samples = np.zeros((2, 4, 3))
+    samples[1, :, 2] = 2.0
+    monkeypatch.setattr(planner, '_samples', lambda: samples.copy())
+    attribution = []
+    plan = planner.plan(object(), [20, 0, 7, 0, 0, 0], [.010, 0, 0],
+                        candidate_diagnostics=attribution.append)
+    assert plan.valid and plan.selected_candidate_index == 1
+    assert plan.command_logical_velocity[2] == pytest.approx(2.0)
+    np.testing.assert_array_equal(plan.motor_radians_per_second_sequence,
+                                  attribution[0]['motor_rates'][1])
+    projected = contract.project_velocity(plan.command_logical_velocity,
+                                          [20, 0, 7, 0, 0, 0])
+    np.testing.assert_array_equal(projected.motor_radians_per_second,
+                                  plan.motor_radians_per_second_sequence[0])
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("samples", [8, 32])
+def test_previous_sequence_survives_shift_and_worker_memory(contract, grouped, samples):
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        samples=samples, horizon_steps=4, grouped_mode_sampling=grouped))
+    # Recorded event: shifting 2.0 -> 3.36 mm/s promotes a later high-speed
+    # pull into the guarded first step. Retain the lower-speed alternative.
+    previous = np.array([[2., 0., 2.], [3.36, 0., 3.36],
+                         [0., 0., 0.], [2.187, 0., 2.187]])
+    planner._previous_sequence = previous.copy()
+    planner._nominal[:] = np.concatenate((previous[1:], previous[-1:]))
+    worker = CatheterMppi(LinearRollout(), contract, planner.config)
+    worker.restore_execution_memory(planner.execution_memory())
+    candidates, labels, _ = worker._grouped_candidates(np.array([1, 0, -1]))
+    matches = np.all(np.isclose(candidates, previous), axis=(1, 2))
+    assert np.count_nonzero(matches) == 1
+    assert labels[matches].tolist() == [0]
+    planner._previous_sequence.fill(9.)
+    np.testing.assert_array_equal(worker._previous_sequence, previous)
+    worker.reset_capture_target()
+    assert worker._previous_sequence is None
+    worker._previous_sequence = previous.copy()
+    worker.reset()
+    assert worker._previous_sequence is None
+
+
+def test_successful_solve_retains_unshifted_executable_sequence(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(samples=16))
+    plan = planner.plan(object(), [20, 0, 7, 0, 0, 0], [.01, 0, 0])
+    assert plan.valid, plan.reason
+    np.testing.assert_array_equal(planner._previous_sequence,
+                                  plan.logical_velocity_sequence[:, :3])
+    np.testing.assert_array_equal(planner.nominal_sequence[:-1],
+                                  planner._previous_sequence[1:])
+
+
 class LinearRollout:
     """Tiny differentiable-shape stand-in for the streaming runtime."""
 
@@ -44,6 +145,33 @@ def config(**changes):
     return MppiConfig(**values)
 
 
+def test_tip_readout_anchor_preserves_candidate_motion(contract):
+    ledgers = []
+    offset = np.array([.0004, -.0002, .0001])
+    for shift in (None, offset):
+        planner = CatheterMppi(LinearRollout(), contract, config(samples=32))
+        evidence = []
+        result = planner.plan(object(), [20, 0, 7, 0, 0, 0], [.004, 0, 0],
+            tip_readout_offset_m=shift, candidate_diagnostics=evidence.append)
+        assert result.valid, result.reason
+        ledgers.append(evidence[0]['predicted_tip_sequence_m'])
+    np.testing.assert_allclose(ledgers[1]-ledgers[0],
+        np.broadcast_to(offset, ledgers[0].shape), atol=1e-9)
+    np.testing.assert_allclose(ledgers[1][1:]-ledgers[1][0],
+        ledgers[0][1:]-ledgers[0][0], atol=1e-9)
+
+
+def test_tip_readout_anchor_rejects_nonfinite_and_marker_objectives(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(samples=32))
+    with pytest.raises(ValueError, match='tip_readout_offset_m'):
+        planner.plan(object(), [20, 0, 7, 0, 0, 0], [0, 0, 0],
+                     tip_readout_offset_m=[float('nan'), 0, 0])
+    with pytest.raises(ValueError, match='marker targets'):
+        planner.plan(object(), [20, 0, 7, 0, 0, 0], [0, 0, 0],
+                     tip_readout_offset_m=[0, 0, 0],
+                     target_markers_base_m=np.zeros((4, 3)))
+
+
 def test_batch_projection_exactly_matches_scalar_contract(contract):
     rng = np.random.default_rng(4)
     requested = rng.uniform(-50, 50, (9, 6))
@@ -57,6 +185,20 @@ def test_batch_projection_exactly_matches_scalar_contract(contract):
         assert batch.motor_rpm[index] == pytest.approx(scalar.motor_rpm)
         assert batch.motor_radians_per_second[index] == pytest.approx(
             scalar.motor_radians_per_second)
+
+
+def test_synchronized_rotation_is_in_planner_rollout_not_post_plan(contract):
+    local = replace(contract, synchronized_sheath_rotation=True)
+    planner = CatheterMppi(LinearRollout(), local, config(samples=32))
+    requests = np.zeros((2, 4, 3))
+    requests[0, :, 1] = 10.
+    requests[1, :, 1] = -10.
+    logical, realized, motor, cost, *_ = planner._project(requests, np.array([20., 0., 7., 40., 0., 0.]))
+    assert logical[..., 1] == pytest.approx(logical[..., 4])
+    assert logical[..., 5] == pytest.approx(-logical[..., 1])
+    assert motor[..., 1] == pytest.approx(motor[..., 4])
+    assert motor[..., 5] == pytest.approx(np.zeros((2, 4)))
+    assert np.max(cost) < .001  # quantization only, not intentional sheath coupling
 
 
 def test_planner_moves_toward_tip_target_and_pads_unused_axes(contract):
@@ -78,6 +220,23 @@ def test_planner_moves_toward_tip_target_and_pads_unused_axes(contract):
     assert all(value >= 0.0 for value in (
         plan.sample_projection_ms, plan.rollout_ms,
         plan.cost_weighting_ms, plan.update_projection_ms))
+
+
+def test_scalar_x_cost_ignores_yz_and_penalizes_x_in_both_directions():
+    tips = torch.tensor([[[.003, .2, -.4], [-.003, -.7, .9], [0, .8, .6]]])
+    target = torch.zeros((3, 3))
+    tangent = torch.tensor([[1., 0, 0]]*3)
+    assert _tip_tracking_error_squared(tips, target, tangent, x_only=True).tolist() == [[9, 9, 0]]
+    assert _tip_tracking_error_squared(tips, target, None, x_only=True).tolist() == [[9, 9, 0]]
+
+
+def test_xz_cost_holds_z_ignores_y_and_penalizes_x_overshoot():
+    tips = torch.tensor([[[.003, .2, .004], [-.003, -.7, -.004]]])
+    target = torch.zeros((2, 3))
+    tangent = torch.tensor([[1., 0, 0]]*2)
+    torch.testing.assert_close(
+        _tip_tracking_error_squared(tips, target, tangent, xz_only=True),
+        torch.tensor([[25., 25.]]))
 
 
 def test_path_corridor_penalizes_lag_but_not_forward_overshoot():
@@ -151,6 +310,40 @@ def test_sparse_target_preview_rejects_rotation(contract):
             [[0.0, 1.0, 2.0]], 25, [1, 0, .5, 0, 0, 0])
 
 
+def test_engaged_shape_preview_does_not_reserve_broad_takeup_prior(contract):
+    minimum, maximum = contract.velocity_min.copy(), contract.velocity_max.copy()
+    minimum[1] = maximum[1] = 0.0
+    planner = CatheterMppi(LinearRollout(),
+        replace(contract, velocity_min=minimum, velocity_max=maximum),
+        config(step_s=.04, samples=32))
+    snapshot = BacklashSnapshot(
+        width_rad=np.array([0., 0., 77.]),
+        width_positive_rad=np.array([0., 0., 77.]),
+        width_negative_rad=np.array([0., 0., 77.]),
+        remaining_rad=np.array([0., 0., 77.]),
+        motion_direction=np.zeros(3, dtype=np.int8),
+        engaged_direction=np.zeros(3, dtype=np.int8),
+        confidence=np.zeros(3), confirmation_count=np.zeros(3, dtype=np.int32),
+        phase=("UNKNOWN",)*3)
+    args = (object(), [20, 0, 0, 40, 0, 0], [.01, .02, .03],
+            [[3., 0., 2.]], 25, [2., 0., .5, 0., 0., 0.])
+    with pytest.raises(ValueError, match="lacks joint reserve"):
+        planner.predict_sparse_targets(*args, transmission_state=snapshot)
+
+    preview = planner.predict_sparse_targets(
+        *args, transmission_state=snapshot, reserve_takeup=False)
+    np.testing.assert_allclose(preview.takeup_joint_position_offset, 0.)
+    np.testing.assert_allclose(preview.endpoint_joint_position[0, :3],
+                               [23., 0., 2.], atol=.02)
+    reference = planner.predict_sparse_targets(*args, reserve_takeup=False)
+    np.testing.assert_allclose(preview.target_tip_m, reference.target_tip_m)
+    # The preview switch does not change the live planner's reserve calculation.
+    offset, _ = planner._takeup_position_offsets(
+        np.array([[1, 0, -1]], dtype=np.int8), np.zeros(3, dtype=np.int8), snapshot)
+    assert offset[0, 2] > 14.
+    assert snapshot.width_rad[2] == 77.
+
+
 def test_sparse_target_reserve_ignores_inactive_axis_at_boundary(contract):
     minimum = contract.velocity_min.copy()
     maximum = contract.velocity_max.copy()
@@ -169,6 +362,22 @@ def test_sparse_target_reserve_ignores_inactive_axis_at_boundary(contract):
     assert preview.endpoint_joint_position[0, 2] == pytest.approx(
         contract.control_position_lower[2])
     assert preview.realized_logical_displacement[0, 2] == 0.0
+
+
+def test_g5_preview_accepts_projected_endpoint_without_extra_reserve(contract):
+    minimum, maximum = contract.velocity_min.copy(), contract.velocity_max.copy()
+    minimum[1] = maximum[1] = 0.0
+    local = replace(contract, velocity_min=minimum, velocity_max=maximum)
+    planner = CatheterMppi(LinearRollout(), local, config(step_s=.04, samples=32))
+    args = (object(), [20, 0, 14, 40, 0, 0], [.01, .02, .03],
+            [[0., 0., 3.]], 25, [2., 0., .5, 0., 0., 0.])
+    with pytest.raises(ValueError, match="lacks joint reserve"):
+        planner.predict_sparse_targets(*args, reserve_takeup=False)
+    preview = planner.predict_sparse_targets(
+        *args, reserve_takeup=False, enforce_endpoint_reserve=False)
+    assert preview.endpoint_joint_position[0, 2] <= local.position_upper[2]
+    assert preview.endpoint_joint_position[0, 2] > local.control_position_upper[2]-.5
+    assert preview.realized_logical_displacement[0, 2] < 3.
 
 
 def test_sparse_target_preview_resolves_tolerance_qualified_inactive_axis(
@@ -352,7 +561,8 @@ def test_legacy_direction_lease_selects_complete_scored_continue_plan(
         approved_reversal_direction=np.array([0, -1, 0], dtype=np.int8))
     assert not approved.direction_lease_applied
     assert approved.command_logical_velocity[1] < 0.0
-    assert backend.batch_sizes == [cfg.samples, cfg.samples]
+    # Subsequent solves add one re-scored unshifted executable proposal.
+    assert backend.batch_sizes == [cfg.samples, cfg.samples + 1]
 
 
 def test_grouped_mode_selects_global_complete_plan_without_scheduler_veto(
@@ -408,7 +618,7 @@ def test_grouped_mode_prices_one_risk_adjusted_takeup_transaction(contract):
             return SimpleNamespace(tip_base_m=tips, markers_base_m=None)
 
     cfg = config(
-        horizon_steps=1, samples=10,
+        horizon_steps=1, step_s=0.4, samples=10,
         tip_weight=1.0, terminal_weight=1.0, slew_weight=0.0,
         takeup_risk_weight=4.0, takeup_confirmation_time_s=0.10,
         boundary_weight=0.0, best_candidate_guard=True,
@@ -482,10 +692,60 @@ def test_grouped_candidates_partition_full_population_without_duplication(
     assert np.bincount(labels, minlength=3).tolist() == [10, 0, 10]
     # Positive rotation is valid in both unconstrained and +continue groups.
     # Excluding the appended deterministic probes, every configured random
-    # sample still occurs exactly once.
+    # rate-bounded sample still occurs exactly once (rotation floor is 7).
     np.testing.assert_array_equal(
         np.sort(grouped[~planner._last_tendon_probe_mask, 0, 1]),
-        np.arange(1.0, 17.0))
+        np.maximum(np.arange(1.0, 17.0), contract.velocity_min[1]))
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_takeup_prices_rate_bounded_physical_chassis_direction(contract, sign):
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        horizon_steps=1, samples=2, grouped_mode_sampling=False))
+    requested = np.zeros((2, 1, 3))
+    requested[1, 0] = sign*np.array([11.0, 0.0, 12.0])
+    # Before logical limits, chassis=11-12 has the opposite direction.
+    assert planner._first_physical_direction(requested)[0][1, 0] == -sign
+    planner._samples = lambda rotation_lock_direction=0: requested.copy()
+    snapshot = BacklashSnapshot(
+        width_rad=np.ones(3), width_positive_rad=np.ones(3),
+        width_negative_rad=np.ones(3), remaining_rad=np.zeros(3),
+        motion_direction=np.array([-sign, 0, -sign], dtype=np.int8),
+        engaged_direction=np.array([-sign, 0, -sign], dtype=np.int8),
+        confidence=np.ones(3), confirmation_count=np.ones(3, dtype=np.int32),
+        phase=("ENGAGED", "UNKNOWN", "ENGAGED"))
+    rows = []
+    planner.plan(object(), [20, 0, 7, 0, 0, 0], [.001, 0, 0],
+                 direction_lease=np.array([-sign, 0, -sign], dtype=np.int8),
+                 takeup_motor_radians_per_second=np.array([8.0, 40.0, 4.5]),
+                 transmission_state=snapshot, candidate_diagnostics=rows.append)
+    row = rows[0]
+    assert row["first_physical_direction"][1, 0] == sign
+    assert row["realized_first_physical_direction"][1, 0] == sign
+    assert row["raw_takeup_risk_s"][1] > 0
+    assert row["takeup_position_offset"][1, 0]*sign > 0
+
+
+def test_grouped_sampling_uses_confirmed_direction_without_scheduler(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        horizon_steps=1, samples=16, grouped_mode_sampling=True))
+    snapshot = BacklashSnapshot(
+        width_rad=np.ones(3), width_positive_rad=np.ones(3),
+        width_negative_rad=np.ones(3), remaining_rad=np.zeros(3),
+        motion_direction=np.array([-1, 0, -1], dtype=np.int8),
+        engaged_direction=np.array([-1, 0, -1], dtype=np.int8),
+        confidence=np.ones(3), confirmation_count=np.ones(3, dtype=np.int32),
+        phase=("ENGAGED", "UNKNOWN", "ENGAGED"))
+    rows = []
+    plan = planner.plan(
+        object(), [20, 0, 7, 0, 0, 0], [.001, 0, 0],
+        transmission_state=snapshot, candidate_diagnostics=rows.append)
+    assert plan.proposal_group_count == 4
+    row = rows[0]
+    eligible = row["eligible"]
+    actual = row["realized_first_physical_direction"][eligible]
+    priced = row["first_physical_direction"][eligible]
+    assert np.all((actual == 0) | (actual == priced))
 
 
 def test_axis2_continue_group_uses_physical_shaft_sign(contract):
@@ -773,6 +1033,100 @@ def test_signed_actuator_basis_candidates_are_always_present(contract):
         assert samples[candidate] == pytest.approx(expected)
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("lease", [-1, 0, 1])
+def test_expanded_samples_cover_shaft_holds_and_full_speed_range(contract, grouped, lease):
+    maximum = contract.velocity_max.copy()
+    maximum[:3] = [10.0, 0.0, 4.5]
+    minimum = contract.velocity_min.copy()
+    minimum[:3] = [2.0, 0.0, 2.0]
+    planner = CatheterMppi(LinearRollout(), replace(
+        contract, velocity_max=maximum, velocity_min=minimum), config(
+            samples=512, grouped_mode_sampling=grouped))
+    samples, _, _ = planner._grouped_candidates(np.array([lease, 0, 0]))
+    physical = samples.copy()
+    physical[..., 0] -= physical[..., 2]
+    assert len(samples) == (512 + (4 if lease else 2) if grouped else 512)
+    assert np.all(samples[..., 1] == 0.0)
+    for axis in (0, 2):
+        others = [other for other in range(3) if other != axis]
+        for speed in (minimum[axis], (minimum[axis] + maximum[axis]) / 2,
+                      maximum[axis]):
+            for sign in (-1, 1):
+                independent = (np.all(physical[..., others] == 0.0, axis=(1, 2))
+                               & np.all(physical[..., axis] == sign * speed, axis=1))
+                assert np.any(independent), (axis, sign, speed)
+
+
+def test_expanded_samples_keep_budget_legacy_slots_and_dense_noise(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(samples=192))
+    planner._nominal[:] = [3.0, 0.0, 1.0]
+    samples = planner._samples()
+    assert samples.shape == (192, 6, 3)
+    np.testing.assert_array_equal(samples[0], 0.0)
+    np.testing.assert_array_equal(samples[1], planner.nominal_sequence)
+    # Odd stochastic rows beyond all reserved probes retain dense exploration;
+    # even rows span exact physical holds irrespective of engagement history.
+    physical = samples.copy()
+    physical[..., 0] -= physical[..., 2]
+    assert np.all(np.any(physical[43::2] != 0.0, axis=1))
+    assert np.any(np.all(physical[42::2, :, 2] == 0.0, axis=1))
+    assert np.any(np.all(physical[42::2, :, 0] == 0.0, axis=1))
+
+
+@pytest.mark.parametrize('grouped', [False, True])
+def test_temporal_shaft_holds_cover_pauses_without_internal_reversal(contract, grouped):
+    maximum = contract.velocity_max.copy()
+    maximum[:3] = [10., 0., 4.5]
+    minimum = contract.velocity_min.copy()
+    minimum[:3] = [2., 0., 2.]
+    local = replace(contract, velocity_max=maximum, velocity_min=minimum)
+    cfg = config(samples=512, horizon_steps=12, grouped_mode_sampling=grouped)
+    planner = CatheterMppi(LinearRollout(), local, cfg)
+    twin = CatheterMppi(LinearRollout(), local, cfg)
+    samples, labels, groups = planner._grouped_candidates(np.array([-1, 0, 1]))
+    repeated, _, _ = twin._grouped_candidates(np.array([-1, 0, 1]))
+    np.testing.assert_array_equal(samples, repeated)
+    physical = samples.copy()
+    physical[..., 0] -= physical[..., 2]
+    _, reverse = planner._first_physical_direction(samples)
+    for sign in (-1, 1):
+        pulse = ((np.sign(physical[:, 0, 2]) == sign)
+                 & (physical[:, -1, 2] == 0.)
+                 & np.any(physical[:, :, 2] == 0., axis=1)
+                 & ~np.any(reverse, axis=1))
+        assert np.any(pulse & (labels == 0)), (grouped, sign)
+    assert np.all(samples[..., 1] == 0.)
+    assert np.all(np.abs(samples[..., 2]) <= 4.5)
+    moving = samples[..., 2] != 0.
+    assert np.all(np.abs(samples[..., 2][moving]) >= 2.)
+    assert len(samples) == (518 if grouped else 512)
+
+
+def test_temporal_holds_preserve_knob_only_coupling_and_reserved_slots(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        samples=512, horizon_steps=12))
+    requested = np.zeros((512, 12, 3))
+    requested[..., 0] = requested[..., 2] = 3.
+    original = requested.copy()
+    planner._sample_temporal_shaft_holds(requested)
+    np.testing.assert_array_equal(requested[:24], original[:24])
+    # A stopped chassis remains stopped when the knob transitions to hold.
+    np.testing.assert_array_equal(requested[..., 0], requested[..., 2])
+    changed = np.any(requested != original, axis=(1, 2))
+    assert np.any(changed)
+    assert np.any(requested[changed, :, 2] == 0.)
+    assert np.any(requested[changed, :, 2] > 0.)
+
+
+def test_zero_exploration_budget_preserves_temporal_samples(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        samples=512, exploration_fraction=0.))
+    requested = np.ones((512, 6, 3))
+    planner._sample_temporal_shaft_holds(requested)
+    np.testing.assert_array_equal(requested, 1.)
+
+
 def test_planner_is_invariant_to_measured_takeup_state(contract):
     class RecordingRollout(LinearRollout):
         def __init__(self):
@@ -954,6 +1308,75 @@ def test_nonfinite_rollout_fails_closed(contract):
     assert plan.command_logical_velocity == pytest.approx(np.zeros(6))
 
 
+def test_repeat03_confirmed_short_gap_restores_tendon_intent(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(horizon_steps=4, step_s=.04))
+    prior = BacklashSnapshot(
+        width_rad=np.array([0., 0., 27.460940854549406]),
+        width_positive_rad=np.array([0., 0., 27.460940854549406]),
+        width_negative_rad=np.array([0., 0., 27.460940854549406]),
+        remaining_rad=np.zeros(3), motion_direction=np.array([1, 0, -1]),
+        engaged_direction=np.array([1, 0, -1]), confidence=np.ones(3),
+        confirmation_count=np.array([2, 0, 2]),
+        phase=("ENGAGED", "UNKNOWN", "ENGAGED"))
+    position = np.array([18.263317108, 0., 4.827538013, 40., 0., 0.])
+    requested = np.tile([-4.5, 0., -4.5], (1, 4, 1))
+    direction, _ = planner._first_physical_direction(requested)
+    offset, _ = planner._takeup_position_offsets(direction, prior.engaged_direction, prior)
+    assert planner._project(requested, position, initial_position_offset=offset)[-1][0]
+    # Same-direction first-response travel recorded at 25.81 s; no limit change.
+    learned = replace(prior, width_positive_rad=np.array([0., 0., 1.4639821765728485]))
+    offset, _ = planner._takeup_position_offsets(direction, learned.engaged_direction, learned)
+    projected = planner._project(requested, position, initial_position_offset=offset)
+    assert not projected[-1][0]
+    assert np.all(projected[2][0, :, 2] > 0.)
+    assert np.all(projected[2][0, :, 0] == 0.)  # Tendon-only physical action.
+
+
+def test_takeup_feasibility_uses_point_estimate_not_upper_bound(contract):
+    planner = CatheterMppi(LinearRollout(), contract, config(horizon_steps=4, step_s=.04))
+    snapshot = BacklashSnapshot(
+        width_rad=np.array([0., 0., 28.868268966674805]),
+        width_positive_rad=np.array([0., 0., 28.146562242507933]),
+        width_negative_rad=np.array([0., 0., 28.868268966674805]),
+        remaining_rad=np.zeros(3),
+        motion_direction=np.array([-1, 0, 1], dtype=np.int8),
+        engaged_direction=np.array([-1, 0, 1], dtype=np.int8),
+        confidence=np.array([.2, 0., .3]),
+        confirmation_count=np.array([3, 0, 3]),
+        phase=("ENGAGED", "UNKNOWN", "ENGAGED"),
+        width_negative_lower_rad=np.array([0., 0., 14.434134483337402]),
+        width_negative_upper_rad=np.array([0., 0., 43.30240345001221]))
+    direction = np.array([[0, 0, -1]], dtype=np.int8)
+    offset, travel = planner._takeup_position_offsets(
+        direction, snapshot.engaged_direction, snapshot)
+    assert offset[0, 2] == pytest.approx(5.470359548233007)
+    assert offset[0, 0] == pytest.approx(offset[0, 2])
+    assert travel[0, 2] == snapshot.width_negative_rad[2]
+    requested = np.tile([4.5, 0., 4.5], (1, 4, 1))
+    position = np.array([25.753047943, 0., 8.328570366, 40., 0., 0.])
+    projected = planner._project(requested, position, initial_position_offset=offset)
+    assert not projected[-1][0]
+    assert np.any(projected[2][0, :, 2] < 0)  # useful tendon motion survives
+    # Scoring retains the previous upper + low-confidence delay amount.
+    risk = travel + planner._takeup_uncertainty_extra_travel(direction, snapshot)
+    assert risk[0, 2] == pytest.approx(43.30240345001221+.7*(43.30240345001221-14.434134483337402))
+    wider = replace(snapshot, width_negative_upper_rad=np.array([0., 0., 80.]))
+    np.testing.assert_array_equal(planner._takeup_position_offsets(
+        direction, snapshot.engaged_direction, wider)[0], offset)
+    # A point estimate that actually exceeds the envelope is still rejected.
+    too_large = replace(snapshot, width_negative_rad=np.array([0., 0., 40.]))
+    large_offset, _ = planner._takeup_position_offsets(
+        direction, snapshot.engaged_direction, too_large)
+    assert planner._project(requested, position,
+                            initial_position_offset=large_offset)[-1][0]
+    # Same-direction active take-up reserves estimated remaining travel only.
+    active = replace(snapshot, phase=("ENGAGED", "UNKNOWN", "TAKEUP"),
+                     motion_direction=direction[0], remaining_rad=np.array([0., 0., 3.]),
+                     remaining_upper_rad=np.array([0., 0., 20.]))
+    _, remaining = planner._takeup_position_offsets(direction, direction[0], active)
+    assert remaining[0, 2] == 3.
+
+
 def test_uncertain_engagement_belief_penalizes_reversal(contract):
     planner = CatheterMppi(LinearRollout(), contract, config())
     snapshot = BacklashSnapshot(
@@ -971,10 +1394,10 @@ def test_uncertain_engagement_belief_penalizes_reversal(contract):
         width_negative_lower_rad=np.array([0.0, 0.5, 0.0]),
         width_negative_upper_rad=np.array([0.0, 4.0, 0.0]))
     directions = np.array([[0, 1, 0], [0, -1, 0]], dtype=np.int8)
-    extra = planner._takeup_low_confidence_extra_travel(
+    extra = planner._takeup_uncertainty_extra_travel(
         directions, snapshot)
     assert extra[0] == pytest.approx(np.zeros(3))
-    assert extra[1, 1] == pytest.approx(0.75*(4.0-0.5))
+    assert extra[1, 1] == pytest.approx((4.0-2.0)+0.75*(4.0-0.5))
     assert np.count_nonzero(extra[1]) == 1
 
 
@@ -1042,14 +1465,21 @@ def test_engaged_gain_first_step_cap_blocks_aggressive_candidates(contract):
         phase=("ENGAGED", "ENGAGED", "ENGAGED"), engaged_gain=gain)
     root = SimpleNamespace(lambda_value=torch.tensor(0.0))
 
+    ledgers = []
     plan = planner.plan(
         root, [20, 0, 7, 40, 0, 0], [0.002, 0, 0],
-        transmission_state=transmission)
+        transmission_state=transmission, candidate_diagnostics=ledgers.append)
 
     assert plan.valid
     assert plan.blocked_candidate_count > 0
     assert (plan.selected_maximum_first_step_lambda_shift
             <= planner.config.engaged_gain_maximum_first_step_shift)
+    ledger = ledgers[0]
+    np.testing.assert_array_equal(ledger['input_shift_rejected'],
+        ledger['first_step_lambda_shift'] > planner.config.engaged_gain_maximum_first_step_shift)
+    np.testing.assert_array_equal(ledger['eligible'],
+        ledger['eligible_before_input_guard'] & ~ledger['input_shift_rejected'])
+    assert np.isfinite(ledger['predicted_tip_sequence_m']).all()
 
 
 def test_point_capture_hold_is_scored_and_persists(contract):
@@ -1230,6 +1660,103 @@ def test_point_rollout_uses_exactly_four_coarse_steps_over_08_s(contract):
     assert plan.prediction_horizon_s == pytest.approx(0.80)
 
 
+@pytest.mark.parametrize("engaged", [False, True])
+def test_compensated_rollout_selection_reaches_backend(contract, engaged):
+    class Backend(DelayedTendonRollout):
+        def predict_control_sequence(self, state, rates, dt, **kwargs):
+            return super().predict_control_sequence(state, rates, dt, **kwargs)
+        def predict_control_sequence_coarse(self, state, rates, dt, **kwargs):
+            self.engaged = kwargs.pop("always_engaged", False)
+            return super().predict_control_sequence_coarse(state, rates, dt, **kwargs)
+    backend = Backend()
+    planner = CatheterMppi(backend, contract, config(
+        samples=16, point_rollout_coarse_steps=True,
+        always_engaged_rollout=engaged))
+    assert planner.plan(object(), [20, 0, 7, 40, 0, 0], [.004, 0, 0]).valid
+    assert backend.engaged is engaged
+
+
+def test_compensated_mppi_rejects_old_history_only_backend(contract):
+    class HistoryOnlyBackend:
+        def predict_sequence(self, state, rates, dt):
+            raise AssertionError("construction must reject this backend")
+    with pytest.raises(ValueError, match="updated model"):
+        CatheterMppi(HistoryOnlyBackend(), contract,
+                     config(always_engaged_rollout=True))
+
+
+@pytest.mark.parametrize("history_lambda", [-100.0, 100.0])
+@pytest.mark.parametrize("explicit_origin", [False, True])
+def test_engaged_input_cap_uses_registered_hold_not_history(contract, history_lambda,
+                                                          explicit_origin):
+    class Backend(GainScenarioRollout):
+        def predict_control_sequence(self, state, rates, dt, *,
+                                     distal_gain=None, always_engaged=False):
+            assert always_engaged is not explicit_origin
+            if distal_gain is None:
+                distal_gain = np.ones(len(rates))
+            result = super().predict_control_sequence(
+                state, rates, dt, distal_gain=distal_gain)
+            result.distal_lambda += 12.0  # Shape-derived registered origin.
+            if explicit_origin:
+                result.registered_root_lambda = torch.tensor(12.)
+            return result
+
+    planner = CatheterMppi(Backend(), contract, config(
+        samples=32, horizon_steps=4, always_engaged_rollout=not explicit_origin,
+        grouped_mode_sampling=False, best_candidate_guard=False,
+        engaged_gain_maximum_first_step_shift=1e-4))
+    plan = planner.plan(
+        SimpleNamespace(lambda_value=torch.tensor(history_lambda)),
+        [20, 0, 7, 40, 0, 0], [.002, 0, 0])
+    assert plan.valid
+    assert plan.blocked_candidate_count > 0
+    assert plan.selected_maximum_first_step_lambda_shift <= 1e-4
+    assert np.isfinite(plan.command_logical_velocity).all()
+
+
+def test_empty_final_eligibility_returns_invalid_hold(contract, monkeypatch):
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        samples=8, grouped_mode_sampling=False, best_candidate_guard=False,
+        capture_radius_mm=2.5))
+    original_project = planner._project
+
+    def block_hold(*args, **kwargs):
+        result = original_project(*args, **kwargs)
+        result[-1][0] = True
+        return result
+
+    # Point capture selects hold, but that candidate has failed another
+    # feasibility predicate. The final selection population must be checked.
+    requested = np.zeros((8, planner.config.horizon_steps, 3))
+    requested[1:, :, 0] = 4.0
+    planner._capture_hold_until_s = float("inf")
+    monkeypatch.setattr(planner, "_samples", lambda: requested.copy())
+    monkeypatch.setattr(planner, "_project", block_hold)
+    plan = planner.plan(object(), [20, 0, 7, 40, 0, 0], [.002, 0, 0])
+    assert not plan.valid
+    assert plan.reason == "no_eligible_candidate"
+    assert np.all(plan.command_logical_velocity == 0)
+    assert np.all(planner._nominal == 0)
+
+
+def test_nonfinite_weighted_command_returns_invalid_hold(contract, monkeypatch):
+    from catheter_control.planning import mppi
+    original_selection = mppi.weighted_selection
+
+    def invalid_selection(*args, **kwargs):
+        best, weights, tips, command = original_selection(*args, **kwargs)
+        return best, weights, tips, torch.full_like(command, float("nan"))
+
+    monkeypatch.setattr(mppi, "weighted_selection", invalid_selection)
+    planner = CatheterMppi(LinearRollout(), contract, config(
+        samples=8, grouped_mode_sampling=False, best_candidate_guard=False))
+    plan = planner.plan(object(), [20, 0, 7, 40, 0, 0], [.002, 0, 0])
+    assert not plan.valid
+    assert plan.reason == "invalid_weighted_command"
+    assert np.all(plan.command_logical_velocity == 0)
+
+
 def test_point_prediction_tail_values_delayed_tendon_without_expanding_command(
         contract):
     short_backend = DelayedTendonRollout()
@@ -1265,7 +1792,8 @@ def test_point_prediction_tail_values_delayed_tendon_without_expanding_command(
     assert tail_plan.prediction_horizon_s == pytest.approx(1.0)
 
 
-def test_continuous_path_reference_does_not_use_point_prediction_tail(contract):
+@pytest.mark.parametrize("x_only", [False, True])
+def test_continuous_path_reference_does_not_use_point_prediction_tail(contract, x_only):
     backend = DelayedTendonRollout()
     backend.coarse_called = False
     planner = CatheterMppi(
@@ -1279,7 +1807,7 @@ def test_continuous_path_reference_does_not_use_point_prediction_tail(contract):
 
     plan = planner.plan(
         object(), [20, 0, 7, 40, 0, 0],
-        np.zeros((4, 3)), target_tangent_base=tangent)
+        np.zeros((4, 3)), target_tangent_base=tangent, x_only=x_only)
 
     assert plan.valid
     assert not backend.coarse_called
@@ -1311,6 +1839,20 @@ def test_continuous_path_can_use_exactly_four_coarse_steps_over_08_s(contract):
     assert plan.prediction_horizon_s == pytest.approx(0.80)
 
 
+def test_path_correction_proposals_keep_budget_and_never_reverse(contract):
+    planner = CatheterMppi(LinearRollout(), contract,
+                          config(samples=64, horizon_steps=4))
+    original = planner._samples()
+    corrected = planner._path_correction_samples(original)
+    assert corrected.shape == original.shape
+    assert corrected[:8] == pytest.approx(original[:8])
+    assert original[8:24] != pytest.approx(corrected[8:24])
+    _, reversal = planner._first_physical_direction(corrected[8:24])
+    assert not reversal.any()
+    assert corrected[9:24:2, 1:] == pytest.approx(np.zeros((8, 3, 3)))
+    assert corrected[24:] == pytest.approx(original[24:])
+
+
 def test_each_grouped_proposal_has_compatible_sustained_tendon_probe(contract):
     planner = CatheterMppi(
         LinearRollout(), contract,
@@ -1338,7 +1880,7 @@ def test_each_grouped_proposal_has_compatible_sustained_tendon_probe(contract):
         if label & (1 << 2):
             assert set(directions) == {1}
         else:
-            assert set(directions) == {-1, 1}
+                assert set(directions) == {-1, 1}
 
 
 def test_prediction_tail_projection_respects_joint_endpoint(contract):

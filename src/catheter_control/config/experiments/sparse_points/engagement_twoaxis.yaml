@@ -1,0 +1,55 @@
+# G5 comparison: exact targets from the latest confirmed 4/4 baseline,
+# isolated_planner_twoaxis_motion_20261005T171626Z/20261005_131626_mppi_demo.
+# Recovered from /catheter_mppi/target_tip in robot_base, without regeneration.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_trajectory
+marker_topic: /shape_tracking/markers
+position_topic: /device/state
+status_topic: /catheter_mppi/status
+safety_topic: /manager/safety_status
+control_topic: /teleop/control
+event_topic: /teleop/event
+planned_control_topic: /catheter_mppi/planned_control
+manager_control_topic: /manager/control
+source_name: autonomy
+target_timeout_s: 30.0
+target_tolerance_mm: 1.8
+target_settle_time_s: 0.25
+plant_reset:
+  mode: history_preserving
+home:
+  decoupled_tendon_prehome: true
+  joint_position: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  joint_speed: [4.0, 25.0, 2.0, 4.0, 25.0, 25.0]
+  joint_tolerance: [0.10, 0.50, 0.10, 0.10, 0.50, 0.50]
+  timeout_s: 30.0
+  mode_settle_time_s: 0.15
+  settle_time_s: 0.50
+  post_settle_time_s: 0.75
+required_controller_status:
+  command_output_enabled: true
+  engagement_control_enabled: true
+  model_runtime_family: experimental_joint_engagement
+  marker_estimator: ukf
+  engaged_gain_enabled: false
+  mppi_engaged_gain_scenarios: false
+  mppi_samples: 512
+  mppi_point_rollout_step_s: 0.2
+  mppi_point_rollout_coarse_steps: true
+  mppi_point_prediction_tail_steps: 0
+  controller_velocity_max: [10.0, 0.0, 4.5, 4.0, 25.0, 25.0]
+rotation_guard:
+  enabled: true
+  axis: 1
+  tolerance: 1.0e-9
+generator:
+  type: absolute_targets_m
+  targets_m:
+    - [0.02608313597738743, 0.022739075124263763, 0.08448133617639542]
+    - [0.03320372849702835, 0.02986534871160984, 0.06324673444032669]
+    - [0.031191052868962288, 0.02978038229048252, 0.0510878749191761]
+    - [0.031725503504276276, 0.029091984033584595, 0.050746046006679535]
+target_source:
+  session: isolated_planner_twoaxis_motion_20261005T171626Z/20261005_131626_mppi_demo
+  topic: /catheter_mppi/target_tip
+  outcome: 4_reached_0_timed_out

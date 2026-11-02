@@ -137,6 +137,21 @@ calling the low-level device service unless performing deliberate diagnostics.
 
 ### Bounded catheter-linear limit recovery
 
+For the specifically measured +20 mm translation offset after a Teensy reboot,
+`imricor_translation_offset_recovery` is a temporary manager profile, not a
+normal control configuration. Reported -20 mm must first be confirmed to
+correspond to the original physical zero, with every other axis physically
+zero. It restricts reported insertion to [-21,1] mm (physical [-1,21] mm),
+locks the other joint targets to zero, and caps translation speed at 2 mm/s.
+Keep MPPI and task clients stopped. Select this profile only in the
+control-interface launch; use manager-mediated JOINT_POS with fresh stamped
+`autonomy` heartbeats, target `[-20,0,0,0,0,0]` and physical motor speeds
+`[2,0,0,0,0,0]`. Stop through the manager after the bounded move. Verify the
+original mechanical zero, disable motor power, restart Teensy there, then
+restart the manager with `imricor_test` and verify all POS/ENC readings before
+motion. Do not issue SET_ZERO. If physical position differs from expectation,
+stop; this profile is not valid for another offset or nonzero other axes.
+
 If quantized or coupled physical-axis response leaves only logical
 `catheter_lin` (axis 0) slightly outside its configured position range, the
 manager exposes one narrow recovery service:

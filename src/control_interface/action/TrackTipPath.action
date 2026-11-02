@@ -10,13 +10,24 @@ float64 pause_error_mm
 float64 resume_error_mm
 float64 hard_error_mm
 bool auto_arm
+# Global-X scalar task: ignore Y/Z in path cost, traversal and settling.
+bool x_only
+# Global X/Z task: ignore Y, mutually exclusive with x_only.
+bool xz_only
 ---
 bool success
 string message
+# Initiating controller fault evidence; empty for non-controller outcomes.
+string fault_reason
+string fault_snapshot_json
 float64 final_error_mm
 float64 rms_closest_path_error_mm
 float64 p95_closest_path_error_mm
 float64 completed_arc_length_m
+# Reference phase and observation-backed traversal are distinct.
+float64 reference_arc_length_m
+float64 path_coverage
+bool traversal_complete
 ---
 string path_id
 float64 progress
@@ -32,3 +43,6 @@ float64 along_track_error_mm
 float64 cross_track_error_mm
 string governor_state
 string controller_state
+float64 covered_arc_length_m
+float64 path_coverage
+bool traversal_complete

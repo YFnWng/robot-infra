@@ -60,6 +60,24 @@ int main() {
   assert(update.status == PositionMoveTracker::COMPLETE);
   assert(update.stop_mask == 0x02);
   assert(!tracker.running());
+  // Recorded 2026-10-04 tendon prehome: 2.027 mm of an 8.429 mm
+  // request is just below the obsolete 25% progress gate. The existing
+  // encoder-tolerance gate must allow one bounded endpoint correction.
+  const float tendon_target[6] = {};
+  float tendon_position[6] = {0.f, 0.f, 8.428583f, 0.f, 0.f, 0.f};
+  tracker.begin(20000, 0x04, tendon_target, tolerance, tendon_position);
+  tendon_position[2] = 6.401842f;
+  tracker.update(21000, tendon_position, 100, 45000, retry_idle_ms,
+                 max_retries, minimum_progress);
+  update = tracker.update(21500, tendon_position, 100, 45000,
+                          retry_idle_ms, max_retries, minimum_progress);
+  assert(update.status == PositionMoveTracker::NO_EVENT);
+  assert(update.retry_mask == 0x04);
+  update = tracker.update(22000, tendon_position, 100, 45000,
+                          retry_idle_ms, max_retries, minimum_progress);
+  assert(update.status == PositionMoveTracker::TIMED_OUT);
+  assert(update.stop_mask == 0x04);
+  assert(!tracker.running());
 
   position[0] = 0.0f;
   position[1] = 0.0f;

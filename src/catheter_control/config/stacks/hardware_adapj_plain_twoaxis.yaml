@@ -1,0 +1,11 @@
+schema_version: 1
+name: hardware.adapj.plain.twoaxis
+node_name: catheter_mppi
+description: Measured-tip AdapJ, recorded initialization, no takeup compensation.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/adapj_plain.yaml
+  platform: platform/hardware_v171_no_rotation.yaml
+  performance: performance/adapj_cpu.yaml
+  experiment: experiments/sparse_points/adapj_plain_twoaxis.yaml

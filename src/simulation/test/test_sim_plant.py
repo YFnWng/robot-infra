@@ -54,6 +54,16 @@ def test_zero_command_holds_counts_and_advances_time(contract):
     assert snapshot.tip_base_m == pytest.approx([0.0, 0.0, 0.06])
 
 
+def test_native_driver_stops_at_endpoint_independent_of_coarse_sample(contract):
+    plant = SimulatedActuatorPlant(contract, timestamp_ns=1000000000, step_s=.1)
+    plant.set_native_position([100, 0, 0, 0, 0, 0], [36, 0, 0, 0, 0, 0])
+    plant.step()
+    assert plant.encoder_counts[0] == 100
+    plant.step()
+    assert plant.encoder_counts[0] == 100
+    assert plant.last_projection.realized_logical_velocity[0] == pytest.approx(0.)
+
+
 def test_subcount_motion_accumulates_and_feedback_is_count_derived(contract):
     runtime = FakeRuntime()
     plant = ModelInLoopPlant(

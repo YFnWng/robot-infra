@@ -1,0 +1,17 @@
+/**:
+  ros__parameters:
+    engagement_control_enabled: true
+    planner_process_enabled: true
+    estimator_device: cpu
+    estimator_dtype: float32
+    backlash_compensation_enabled: true
+    # Temporary, operator-requested current-mount experiment. Restore false
+    # after measuring onset. Does not increase any manager/joint limit.
+    backlash_tendon_takeup_joint_range_enabled: true
+    takeup_transaction_enabled: true
+    engaged_gain_enabled: false
+    mppi_engaged_gain_scenarios: false
+    mppi_grouped_mode_sampling: true
+    mppi_best_candidate_guard: true
+    mppi_takeup_risk_weight: 4.0
+    reversal_scheduler_enabled: false

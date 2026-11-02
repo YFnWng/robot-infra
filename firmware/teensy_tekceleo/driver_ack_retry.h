@@ -8,7 +8,8 @@ namespace DriverAckRetry {
 
 template <typename Attempt, typename BetweenAttempts>
 bool run(uint8_t max_attempts, Attempt attempt,
-         BetweenAttempts between_attempts, uint8_t* attempts_used = nullptr) {
+         BetweenAttempts between_attempts, uint8_t* attempts_used = nullptr,
+         const bool* cancelled = nullptr) {
   uint8_t used = 0;
   for (uint8_t index = 0; index < max_attempts; ++index) {
     ++used;
@@ -17,6 +18,10 @@ bool run(uint8_t max_attempts, Attempt attempt,
         *attempts_used = used;
       }
       return true;
+    }
+    if (cancelled != nullptr && *cancelled) {
+      if (attempts_used != nullptr) *attempts_used = used;
+      return false;
     }
     if (index + 1U < max_attempts) {
       between_attempts(used);

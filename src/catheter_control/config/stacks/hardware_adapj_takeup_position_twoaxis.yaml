@@ -1,0 +1,12 @@
+schema_version: 1
+name: hardware.adapj.takeup.position.twoaxis
+node_name: catheter_mppi
+description: Sequential native-position AdapJ with shared takeup and measured-displacement updates.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/adapj_with_takeup.yaml
+    - controller/modes/adapj_position.yaml
+  platform: platform/hardware_v171_no_rotation.yaml
+  performance: performance/adapj_cpu.yaml
+  experiment: experiments/sparse_points/adapj_takeup_twoaxis.yaml

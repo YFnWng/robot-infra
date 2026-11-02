@@ -8,12 +8,21 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from control_interface.msg import ControlStream, \
     DeviceStream, ManagerStream, DeviceEvent, ManagerEvent
-from control_interface.srv import DeviceCmd
+from control_interface.srv import DeviceCmd, OpenPositionStream
+from control_interface.msg import StreamedPositionControl
+from control_interface_py.encoder_coordinates import counts_to_logical, UNITS_PER_SECOND_PER_RPM
+from control_interface_py.driver_evidence import CAPABILITY as EVIDENCE_CAPABILITY, parse_state
+from control_interface_py.streamed_position import (
+    CAPABILITY, OPEN_SESSION, STREAM_COMMAND, STREAM_STATUS, PositionEnvelope,
+    StreamedPositionCommand, parse_session_response,
+    LIVE_UPDATE, LIVE_CAPABILITY, live_update_payload,
+)
 from control_interface_py.command_freshness import validate_command_stamp
 
 from collections import defaultdict, deque
 import math
 import threading
+import secrets
 import time
 
 
@@ -106,6 +115,19 @@ class ControlManager(Node):
             "allowed_sources", ["slicer", "autonomy", "catheter_mppi"])
         self.allowed_sources = set(
             self.get_parameter("allowed_sources").value)
+        self.declare_parameter('position_stream_enabled', False)
+        self.declare_parameter('native_live_probe_enabled', False)
+        self.native_live_probe_enabled = bool(self.get_parameter('native_live_probe_enabled').value)
+        self.native_live_probe_capable = False
+        self.driver_evidence_capable = False
+        self._firmware_identity = ''
+        self._native_live_probe_goal = None
+        self._native_live_probe_used = None
+        self.position_stream_enabled = bool(self.get_parameter('position_stream_enabled').value)
+        self.position_stream_capable = False
+        self.position_stream_session = 0
+        self.position_stream_source = None
+        self.position_stream_opening = False
         self.declare_parameter('allow_debug_commands', False)
         self.allow_debug_commands = bool(
             self.get_parameter('allow_debug_commands').value)
@@ -170,6 +192,7 @@ class ControlManager(Node):
         self._transport_ready = False
         self._driver_power_qualified = False
         self._limit_recovery_active = False
+        self._communication_recovery_active = False
         self._limit_recovery_cancelled = False
         self._shutdown_started = False
         self._qualification_lock = threading.Lock()
@@ -248,6 +271,8 @@ class ControlManager(Node):
         self.transport_status_sub = self.create_subscription(
             String, '/device/transport_status',
             self.transport_status_callback, transport_qos)
+        self.firmware_identity_sub = self.create_subscription(
+            String, '/device/firmware_identity', self.firmware_identity_callback, transport_qos)
 
         # publishers
         self.control_pub = self.create_publisher(
@@ -268,6 +293,10 @@ class ControlManager(Node):
             Trigger, '/manager/qualify_driver_power',
             self.qualify_driver_power,
             callback_group=self.qualification_group)
+        self.communication_recovery_service = self.create_service(
+            Trigger, '/manager/recover_driver_communication',
+            self.recover_driver_communication,
+            callback_group=self.qualification_group)
         self.limit_recovery_service = self.create_service(
             Trigger, '/manager/recover_catheter_linear_limit',
             self.recover_catheter_linear_limit,
@@ -275,6 +304,17 @@ class ControlManager(Node):
         self.device_client = self.create_client(
             DeviceCmd, '/device/command',
             callback_group=self.device_client_group)
+        self.position_stream_service = self.create_service(
+            OpenPositionStream, '/manager/open_position_stream', self.open_position_stream,
+            callback_group=self.qualification_group)
+        self.driver_state_service = self.create_service(
+            DeviceCmd, '/manager/read_driver_state', self.read_driver_state,
+            callback_group=self.qualification_group)
+        self.position_stream_sub = self.create_subscription(
+            StreamedPositionControl, '/teleop/position_control', self.position_stream_callback,
+            motion_qos)
+        self.native_live_probe_sub = self.create_subscription(
+            DeviceStream, '/teleop/native_live_update', self.native_live_update_callback, motion_qos)
         while not self.device_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('service not available, waiting again...')
 
@@ -517,6 +557,11 @@ class ControlManager(Node):
 
         if msg.predicate == ManagerEvent.MODE:
             requested_mode = ord(msg.text)
+            if (getattr(self, 'position_stream_opening', False)
+                    and requested_mode != ManagerEvent.NONE):
+                self.locked_source = None
+                self._reject_event(msg, 'POSITION_STREAM_OPENING')
+                return
             self._command_zero_velocity()
             self.active_source = None
             self.control_mode = ManagerEvent.NONE
@@ -689,6 +734,8 @@ class ControlManager(Node):
         return 'none'
 
     def _motion_inhibit_reason(self):
+        if getattr(self, '_communication_recovery_active', False):
+            return 'DRIVER_COMMUNICATION_RECOVERY_IN_PROGRESS'
         if getattr(self, '_limit_recovery_active', False):
             return 'LIMIT_RECOVERY_IN_PROGRESS'
         if self._fault_latched:
@@ -748,10 +795,11 @@ class ControlManager(Node):
             f'POS/ENC feedback was not stationary for '
             f'{self.QUALIFICATION_WINDOW:.2f}s')
 
-    def _call_device_sync(self, predicate, timeout=1.5, cmd=''):
+    def _call_device_sync(self, predicate, timeout=1.5, cmd='', data=()):
         request = DeviceCmd.Request()
         request.predicate = predicate
         request.cmd = cmd
+        request.data = list(data)
         future = self.device_client.call_async(request)
         deadline = time.monotonic() + timeout
         while not future.done() and time.monotonic() < deadline:
@@ -763,6 +811,166 @@ class ControlManager(Node):
         except Exception as exc:
             return False, f'predicate {predicate} failed: {exc}'
         return bool(result.success), result.response
+
+    def read_driver_state(self, request, response):
+        response.success = False
+        if request.predicate != ManagerEvent.DRIVER_DIAGNOSTIC or request.cmd != '0' or request.data:
+            response.response = 'DRIVER_STATE_REQUIRES_AXIS_0_ONLY'
+            return response
+        if not self.driver_evidence_capable:
+            response.response = 'DRIVER_STATE_FIRMWARE_UNSUPPORTED'
+            return response
+        if not self._qualification_lock.acquire(blocking=False):
+            response.response = 'MANAGER_MAINTENANCE_BUSY'
+            return response
+        try:
+            self.position_stream_opening = True # block source claims while reading
+            if (self.control_mode != ManagerEvent.NONE or self.active_source is not None
+                    or self._motion_inhibit_reason() or not self._feedback_is_stable()):
+                raise ValueError('DRIVER_STATE_REQUIRES_READY_IDLE_STANDSTILL')
+            ok, text = self._call_device_sync(ManagerEvent.DRIVER_DIAGNOSTIC, cmd='r0', timeout=1.)
+            if not ok:
+                raise ValueError(text)
+            parse_state(text)
+            if (self.control_mode != ManagerEvent.NONE or self.active_source is not None
+                    or self._motion_inhibit_reason() or not self._feedback_is_stable()):
+                raise ValueError('DRIVER_STATE_CHANGED_DURING_QUERY')
+            response.success, response.response = True, text
+        except ValueError as error:
+            response.response = str(error)
+        finally:
+            self.position_stream_opening = False
+            self._qualification_lock.release()
+        return response
+
+    def open_position_stream(self, request, response):
+        response.success = False
+        live_probe = request.source == 'autonomy:live_probe'
+        source = 'autonomy' if live_probe else request.source
+        if live_probe and (not self.native_live_probe_enabled or not self.native_live_probe_capable):
+            response.message = 'NATIVE_LIVE_PROBE_DISABLED_OR_UNSUPPORTED'
+            return response
+        if (not self.position_stream_enabled or not self.position_stream_capable
+                or source not in self.allowed_sources):
+            response.message = 'POSITION_STREAM_DISABLED_OR_UNSUPPORTED'
+            return response
+        if not self._qualification_lock.acquire(blocking=False):
+            response.message = 'MANAGER_MAINTENANCE_BUSY'
+            return response
+        try:
+            self.position_stream_opening = True
+            if (self.control_mode != ManagerEvent.NONE or self.active_source is not None
+                    or self._motion_inhibit_reason() or not self._feedback_is_stable()):
+                response.message = 'POSITION_STREAM_REQUIRES_READY_IDLE_STANDSTILL'
+                return response
+            nonce = secrets.randbelow(0xffffffff)+1
+            ok, text = self._call_device_sync(OPEN_SESSION, data=[float(nonce)])
+            if not ok:
+                response.message = text
+                return response
+            # Recheck after the asynchronous device response; a source may have
+            # attempted to claim control during this bounded maintenance call.
+            if (self.control_mode != ManagerEvent.NONE or self.active_source is not None
+                    or self._motion_inhibit_reason()):
+                response.message = 'POSITION_STREAM_STATE_CHANGED'
+                return response
+            session = parse_session_response(text)
+            if session != nonce:
+                raise ValueError('position session nonce acknowledgement mismatch')
+            self.position_stream_session = session
+            self.position_stream_source = source
+            response.success, response.session_id, response.message = True, session, text
+            return response
+        except (ValueError, RuntimeError) as error:
+            response.message = str(error)
+            return response
+        finally:
+            self.position_stream_opening = False
+            self._qualification_lock.release()
+
+    def position_stream_callback(self, msg):
+        src = msg.header.frame_id
+        if (not self.position_stream_enabled or not self.position_stream_capable
+                or msg.session_id != self.position_stream_session
+                or src != self.position_stream_source or src != self.active_source
+                or self.control_mode != ManagerEvent.JOINT_VEL or self.deadman or self.estop
+                or self._lock_blocks(src) or self._motion_inhibit_reason()):
+            return
+        now_ns = self.get_clock().now().nanoseconds
+        accepted, _, source_stamp = validate_command_stamp(
+            msg, now_ns=now_ns, last_stamp_ns=self._last_command_stamp_ns[src],
+            maximum_age_s=self.COMMAND_MAX_AGE, future_tolerance_s=self.COMMAND_FUTURE_TOLERANCE)
+        if not accepted or msg.deadline_ros_ns <= now_ns:
+            return
+        try:
+            command = StreamedPositionCommand(msg.command_id, msg.duration_us, msg.active_mask,
+                                               tuple(msg.target_counts), tuple(msg.speed_rpm))
+            target = counts_to_logical(command.target_counts)
+            if any(not self._pos_lower[a] <= target[a] <= self._pos_upper[a] for a in range(6)):
+                raise ValueError('endpoint outside logical hard limits')
+            for a, rpm in enumerate(command.speed_rpm):
+                speed = abs(rpm*UNITS_PER_SECOND_PER_RPM[a])
+                if speed > self._vel_max[a]+1e-6:
+                    raise ValueError('shaft speed exceeds manager ceiling')
+                if rpm and speed+1e-6 < self._vel_min[a]:
+                    raise ValueError('native shaft speed below reliable manager floor')
+            remaining = min(command.duration_us, (msg.deadline_ros_ns-now_ns)//1000)
+            envelope = PositionEnvelope(msg.session_id, remaining, command)
+        except ValueError as error:
+            self.get_logger().warn(f'rejected position stream: {error}')
+            self._command_zero_velocity()
+            return
+        self.last_input_time[src] = time.monotonic()
+        self._last_command_stamp_ns[src] = source_stamp
+        out = DeviceStream()
+        out.header, out.predicate, out.data = msg.header, STREAM_COMMAND, envelope.as_data()
+        self.control_pub.publish(out)
+        if getattr(self, 'native_live_probe_enabled', False):
+            self._native_live_probe_goal = msg
+
+    def native_live_update_callback(self, msg):
+        src = msg.header.frame_id
+        if (not self.native_live_probe_enabled or not self.native_live_probe_capable
+                or not self.position_stream_enabled or not self.position_stream_capable
+                or src != 'autonomy' or src != self.active_source
+                or src != self.position_stream_source
+                or self.control_mode != ManagerEvent.JOINT_VEL or self.deadman or self.estop
+                or self._lock_blocks(src) or self._motion_inhibit_reason()
+                or msg.predicate != LIVE_UPDATE):
+            return
+        try:
+            live_update_payload(msg.data)
+            if int(msg.data[0]) != self.position_stream_session:
+                return
+            key = tuple(int(x) for x in msg.data[:2])
+            if self._native_live_probe_used == key:
+                return
+            goal = self._native_live_probe_goal
+            if (goal is None or goal.session_id != self.position_stream_session
+                    or goal.command_id != int(msg.data[1]) or goal.active_mask != 1
+                    or list(goal.speed_rpm) != [36, 0, 0, 0, 0, 0]
+                    or goal.deadline_ros_ns <= self.get_clock().now().nanoseconds):
+                return
+            # Check the whole diagnostic travel envelope, not just original endpoint.
+            for offset in (-402, 267):
+                counts = list(goal.target_counts)
+                counts[0] += offset
+                logical = counts_to_logical(counts)
+                if any(not self._pos_lower[a] <= logical[a] <= self._pos_upper[a] for a in range(6)):
+                    return
+            accepted, _, stamp = validate_command_stamp(
+                msg, now_ns=self.get_clock().now().nanoseconds,
+                last_stamp_ns=self._last_command_stamp_ns[src],
+                maximum_age_s=self.COMMAND_MAX_AGE, future_tolerance_s=self.COMMAND_FUTURE_TOLERANCE)
+            if not accepted:
+                return
+        except ValueError:
+            return
+        self.last_input_time[src] = time.monotonic()
+        self._last_command_stamp_ns[src] = stamp
+        self._native_live_probe_goal = None # exactly one host dispatch; no retry
+        self._native_live_probe_used = key
+        self.control_pub.publish(msg)
 
     def _probe_all_drivers(self):
         for axis in range(6):
@@ -1033,6 +1241,128 @@ class ControlManager(Node):
             'retained encoder frame restored for axes '
             f'{encoder_axes}')
 
+    def recover_driver_communication(self, request, response):
+        """Explicit disabled-state recovery; never auto-retry a motor command.
+
+        This path alone admits the reviewed communication fault class. Startup
+        qualification and raw event-reset rejection retain their old semantics.
+        """
+        del request
+        response.success = False
+        if not self._qualification_lock.acquire(blocking=False):
+            response.message = 'manager maintenance already in progress'
+            return response
+        started = False
+        try:
+            if (self._fault_reason and self._fault_reason != 'MOTION_CONFIRMED:DRIVER_COMMUNICATION'):
+                response.message = 'refusing recovery of a different host fault class'
+                return response
+            if self.control_mode != ManagerEvent.NONE or self.active_source is not None:
+                response.message = 'stop all control sources before communication recovery'
+                return response
+            if not self._transport_ready:
+                response.message = 'requires connected telemetry; no automatic reconnect'
+                return response
+            started = True
+            self._communication_recovery_active = True
+            self._driver_power_qualified = False
+            self.position_stream_session = 0
+            self.position_stream_source = None
+            self._command_zero_velocity()
+            self._publish_safety_status(force=True)
+            ok, message = self._call_device_sync(ManagerEvent.STOP_MOTOR)
+            if not ok:
+                raise ValueError(f'firmware STOP failed: {message}')
+            stable, message = self._wait_for_stable_feedback()
+            if not stable:
+                raise ValueError(f'pre-reset standstill failed: {message}')
+            encoder_anchor = tuple(self._enc_history[-1][1])
+
+            def status():
+                ok, text = self._call_device_sync(ManagerEvent.FAULT_STATUS)
+                if not ok:
+                    raise ValueError(f'firmware fault query failed: {text}')
+                return parse_fault_status(text)
+
+            def approved(snapshot):
+                faults = snapshot['faults']
+                expected = sum(1 << a for a, fault in enumerate(faults) if fault)
+                if (snapshot['enabled_mask'] != 0 or not expected
+                        or snapshot['latched_mask'] != expected
+                        or any(fault not in (0, ManagerEvent.FAULT_DRIVER_COMMUNICATION)
+                               for fault in faults)):
+                    raise ValueError('refusing reset: requires disabled motors and exclusively '
+                                     f'consistent communication latches: {snapshot["raw"]}')
+
+            before = status()
+            approved(before)
+            # A restarted manager may not have received the original CONFIRMED
+            # event. Reconstruct only this verified firmware fault class, never
+            # interpret the absence of a host latch as absence of a device fault.
+            if self._fault_reason not in ('', 'MOTION_CONFIRMED:DRIVER_COMMUNICATION'):
+                raise ValueError('host fault class changed during initial checks')
+            self._fault_latched = True
+            self._fault_reason = 'MOTION_CONFIRMED:DRIVER_COMMUNICATION'
+            probes_ok, message = self._probe_all_drivers()
+            if not probes_ok:
+                raise ValueError(f'pre-reset UART checks failed: {message}')
+            stable, message = self._wait_for_stable_feedback()
+            if not stable:
+                raise ValueError(f'UART-check standstill failed: {message}')
+            after_probes = status()
+            approved(after_probes)
+            if any(before[key] != after_probes[key]
+                   for key in ('latched_mask', 'sequence', 'faults')):
+                raise ValueError('fault state changed during diagnostics; reset not issued')
+            if self._fault_reason != 'MOTION_CONFIRMED:DRIVER_COMMUNICATION':
+                raise ValueError('host fault class changed; reset not issued')
+            ok, message = self._call_device_sync(ManagerEvent.RESET_FAULT)
+            # Encoder restoration belongs to the separate startup path; never
+            # count an unexpected restoration acknowledgement as a success.
+            if not ok or message != 'OK':
+                raise ValueError(f'communication reset not confirmed: {message}')
+            probes_ok, message = self._probe_all_drivers()
+            if not probes_ok:
+                raise ValueError(f'post-reset UART checks failed: {message}')
+            stable, message = self._wait_for_stable_feedback()
+            if not stable:
+                raise ValueError(f'post-reset standstill failed: {message}')
+            final = status()
+            if final['enabled_mask'] or final['latched_mask'] or any(final['faults']):
+                raise ValueError(f'post-reset firmware not clean/disabled: {final["raw"]}')
+            if (not self._transport_ready
+                    or self.control_mode != ManagerEvent.NONE or self.active_source is not None
+                    or not self._feedback_is_stable()
+                    or self._fault_reason != 'MOTION_CONFIRMED:DRIVER_COMMUNICATION'):
+                raise ValueError('manager readiness changed during recovery')
+            if any(abs(x-y) > self.QUALIFICATION_ENC_TOLERANCE
+                   for x, y in zip(encoder_anchor, self._enc_history[-1][1])):
+                raise ValueError('encoder reference/travel changed across recovery')
+            self._fault_latched = False
+            self._fault_reason = ''
+            self._driver_power_qualified = True
+            response.success = True
+            response.message = ('driver communication recovered: all UARTs responsive, '
+                                'fresh stationary feedback, firmware clean, motors disabled; '
+                                'control remains NONE and previous stream session invalidated')
+        except (KeyError, TypeError, ValueError, RuntimeError, IndexError) as error:
+            response.message = f'driver-communication recovery failed: {error}'
+        finally:
+            try:
+                if started:
+                    self._communication_recovery_active = False
+                    # Failed reset/requalification cannot leave a cleared host latch
+                    # or qualified power, even when firmware reset itself succeeded.
+                    if not response.success:
+                        self._fault_latched = True
+                        self._driver_power_qualified = False
+                        if not self._fault_reason:
+                            self._fault_reason = 'DRIVER_COMMUNICATION_RECOVERY_FAILED'
+                    self._publish_safety_status(force=True)
+            finally:
+                self._qualification_lock.release()
+        return response
+
     def qualify_driver_power(self, request, response):
         """Explicitly qualify a driver power-up before motion is permitted."""
         del request
@@ -1204,8 +1534,39 @@ class ControlManager(Node):
             'device feedback became stale or implausible during motion; '
             'manager inhibited')
 
+    def _apply_firmware_capabilities(self, identity):
+        self.position_stream_capable = CAPABILITY in identity
+        self.native_live_probe_capable = LIVE_CAPABILITY in identity
+        self.driver_evidence_capable = EVIDENCE_CAPABILITY in identity
+
+    def firmware_identity_callback(self, msg: String):
+        identity = msg.data.strip()
+        previous = getattr(self, '_firmware_identity', '')
+        if not identity or (previous and identity != previous):
+            session = getattr(self, 'position_stream_session', 0)
+            self.position_stream_session = 0
+            if session and self.active_source == self.position_stream_source:
+                self._fault_latched, self._fault_reason = True, 'POSITION_STREAM_IDENTITY_LOST'
+                self._command_zero_velocity()
+                self.active_source, self.control_mode = None, ManagerEvent.NONE
+                self._publish_safety_status(force=True)
+        self._firmware_identity = identity
+        self._apply_firmware_capabilities(identity)
+
     def transport_status_callback(self, msg: String):
+        if msg.data.startswith(('SERIAL_DISCONNECTED', 'SERIAL_OPEN:', 'SERIAL_OPEN_FAILED')):
+            if not msg.data.startswith('SERIAL_OPEN:'):
+                self._firmware_identity = ''
+            self._apply_firmware_capabilities('')
+            self.position_stream_session = 0
+        if CAPABILITY in msg.data:
+            self.position_stream_capable = True
         ready = msg.data.startswith('SERIAL_READY:')
+        if ready and getattr(self, '_firmware_identity', ''):
+            # Snapshot and transport are separate DDS topics: OPEN may have
+            # arrived after the new identity. Reconcile at READY without
+            # granting qualification, mode ownership or any stream session.
+            self._apply_firmware_capabilities(self._firmware_identity)
         was_ready = self._transport_ready
         was_active = self.active_source is not None
         self._transport_ready = ready
@@ -1315,6 +1676,29 @@ class ControlManager(Node):
         return values
 
     def device_event_callback(self, msg: DeviceEvent):
+        if msg.predicate == ManagerEvent.FIRMWARE_STATUS:
+            self._apply_firmware_capabilities(msg.text)
+            previous_session = getattr(self, 'position_stream_session', 0)
+            # Firmware announces B only on connection/boot/watchdog events;
+            # negotiated authority must not survive a firmware lifecycle change.
+            if previous_session:
+                self.position_stream_session = 0
+                if self.active_source == self.position_stream_source:
+                    self._fault_latched, self._fault_reason = True, 'POSITION_STREAM_SESSION_LOST'
+                    self._command_zero_velocity()
+                    self.active_source, self.control_mode = None, ManagerEvent.NONE
+                    self._publish_safety_status(force=True)
+            if not self.position_stream_capable:
+                self.position_stream_session = 0
+        if (msg.predicate == STREAM_STATUS and self.position_stream_enabled
+                and msg.data and int(msg.data[0]) == self.position_stream_session and msg.text in (
+                'POSITION_STREAM:NO_PROGRESS', 'POSITION_STREAM:INVALID_FEEDBACK',
+                'POSITION_STREAM:INHIBITED')):
+            self._fault_latched = True
+            self._fault_reason = msg.text
+            self._command_zero_velocity()
+            self.active_source, self.control_mode = None, ManagerEvent.NONE
+            self._publish_safety_status(force=True)
         confirmed_transition = False
         if (msg.predicate == ManagerEvent.STALL
                 and len(msg.data) >= 2 and math.isfinite(msg.data[1])):

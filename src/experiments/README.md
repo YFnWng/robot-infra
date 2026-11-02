@@ -43,5 +43,5 @@ ros2 run experiments reaching_analysis --session "$RESEARCH_SESSION" --bag-metri
 Use a sourced ROS Humble terminal; analysis does not start a ROS node or device.
 Missing streams and stale endpoints are reported, not filled with zeros.
 
-See the [research experiment plan](../../docs/research/MODELING_AND_CONTROL_EXPERIMENT_PLAN.md)
+See the [research experiment plan](../../../repository_archives/cleanup_20261102/files/robot-infra/docs/research/MODELING_AND_CONTROL_EXPERIMENT_PLAN.md)
 for metric definitions and the explicit limits of this journal-based gate.

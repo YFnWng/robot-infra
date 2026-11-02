@@ -7,7 +7,7 @@ import numpy as np
 
 from catheter_control.safety.hardware_contract import (
     ENCODER_RADIANS_PER_COUNT, HardwareContract,
-    MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM, N_AXES)
+    MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM, N_AXES, ProjectedVelocity)
 
 
 def _vector(name: str, value) -> np.ndarray:
@@ -99,19 +99,40 @@ class SimulatedActuatorPlant:
         self.transmitted_motor_angle_rad = self.motor_angle_rad.copy()
         self.joint_position = position
         self.requested_velocity = np.zeros(N_AXES, dtype=np.float64)
+        self._shaft_rpm = None
+        self._native_target_angle = None
         self.last_projection = contract.project_velocity(
             self.requested_velocity, self.joint_position)
 
     def set_command(self, logical_velocity) -> None:
+        self._shaft_rpm = None
+        self._native_target_angle = None
         self.requested_velocity = _vector(
             "logical_velocity", logical_velocity).copy()
 
     def stop(self) -> None:
+        self._shaft_rpm = None
+        self._native_target_angle = None
         self.requested_velocity.fill(0.0)
         if self.actuator_perturbation is not None:
             self.actuator_perturbation.halt()
         self.last_projection = self.contract.project_velocity(
             self.requested_velocity, self.joint_position)
+
+    def set_shaft_rpm(self, signed_rpm):
+        self._native_target_angle = None
+        rpm = _vector('signed_rpm', signed_rpm)
+        if np.any(np.abs(rpm) > 250) or np.any(rpm != np.rint(rpm)):
+            raise ValueError('shaft RPM must be integers bounded by firmware maximum')
+        self._shaft_rpm = rpm.copy()
+        self.requested_velocity = self.contract.motor_axis_to_logical_velocity(
+            rpm*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM)
+
+    def set_native_position(self, count_targets, signed_rpm):
+        """Ideal driver-native endpoint clamp, not a Tekceleo transient model."""
+        targets = _vector('native count targets', count_targets)
+        self.set_shaft_rpm(signed_rpm)
+        self._native_target_angle = targets*ENCODER_RADIANS_PER_COUNT
 
     def reset_transmission(self) -> None:
         """Reset simulation-only hidden transmission memory at this shaft pose.
@@ -121,6 +142,8 @@ class SimulatedActuatorPlant:
         and all actuator delay/backlash memory is returned to its configured
         initial condition.  This has no hardware analogue.
         """
+        self._shaft_rpm = None
+        self._native_target_angle = None
         self.requested_velocity.fill(0.0)
         self.transmitted_motor_angle_rad = self.motor_angle_rad.copy()
         if self.actuator_perturbation is not None:
@@ -136,6 +159,18 @@ class SimulatedActuatorPlant:
         dt = (target_ns-self.timestamp_ns)*1e-9
         projection = self.contract.project_velocity(
             self.requested_velocity, self.joint_position)
+        if self._shaft_rpm is not None:
+            # Device-side physical RPM has already passed manager limits; do
+            # not re-floor its reconstructed logical velocity when one shaft
+            # reaches its endpoint before another. Feedback bounds still apply.
+            physical = self._shaft_rpm*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM
+            if np.any(np.abs(physical) > self.contract.velocity_max+1e-6):
+                self.stop()
+                raise RuntimeError('streamed physical RPM exceeds simulation ceiling')
+            angle_rate = self._shaft_rpm*(2*np.pi/60)
+            projection = ProjectedVelocity(self.requested_velocity.copy(), physical,
+                np.abs(self._shaft_rpm).astype(np.int64), angle_rate, physical,
+                self.requested_velocity.copy())
         shaft_rate = projection.motor_radians_per_second
         transmitted_rate = shaft_rate
         if self.actuator_perturbation is not None:
@@ -145,6 +180,23 @@ class SimulatedActuatorPlant:
             self.motor_angle_rad, shaft_rate, dt)
         next_transmitted_angle = self.contract.integrate_motor_angles(
             self.transmitted_motor_angle_rad, transmitted_rate, dt)
+        native_target = getattr(self, '_native_target_angle', None)
+        if native_target is not None:
+            delta = next_angle-self.motor_angle_rad
+            residual = native_target-self.motor_angle_rad
+            crossing = ((self._shaft_rpm != 0) & (delta*residual >= 0)
+                        & (np.abs(delta) >= np.abs(residual)))
+            fraction = np.ones(6)
+            np.divide(residual, delta, out=fraction, where=crossing & (delta != 0))
+            next_transmitted_angle = self.transmitted_motor_angle_rad+(
+                next_transmitted_angle-self.transmitted_motor_angle_rad)*fraction
+            next_angle = np.where(crossing, native_target, next_angle)
+            achieved_angle_rate = (next_angle-self.motor_angle_rad)/dt
+            achieved_physical = achieved_angle_rate/(2*np.pi/60)*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM
+            projection = ProjectedVelocity(
+                projection.logical_velocity, projection.requested_motor_axis_velocity,
+                projection.motor_rpm, achieved_angle_rate, achieved_physical,
+                self.contract.motor_axis_to_logical_velocity(achieved_physical))
         next_counts = np.rint(
             next_angle/ENCODER_RADIANS_PER_COUNT).astype(np.float64)
         next_transmitted_counts = np.rint(

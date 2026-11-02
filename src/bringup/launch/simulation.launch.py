@@ -75,6 +75,7 @@ def _installed_package_identity():
 
 SIM_RECORD_TOPICS = [
     "/sim/teleop/control",
+    "/sim/teleop/position_control",
     "/sim/teleop/event",
     "/sim/manager/control",
     "/sim/manager/event",
@@ -91,6 +92,7 @@ SIM_RECORD_TOPICS = [
     "/sim/catheter_mppi/planned_control",
     "/sim/catheter_mppi/predicted_tip",
     "/sim/catheter_mppi/response_trace",
+    "/sim/catheter_mppi/aligned_response_trace",
     "/sim/catheter_mppi/estimator_trace",
     "/sim/catheter_mppi/control_cycle_timing",
     "/sim/collection/events",
@@ -118,6 +120,8 @@ _DOMAIN_LOCK = None
 
 
 CONTROLLER_REMAPS = [
+    ('/teleop/position_control', '/sim/teleop/position_control'),
+    ('/manager/open_position_stream', '/sim/manager/open_position_stream'),
     ("/teleop/control", "/sim/teleop/control"),
     ("/teleop/event", "/sim/teleop/event"),
     ("/manager/safety_status", "/sim/manager/safety_status"),
@@ -131,11 +135,14 @@ CONTROLLER_REMAPS = [
     ("/catheter_mppi/planned_control", "/sim/catheter_mppi/planned_control"),
     ("/catheter_mppi/predicted_tip", "/sim/catheter_mppi/predicted_tip"),
     ("/catheter_mppi/response_trace", "/sim/catheter_mppi/response_trace"),
+    ("/catheter_mppi/aligned_response_trace", "/sim/catheter_mppi/aligned_response_trace"),
     ("/catheter_mppi/estimator_trace", "/sim/catheter_mppi/estimator_trace"),
     ("/catheter_mppi/control_cycle_timing",
      "/sim/catheter_mppi/control_cycle_timing"),
     ("/catheter_mppi/status", "/sim/catheter_mppi/status"),
     ("/catheter_mppi/set_armed", "/sim/catheter_mppi/set_armed"),
+    ("/catheter_mppi/adapj_initialization", "/sim/catheter_mppi/adapj_initialization"),
+    ("/catheter_mppi/adapj_cancel_initialization", "/sim/catheter_mppi/adapj_cancel_initialization"),
     ("/catheter_mppi/emergency_stop", "/sim/catheter_mppi/emergency_stop"),
     ("/catheter_mppi/generate_sparse_targets",
      "/sim/catheter_mppi/generate_sparse_targets"),
@@ -173,6 +180,8 @@ PATH_REMAPS = [
 
 
 MANAGER_REMAPS = [
+    ('/teleop/position_control', '/sim/teleop/position_control'),
+    ('/manager/open_position_stream', '/sim/manager/open_position_stream'),
     ("/teleop/control", "/sim/teleop/control"),
     ("/teleop/event", "/sim/teleop/event"),
     ("/manager/control", "/sim/manager/control"),
@@ -226,6 +235,11 @@ def _setup(context, *_args, **_kwargs):
         controller_profile_parameters = dict(
             resolved_configuration.parameters)
 
+    adapj = controller_profile_parameters.get("control_method") == "adapj"
+    adapj_directory = value("adapj_initialization_dir").strip()
+    if adapj and not adapj_directory:
+        raise ValueError("AdapJ simulation requires a fresh adapj_initialization_dir")
+
     domain_id = os.environ.get("ROS_DOMAIN_ID", "0").strip() or "0"
     if (value("require_nondefault_domain").lower() in ("1", "true", "yes")
             and domain_id == "0"):
@@ -257,6 +271,9 @@ def _setup(context, *_args, **_kwargs):
         })
     effective_model_manifest = str(controller_profile_parameters.get(
         "model_manifest", selection.manifest_path))
+    execution_mode = value('mppi_execution_mode') or controller_profile_parameters.get('mppi_execution_mode', 'velocity')
+    if execution_mode not in ('velocity', 'position_stream'):
+        raise ValueError('invalid mppi_execution_mode')
     common_parameters = {
         "model_manifest": effective_model_manifest,
         "limits_file": value("limits_file"),
@@ -316,6 +333,11 @@ def _setup(context, *_args, **_kwargs):
         visualizer_label = (
             "GROUPED MPPI" if variant == "grouped" else "CUSTOM MPPI")
 
+    if adapj:
+        visualizer_label = ("ADAPJ + TAKEUP | updates frozen during transaction"
+                            if controller_profile_parameters.get("takeup_transaction_enabled")
+                            else "PLAIN ADAPJ | measured tip | no compensation")
+
     actions = [
         LogInfo(msg=(
             "=== SIMULATION ONLY: all control/device endpoints are explicitly "
@@ -325,6 +347,7 @@ def _setup(context, *_args, **_kwargs):
             name="catheter_sim_device", output="screen",
             parameters=[{
                 "simulation_only": True,
+                "position_stream_enabled": execution_mode == 'position_stream',
                 "frame_id": value("frame_id"),
                 "limits_file": value("limits_file"),
                 "catheter": value("catheter"),
@@ -390,6 +413,7 @@ def _setup(context, *_args, **_kwargs):
             name="sim_manager", output="screen",
             remappings=MANAGER_REMAPS,
             parameters=[{
+                "position_stream_enabled": execution_mode == 'position_stream',
                 "limits_file": value("limits_file"),
                 "catheter": value("catheter"),
                 "feedback_timeout_s": 0.25,
@@ -401,7 +425,9 @@ def _setup(context, *_args, **_kwargs):
             remappings=CONTROLLER_REMAPS,
             parameters=[{
                 **common_parameters,
+                "adapj_initialization_dir": adapj_directory,
                 "command_output_enabled": True,
+                "mppi_execution_mode": execution_mode,
                 "simulation_state_reset_enabled": True,
                 "adaptation_enabled": False,
                 "controller_velocity_max": float_list(
@@ -638,7 +664,11 @@ def generate_launch_description():
                 "used by both controller and independent simulation truth.")),
         DeclareLaunchArgument("limits_file", default_value=_default_limits()),
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
+        DeclareLaunchArgument("adapj_initialization_dir", default_value="",
+                             description="Fresh initialization evidence directory for AdapJ simulation."),
         DeclareLaunchArgument("device", default_value="cpu"),
+        DeclareLaunchArgument('mppi_execution_mode', default_value='',
+                             description='Empty inherits stack; velocity or opt-in position_stream.'),
         DeclareLaunchArgument("estimator_dtype", default_value="",
                              description="Estimator precision: float32 (default) or opt-in float64"),
         DeclareLaunchArgument("estimator_device", default_value="",

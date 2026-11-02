@@ -1,0 +1,12 @@
+schema_version: 1
+name: hardware.grouped_no_takeup_fixed_gain.no_rotation
+node_name: catheter_mppi
+description: Grouped MPPI without take-up; fixed gain and v171 history.
+layers:
+  controller:
+  - controller/base.yaml
+  - controller/modes/grouped_no_takeup_fixed_gain.yaml
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/sparse_points/grouped_no_takeup_fixed_gain.yaml
+compatibility_aliases: []

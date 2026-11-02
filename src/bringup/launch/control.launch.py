@@ -120,6 +120,36 @@ def _profile_parameters(path, node_name="catheter_mppi"):
     return load_ros_parameters(path, node_name)
 
 
+def _path_prediction_grid(parameters, mode):
+    """Opt-in path use of the stack's existing point-reaching time grid."""
+    if mode == "":
+        return {}
+    if mode != "point":
+        raise ValueError("path_prediction_grid must be empty or 'point'")
+    step = float(parameters["mppi_point_rollout_step_s"])
+    if not 0 < step < float("inf"):
+        raise ValueError("point rollout step must be finite and positive")
+    return {"rollout_step_s": step,
+            "mppi_path_rollout_coarse_steps": bool(
+                parameters["mppi_point_rollout_coarse_steps"])}
+
+
+def _point_rollout_override(value, horizon_value=''):
+    """Explicit trial override; empty preserves the composed stack."""
+    overrides = {}
+    if value.strip():
+        step = float(value)
+        if not 0 < step < float('inf'):
+            raise ValueError('point_rollout_step_override_s must be positive and finite')
+        overrides['mppi_point_rollout_step_s'] = step
+    if horizon_value.strip():
+        steps = int(horizon_value)
+        if steps <= 0:
+            raise ValueError('horizon_steps_override must be a positive integer')
+        overrides['horizon_steps'] = steps
+    return overrides
+
+
 def _setup(context, *_args, **_kwargs):
     def value(name):
         return LaunchConfiguration(name).perform(context)
@@ -184,7 +214,10 @@ def _setup(context, *_args, **_kwargs):
             "limits_file": value("limits_file"),
             "catheter": value("catheter"),
             "device": value("device"),
+            "engagement_control_enabled": value("engagement_control_enabled").lower() in ("1","true","yes"),
             "estimator_device": value("estimator_device"),
+            "planner_process_enabled": value("planner_process_enabled").lower()
+            in ("1", "true", "yes"),
             "estimator_dtype": value("estimator_dtype"),
             "marker_estimator": value("marker_estimator"),
             "estimator_filter_initial_covariance": float(
@@ -210,6 +243,7 @@ def _setup(context, *_args, **_kwargs):
             "mppi_point_prediction_tail_step_s": float(value(
                 "mppi_point_prediction_tail_step_s")),
             "samples": int(value("samples")),
+            "mppi_temperature": float(value("mppi_temperature")),
             "backlash_compensation_enabled": value(
                 "backlash_compensation_enabled").lower()
             in ("1", "true", "yes"),
@@ -326,8 +360,6 @@ def _setup(context, *_args, **_kwargs):
     # This direct ROS parameter rule is the hardware-output interlock. No YAML
     # layer may control it, and the final direct rule cannot be outranked by an
     # exact node selector.
-    node_parameters.append(Parameter(
-        "command_output_enabled", command_output_enabled, value_type=bool))
     effective_parameters = dict(parameters)
     if resolved_configuration is not None:
         effective_parameters.update(resolved_configuration.parameters)
@@ -335,7 +367,21 @@ def _setup(context, *_args, **_kwargs):
         effective_parameters.update(_profile_parameters(controller_config))
     if performance_config:
         effective_parameters.update(_profile_parameters(performance_config))
+    point_grid = _point_rollout_override(
+        value("point_rollout_step_override_s"), value("horizon_steps_override"))
+    node_parameters.append(point_grid)
+    effective_parameters.update(point_grid)
+    path_grid = _path_prediction_grid(
+        effective_parameters, value("path_prediction_grid").strip())
+    node_parameters.append(path_grid)
+    effective_parameters.update(path_grid)
+    node_parameters.append(Parameter(
+        "command_output_enabled", command_output_enabled, value_type=bool))
     effective_parameters["command_output_enabled"] = command_output_enabled
+    adapj_directory = value("adapj_initialization_dir")
+    if adapj_directory:
+        node_parameters.append({"adapj_initialization_dir": adapj_directory})
+        effective_parameters["adapj_initialization_dir"] = adapj_directory
     effective_horizon_steps = int(effective_parameters["horizon_steps"])
     effective_rollout_step_s = float(
         effective_parameters["rollout_step_s"])
@@ -367,6 +413,8 @@ def _setup(context, *_args, **_kwargs):
         parameters=[{
             "frame_id": value("frame_id"),
             "preview_duration_s": path_preview_duration_s,
+            # Prediction timestamps must not change spatial motion intent.
+            "position_lookahead_s": 0.60,
         }])
     actions = [node, trajectory_node, path_node]
     if start_cpp_shadow:
@@ -527,6 +575,11 @@ def generate_launch_description():
         DeclareLaunchArgument("limits_file", default_value=_default_limits()),
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("device", default_value="cpu"),
+        DeclareLaunchArgument("adapj_initialization_dir", default_value=""),
+        DeclareLaunchArgument("engagement_control_enabled", default_value="false",
+                             description="Explicit G5 experimental family; baseline defaults remain unchanged."),
+        DeclareLaunchArgument("planner_process_enabled", default_value="false",
+                             description="Spawn-isolated MPPI; requires CPU estimator; opt-in only."),
         DeclareLaunchArgument("estimator_dtype", default_value="",
                              description="Estimator precision: float32 (default) or opt-in float64"),
         DeclareLaunchArgument("estimator_device", default_value="",
@@ -550,8 +603,14 @@ def generate_launch_description():
                 "dry runs.")),
         DeclareLaunchArgument("horizon_steps", default_value="4"),
         DeclareLaunchArgument("rollout_step_s", default_value="0.04"),
+        DeclareLaunchArgument("path_prediction_grid", default_value="",
+            description="Empty preserves stack; point uses its point-reaching time grid for paths."),
         DeclareLaunchArgument(
             "mppi_point_rollout_step_s", default_value="0.0"),
+        DeclareLaunchArgument("point_rollout_step_override_s", default_value="",
+                             description="Explicit point prediction step override in seconds; empty preserves stack."),
+        DeclareLaunchArgument("horizon_steps_override", default_value="",
+                             description="Explicit sampled horizon length in steps; empty preserves stack."),
         DeclareLaunchArgument(
             "mppi_point_rollout_coarse_steps", default_value="false"),
         DeclareLaunchArgument(
@@ -561,6 +620,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "mppi_point_prediction_tail_step_s", default_value="0.12"),
         DeclareLaunchArgument("samples", default_value="32"),
+        DeclareLaunchArgument("mppi_temperature", default_value="1.0",
+                             description="Positive dimensionless MPPI cost temperature."),
         DeclareLaunchArgument(
             "backlash_compensation_enabled", default_value="false",
             description=(

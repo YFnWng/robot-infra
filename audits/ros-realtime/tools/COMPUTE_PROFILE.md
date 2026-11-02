@@ -4,7 +4,7 @@ The reusable offline CLI lives in `runtime_supervision.compute_profile`.
 
 The complementary isolated FK benchmark lives in
 `runtime_supervision.benchmark_fk`; see
-[O1 results and reproduction](../O1_FK_BENCHMARK_20261002.md).
+[O1 results and reproduction](../../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/O1_FK_BENCHMARK_20261002.md).
 It extends the deployed-artifact benchmark pattern in `safety.validation`
 (canonical runtime/planner, phase timers, percentile summaries), uses the same
 ROS storage/CDR reader pattern as `qualify_control_cycle_timing.py`, and reuses

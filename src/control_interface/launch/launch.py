@@ -27,6 +27,8 @@ def generate_launch_description():
         DeclareLaunchArgument("limits_file", default_value=_default_limits()),
         DeclareLaunchArgument("catheter", default_value="imricor_test"),
         DeclareLaunchArgument("serial_port", default_value="/dev/ttyACM0"),
+        DeclareLaunchArgument('position_stream_enabled', default_value='false'),
+        DeclareLaunchArgument('native_live_probe_enabled', default_value='false'),
         DeclareLaunchArgument("feedback_timeout_s", default_value="0.25"),
         DeclareLaunchArgument("command_max_age_s", default_value="0.10"),
         DeclareLaunchArgument(
@@ -45,6 +47,8 @@ def generate_launch_description():
             name='manager',
             parameters=[{
                 "limits_file": LaunchConfiguration("limits_file"),
+                "native_live_probe_enabled": ParameterValue(LaunchConfiguration('native_live_probe_enabled'), value_type=bool),
+                "position_stream_enabled": ParameterValue(LaunchConfiguration('position_stream_enabled'), value_type=bool),
                 "catheter": LaunchConfiguration("catheter"),
                 "feedback_timeout_s": ParameterValue(
                     LaunchConfiguration("feedback_timeout_s"),
@@ -75,6 +79,7 @@ def generate_launch_description():
             name='device_serial_com',
             parameters=[{
                 "serial_port": LaunchConfiguration("serial_port"),
+                "position_stream_enabled": ParameterValue(LaunchConfiguration('position_stream_enabled'), value_type=bool),
                 "command_max_age_s": ParameterValue(
                     LaunchConfiguration("command_max_age_s"),
                     value_type=float),

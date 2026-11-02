@@ -58,6 +58,19 @@ rules add repository-local maintainability constraints.
 
 ## Verification
 
+- All future catheter-controller sessions (baseline and experimental) must
+  enable the existing shared bounded task-GC policy: `task_gc_enabled=true`,
+  with the reviewed 300 s task duration and 256 MiB RSS-growth defaults.
+  Deferral begins only at arm; retain reference counting, fail-closed guards,
+  quiescent boundary collection and policy restoration on disarm/shutdown.
+  Do not disable GC globally in camera, manager, firmware or planner children.
+  Before giving motion commands, verify the resolved/installed profile and
+  live controller parameter enable task GC. Disabling it requires an explicit
+  user-requested diagnostic comparison, not an accidental launch default.
+  Stationary probes never arm: use their existing bounded `live-stationary`
+  observer policy when testing GC-deferred timing; label normal-GC comparison
+  arms explicitly. A stationary pass does not prove closed-loop motion timing.
+
 - Add characterization tests before moving behavior that lacks coverage.
 - Run focused tests while editing, then relevant package tests, lint, and ROS
   builds. For launch or packaging changes, verify installed entry points after

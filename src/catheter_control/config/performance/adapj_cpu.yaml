@@ -1,0 +1,9 @@
+/**:
+  ros__parameters:
+    device: cpu
+    estimator_device: cpu
+    planner_process_enabled: false
+    samples: 32
+    planning_deadline_s: 0.06
+    plan_rate_hz: 15.0
+    command_rate_hz: 100.0

@@ -25,11 +25,13 @@ from std_srvs.srv import SetBool
 
 from catheter_control.planning.path_tracking import (
     ArcLengthPath, GovernorConfig, PathProgressGovernor)
-from .target_offset import controller_status, measured_tip
+from catheter_control.safety.lifecycle import controller_motion_held
+from .target_offset import CONTROLLER_STATUS_NAME, controller_status, measured_tip
+from .task_outcomes import controller_failure
 
 
 class TipPathActionServer(Node):
-    """Publish a continuously advancing, estimator-time-aligned preview."""
+    """Publish measurement-led position targets with fresh time coverage."""
 
     def __init__(self):
         super().__init__("catheter_tip_path")
@@ -41,6 +43,7 @@ class TipPathActionServer(Node):
             "maximum_knots": 500,
             "preview_history_s": 0.20,
             "preview_duration_s": 0.60,
+            "position_lookahead_s": 0.60,
             "preview_sample_period_s": 0.02,
             "reference_expiry_s": 0.15,
             "recovery_speed_scale": 0.20,
@@ -66,15 +69,17 @@ class TipPathActionServer(Node):
             self.get_parameter("preview_duration_s").value)
         self.preview_dt = float(
             self.get_parameter("preview_sample_period_s").value)
+        self.position_lookahead_s = float(
+            self.get_parameter("position_lookahead_s").value)
         self.reference_expiry_s = float(
             self.get_parameter("reference_expiry_s").value)
         self.recovery_speed_scale = float(
             self.get_parameter("recovery_speed_scale").value)
         numeric = (
             self.rate_hz, self.feedback_timeout_s, self.service_timeout_s,
-            self.preview_s, self.preview_dt, self.reference_expiry_s,
+            self.preview_s, self.preview_dt, self.position_lookahead_s, self.reference_expiry_s,
             self.recovery_speed_scale)
-        if (not self.frame_id or any(value <= 0.0 for value in numeric)
+        if (not self.frame_id or any(not math.isfinite(value) or value <= 0.0 for value in numeric)
                 or self.history_s < 0.0 or self.maximum_knots < 2
                 or self.preview_s <= self.history_s):
             raise ValueError("continuous-path server parameters are invalid")
@@ -87,7 +92,11 @@ class TipPathActionServer(Node):
         self.controller_armed = False
         self.controller_state = None
         self.controller_reason = None
+        self.controller_failure = ("", "")
         self.controller_time = None
+        self.controller_reference_source = None
+        self.controller_path_id = None
+        self.controller_path_sequence = 0
         qos = QoSProfile(depth=1)
         qos.reliability = ReliabilityPolicy.RELIABLE
         qos.durability = DurabilityPolicy.VOLATILE
@@ -132,13 +141,29 @@ class TipPathActionServer(Node):
     def _status_cb(self, message):
         try:
             armed, state, reason = controller_status(message)
+            status = next(status for status in message.status
+                          if status.name == CONTROLLER_STATUS_NAME)
+            values = {item.key: item.value for item in status.values}
         except ValueError:
             return
+        try:
+            sequence = int(values.get("path_reference_sequence", "0"))
+        except ValueError:
+            # POINT/NONE diagnostics legitimately report "none". Preserve
+            # lifecycle feedback, but never acknowledge an invalid sequence.
+            sequence = 0
         with self._lock:
             self.controller_armed = armed
             self.controller_state = state
             self.controller_reason = reason
             self.controller_time = time.monotonic()
+            self.controller_reference_source = values.get("reference_source")
+            self.controller_path_id = values.get("path_reference_id")
+            self.controller_path_sequence = sequence
+            if state == "FAULTED":
+                self.controller_failure = controller_failure(values)
+            elif armed:
+                self.controller_failure = ("", "")
 
     def _snapshot(self):
         with self._lock:
@@ -146,6 +171,32 @@ class TipPathActionServer(Node):
             return (tip, self.tip_time, self.controller_armed,
                     self.controller_state, self.controller_reason,
                     self.controller_time)
+
+    def _wait_reference_ready(self, path_id, pump, goal_handle):
+        """A publish is not an acknowledgement across topic/service groups."""
+        started = time.monotonic()
+        deadline = started+self.service_timeout_s
+        while rclpy.ok() and time.monotonic() < deadline:
+            if goal_handle.is_cancel_requested:
+                return False, "canceled before reference acknowledgement"
+            with self._lock:
+                armed = self.controller_armed
+                state = self.controller_state
+                received = self.controller_time
+                ready = (self.controller_reference_source == "PATH"
+                         and self.controller_path_id == path_id
+                         and self.controller_path_sequence >= 1
+                         and received is not None and received >= started
+                         and time.monotonic()-received <= self.feedback_timeout_s)
+            if state == "FAULTED":
+                return False, "controller faulted before reference acknowledgement"
+            if armed:
+                return False, "controller must be disarmed for path handoff"
+            if ready:
+                return True, "path reference acknowledged"
+            pump()
+            time.sleep(min(.02, 1.0/self.rate_hz))
+        return False, "controller did not acknowledge path reference"
 
     def _spec(self, request):
         if request.header.frame_id != self.frame_id:
@@ -155,6 +206,12 @@ class TipPathActionServer(Node):
                 f"goal exceeds maximum_knots={self.maximum_knots}")
         path = ArcLengthPath([
             [point.x, point.y, point.z] for point in request.path_knots])
+        if request.x_only and request.xz_only:
+            raise ValueError("x_only and xz_only are mutually exclusive")
+        if (request.x_only or request.xz_only) and (self.frame_id != "robot_base" or
+                              not np.allclose(path.knots[:, 1:],
+                                              path.knots[0, 1:], rtol=0, atol=1e-12)):
+            raise ValueError("x_only requires a robot_base X line")
         config = GovernorConfig(
             nominal_speed_m_s=1e-3*float(request.nominal_speed_mm_s),
             total_timeout_s=float(request.total_timeout_s),
@@ -192,14 +249,11 @@ class TipPathActionServer(Node):
         offsets = np.arange(
             -self.history_s, self.preview_s+self.preview_dt/2.0,
             self.preview_dt)
-        # Recovery governs the *phase* conservatively, but MPPI still needs a
-        # noncollapsed forward arc window to identify commands that move on
-        # from an unreachable local point. Transmission and final holds are
-        # the only states that intentionally collapse the preview.
+        # The spatial target is latched in the governor. Refreshing the time
+        # coverage must not recreate a nominal-speed moving objective.
         preview_scale = (
             0.0 if update.state in {"TRANSMISSION_HOLD", "FINAL_HOLD"}
-            else 1.0 if update.state == "RECOVERY_ADVANCE"
-            else update.speed_scale)
+            else 1.0)
         points, tangents = governor.preview(preview_scale, offsets)
         now = self.get_clock().now()
         message = TipReferenceHorizon()
@@ -217,6 +271,8 @@ class TipPathActionServer(Node):
         message.total_length_m = governor.path.length_m
         message.nominal_speed_m_s = governor.config.nominal_speed_m_s
         message.final_hold = update.state == "FINAL_HOLD"
+        message.x_only = governor.x_only
+        message.xz_only = governor.xz_only
         message.progress_paused = update.speed_scale == 0.0
         message.expiry_s = self.reference_expiry_s
         self.reference_pub.publish(message)
@@ -254,19 +310,29 @@ class TipPathActionServer(Node):
         response = future.result()
         return bool(response.success), str(response.message)
 
-    def _result(self, success, message, errors, update=None):
+    def _result(self, success, message, errors, update=None, *, controller_fault=False):
         result = TrackTipPath.Result()
         result.success = bool(success)
         result.message = str(message)
         result.final_error_mm = (
-            math.nan if update is None else update.reference_error_mm)
+            math.nan if update is None else update.endpoint_error_mm)
         result.rms_closest_path_error_mm = (
             math.nan if not errors
             else float(np.sqrt(np.mean(np.square(errors)))))
         result.p95_closest_path_error_mm = (
             math.nan if not errors else float(np.percentile(errors, 95)))
         result.completed_arc_length_m = (
+            0.0 if update is None else update.covered_arc_m)
+        result.reference_arc_length_m = (
             0.0 if update is None else update.progress_m)
+        result.path_coverage = (
+            0.0 if update is None else update.coverage_fraction)
+        result.traversal_complete = update is not None and update.traversal_complete
+        if controller_fault:
+            with self._lock:
+                result.fault_reason, result.fault_snapshot_json = self.controller_failure
+            if result.fault_reason:
+                result.message += f": {result.fault_reason}"
         return result
 
     def _feedback(self, path_id, update, config, state, total_length_m):
@@ -292,6 +358,9 @@ class TipPathActionServer(Node):
         feedback.cross_track_error_mm = update.closest.cross_error_mm
         feedback.governor_state = update.state
         feedback.controller_state = str(state)
+        feedback.covered_arc_length_m = update.covered_arc_m
+        feedback.path_coverage = update.coverage_fraction
+        feedback.traversal_complete = update.traversal_complete
         return feedback
 
     def _publish_trace(self, path_id, sequence, update, config, tip, state,
@@ -328,7 +397,10 @@ class TipPathActionServer(Node):
 
     def _execute(self, goal_handle):
         path, config = self._spec(goal_handle.request)
-        governor = PathProgressGovernor(path, config)
+        governor = PathProgressGovernor(
+            path, config, maximum_observation_gap_s=self.feedback_timeout_s,
+            lookahead_s=self.position_lookahead_s, x_only=bool(goal_handle.request.x_only),
+            xz_only=bool(goal_handle.request.xz_only))
         path_id = uuid.uuid4().hex
         sequence = 0
         errors = []
@@ -356,14 +428,29 @@ class TipPathActionServer(Node):
                     False, "fresh feedback unavailable", errors)
 
             governor.start(time.monotonic())
-            update = governor.update(tip, time.monotonic())
+            update = governor.update(
+                tip, time.monotonic(), observation_time=tip_time)
 
             def pump():
                 nonlocal sequence
                 sequence += 1
                 self._publish_reference(path_id, sequence, governor, update)
 
-            pump()
+            # Point acquisition cleanup and path-reference subscriptions are
+            # asynchronous. Require disarm and an acknowledgement for this
+            # exact path before the arm service can retain a POINT reference.
+            if armed:
+                goal_handle.abort()
+                return self._result(
+                    False, "controller must be disarmed for path handoff", errors)
+            ok, detail = self._wait_reference_ready(path_id, pump, goal_handle)
+            if not ok:
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                else:
+                    goal_handle.abort()
+                return self._result(False, detail, errors,
+                    controller_fault=detail == "controller faulted before reference acknowledgement")
             if goal_handle.request.auto_arm and not armed:
                 ok, detail = self._set_armed(True, pump)
                 if not ok:
@@ -385,7 +472,8 @@ class TipPathActionServer(Node):
                 if state == "FAULTED":
                     goal_handle.abort()
                     return self._result(
-                        False, "controller faulted while arming", errors)
+                        False, "controller faulted while arming", errors,
+                        controller_fault=True)
                 pump()
                 time.sleep(min(.02, 1.0/self.rate_hz))
             else:
@@ -411,13 +499,12 @@ class TipPathActionServer(Node):
                 if state == "FAULTED" or not armed:
                     goal_handle.abort()
                     return self._result(
-                        False, f"controller {state}", errors, update)
-                transmission_hold = controller_reason in {
-                    "takeup_active", "takeup_complete_replan",
-                    "takeup_saturated_replan",
-                    "replanning_after_takeup"}
+                        False, f"controller {state}", errors, update,
+                        controller_fault=state == "FAULTED")
+                transmission_hold = controller_motion_held(controller_reason)
                 update = governor.update(
-                    tip, started, external_hold=transmission_hold)
+                    tip, started, external_hold=transmission_hold,
+                    observation_time=tip_time)
                 errors.append(update.closest.distance_mm)
                 pump()
                 self._publish_trace(
@@ -432,7 +519,9 @@ class TipPathActionServer(Node):
                 if update.hard_error or update.timed_out:
                     goal_handle.abort()
                     reason = (
-                        "hard path error" if update.hard_error else "timeout")
+                        "hard path error" if update.hard_error else
+                        "timeout: path traversal incomplete" if not
+                        update.traversal_complete else "timeout: endpoint not settled")
                     return self._result(False, reason, errors, update)
                 time.sleep(max(0.0, period-(time.monotonic()-started)))
             goal_handle.abort()

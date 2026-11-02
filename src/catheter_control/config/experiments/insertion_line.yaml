@@ -1,0 +1,17 @@
+# Measured home tip -> 5 mm along robot-base +Z -> same measured home tip.
+# Freeze once after home; reuse the absolute path for all comparison rows.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_path
+marker_topic: /shape_tracking/markers
+auto_arm: true
+nominal_speed_mm_s: 1.0
+total_timeout_s: 60.0
+final_tolerance_mm: 1.8
+final_settle_time_s: 0.3
+soft_error_mm: 2.0
+pause_error_mm: 5.0
+resume_error_mm: 1.5
+hard_error_mm: 15.0
+generator:
+  type: insertion_line_out_and_back_from_current_tip
+  length_mm: 5.0

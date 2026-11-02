@@ -103,6 +103,7 @@ def _load_shape_tracking(shape_tracking_root: str):
             fuse_marker_estimates,
         )
         from shape_tracking.session import load_session_registration
+        from shape_tracking.register import refresh_session_registration
         from shape_tracking.zed_capture import ZedCamera
     except ImportError as exc:
         raise ImportError(
@@ -118,6 +119,7 @@ def _load_shape_tracking(shape_tracking_root: str):
         "pair_recorded_frames": pair_recorded_frames,
         "write_frame_pairs": write_frame_pairs,
         "reuse_dual_registration": _reuse_dual_registration,
+        "refresh_session_registration": refresh_session_registration,
         "MarkerEstimate": MarkerEstimate,
         "MarkerTrackingFailure": MarkerTrackingFailure,
         "StereoRingTracker": StereoRingTracker,
@@ -199,6 +201,29 @@ def rig_liveness_values(rig_ids, sequences, frame_arrivals,
     return values
 
 
+def frame_stage_timing_values(frames, selected_monotonic_ns):
+    """Capture stages: wall-clock source age, monotonic ready-to-pair wait.
+
+    Preserve the SDK image stamp. Missing stages stay explicitly unknown;
+    SDK/host clock disagreement must not be hidden by clamping source ages.
+    """
+    values = {}
+    for rig_id, frame in frames.items():
+        prefix = f"rig_{rig_id}"
+        for field, key in (
+                ("grab_return_wall_ns", "image_to_grab_return_ms"),
+                ("retrieval_complete_wall_ns", "image_to_retrieval_complete_ms")):
+            timestamp = getattr(frame, field, 0)
+            values[f"{prefix}_{key}"] = (
+                f"{(timestamp-frame.timestamp_ns)*1e-6:.3f}"
+                if timestamp else "unknown")
+        ready = getattr(frame, "ready_monotonic_ns", 0)
+        values[f"{prefix}_ready_to_pair_selection_ms"] = (
+            f"{(selected_monotonic_ns-ready)*1e-6:.3f}"
+            if ready else "unknown")
+    return values
+
+
 class MarkerTrackingNode(Node):
     """Acquire ZED images and publish fresh, quality-gated marker positions."""
 
@@ -209,6 +234,10 @@ class MarkerTrackingNode(Node):
             os.environ.get("SHAPE_TRACKING_ROOT", ""))
         self.declare_parameter("camera_config", "")
         self.declare_parameter("registration_file", "")
+        self.declare_parameter("registration_refresh_enabled", False)
+        self.declare_parameter("registration_config", "")
+        self.declare_parameter("registration_frames", 20)
+        self.declare_parameter("registration_timeout_s", 30.0)
         self.declare_parameter("rig_ids", ["primary", "oblique"])
         self.declare_parameter("frame_id", "robot_base")
         self.declare_parameter("marker_topic", "/shape_tracking/markers")
@@ -240,7 +269,7 @@ class MarkerTrackingNode(Node):
         registration_file = str(self.get_parameter("registration_file").value)
         if not camera_config:
             raise ValueError("ROS parameter camera_config is required")
-        if not registration_file:
+        if not registration_file and not self.get_parameter("registration_refresh_enabled").value:
             raise ValueError("ROS parameter registration_file is required")
         requested_rigs = tuple(
             str(value) for value in self.get_parameter("rig_ids").value)
@@ -299,6 +328,10 @@ class MarkerTrackingNode(Node):
         self.last_status_monotonic = 0.0
         self.started_monotonic = time.monotonic()
         self.closed = False
+        # Same default mutually-exclusive callback group as polling/recording:
+        # capture threads only wake the executor, never run vision or publish.
+        self.frame_ready_guard = self.create_guard_condition(
+            self._process_latest)
         self.preview_enabled = bool(
             self.get_parameter("preview_enabled").value)
         self.preview_rate_hz = float(
@@ -340,7 +373,8 @@ class MarkerTrackingNode(Node):
         self.recording_session_dir = None
         self.recording_metadata = None
         self.recording_active = False
-        if self.recording_enabled:
+        refresh_registration = bool(self.get_parameter("registration_refresh_enabled").value)
+        if self.recording_enabled or refresh_registration:
             if len(requested_rigs) != 2:
                 raise ValueError(
                     "full-shape SVO recording requires exactly two rigs")
@@ -354,8 +388,6 @@ class MarkerTrackingNode(Node):
         try:
             camera_infos = {}
             for rig_id in requested_rigs:
-                registration = self.vision["load_session_registration"](
-                    registration_file, require_em=False, rig_id=rig_id)
                 kwargs = {
                     key: common[key] for key in CAMERA_SETTING_KEYS
                     if key in common
@@ -368,6 +400,19 @@ class MarkerTrackingNode(Node):
                 self.cameras[rig_id] = camera
                 info = camera.info()
                 camera_infos[rig_id] = info
+            if refresh_registration:
+                self.get_logger().info("Collecting startup ChArUco registration; marker publication is blocked")
+                registration_file = str(self.vision["refresh_session_registration"](
+                    self.recording_session_dir,
+                    str(self.get_parameter("registration_config").value), self.cameras,
+                    frames=int(self.get_parameter("registration_frames").value),
+                    timeout_s=float(self.get_parameter("registration_timeout_s").value)))
+                self.get_logger().info(f"Session registration frozen: {registration_file}")
+            for rig_id in requested_rigs:
+                camera = self.cameras[rig_id]
+                info = camera_infos[rig_id]
+                registration = self.vision["load_session_registration"](
+                    registration_file, require_em=False, rig_id=rig_id)
                 if (registration.zed_serial
                         and str(info["serial"]) != registration.zed_serial):
                     raise ValueError(
@@ -381,7 +426,8 @@ class MarkerTrackingNode(Node):
                         f"{registration.resolution}, opened "
                         f"{info['resolution']}")
                 worker = self.vision["CameraCaptureWorker"](
-                    rig_id, camera, preview_stride=1)
+                    rig_id, camera, preview_stride=1,
+                    on_frame_ready=self._notify_frame_ready)
                 tracker = self.vision["StereoRingTracker"](
                     rig_id, registration,
                     minimum_confidence=float(
@@ -404,6 +450,7 @@ class MarkerTrackingNode(Node):
                     camera_config, registration_file, common, camera_infos)
             for worker in self.workers.values():
                 worker.start()
+            self.started_monotonic = time.monotonic()
         except Exception:
             self.close()
             raise
@@ -412,6 +459,9 @@ class MarkerTrackingNode(Node):
         if rate_hz <= 0:
             self.close()
             raise ValueError("process_rate_hz must be positive")
+        # Retain polling as a recovery fallback (and preview completion pump).
+        # Normal processing is frame-driven, bounded by capture cadence rather
+        # than waiting for the next polling tick. Duplicate frames are ignored.
         self.timer = self.create_timer(1.0 / rate_hz, self._process_latest)
         self.watchdog_timer = self.create_timer(0.25, self._watchdog)
         self.get_logger().info(
@@ -428,7 +478,13 @@ class MarkerTrackingNode(Node):
             DiagnosticStatus.OK, "INITIALIZED",
             {"rigs": ",".join(requested_rigs)})
 
+    def _notify_frame_ready(self):
+        if not self.closed:
+            self.frame_ready_guard.trigger()
+
     def _process_latest(self):
+        if self.closed:
+            return
         started = time.perf_counter()
         now = time.monotonic()
         self._publish_ready_preview()
@@ -474,6 +530,7 @@ class MarkerTrackingNode(Node):
                     DiagnosticStatus.ERROR, "PAIRING_STALE", values)
             return
         frames = synchronized
+        frame_timing = frame_stage_timing_values(frames, time.monotonic_ns())
         self._queue_preview(frames, now)
 
         estimates = []
@@ -562,6 +619,7 @@ class MarkerTrackingNode(Node):
             "synchronizer_dropped_frames": str(sum(
                 self.synchronizer.dropped_frames.values())),
         }
+        values.update(frame_timing)
         if self.preview_enabled:
             values.update({
                 "preview_encoded": str(self.preview_encoded),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import math
 
 
 class ControllerState(str, Enum):
@@ -81,6 +82,48 @@ def recoverable_encoder_processing_lag(
         and inputs.encoder_age_s > limits.feedback_s
         and catchup_elapsed_s is not None
         and 0.0 <= catchup_elapsed_s <= catchup_timeout_s)
+
+
+def recoverable_runtime_interruption(inputs: GateInputs, limits: FreshnessLimits,
+                                    reason: str, elapsed_s: float,
+                                    timeout_s: float) -> bool:
+    """Authorize zero output only; never substitute these inputs for motion.
+
+    Share the existing catch-up budget across visual gaps and compute lag.
+    Initialization, raw transport, invalid data and rejection streaks are not
+    recoverable here. Sanitizing just the transient fields exposes any second,
+    hard failure even when readiness reports the transient failure first.
+    """
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("recovery timeout must be finite and positive")
+    if reason not in {
+            "encoder_stale", "accepted_marker_stale",
+            "marker_diagnostic_degraded", "marker_diagnostic_error",
+            "planner_snapshot_stale_at_commit", "deadline_missed", "ready"}:
+        return False
+    if not math.isfinite(elapsed_s) or not 0 <= elapsed_s <= timeout_s:
+        return False
+    raw_age = inputs.encoder_receive_age_s
+    if raw_age is None or not math.isfinite(raw_age) or not 0 <= raw_age <= limits.feedback_s:
+        return False
+    if any(value is None or not math.isfinite(value) or value < 0. for value in (
+            inputs.manager_age_s, inputs.position_age_s,
+            inputs.position_encoder_skew_s)):
+        return False
+    sanitized = replace(inputs, encoder_age_s=raw_age, marker_age_s=0.,
+                        marker_diagnostic_age_s=0., marker_diagnostic_error=False)
+    return readiness(sanitized, limits) == (ControllerState.READY, "ready")
+
+
+def controller_motion_held(reason: str) -> bool:
+    """Shared task-side hold contract; does not grant controller readiness."""
+    return reason.startswith("runtime_pause_zero:") or reason in {
+        "estimator_catchup_zero", "planner_deadline_miss_zero",
+        "planner_reference_changed_zero", "planner_state_changed_zero",
+        "model_posterior_not_ready", "model_posterior_changed_during_plan_zero",
+        "takeup_active", "takeup_confirmation_hold", "takeup_complete_replan",
+        "takeup_saturated_replan", "replanning_after_takeup",
+        "replanning_after_takeup_response", "replanning_after_takeup_saturation"}
 
 
 def paired_source_skew_s(position_timestamp_ns: int | None,

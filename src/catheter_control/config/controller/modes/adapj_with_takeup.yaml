@@ -1,0 +1,12 @@
+/**:
+  ros__parameters:
+    control_method: adapj
+    backlash_compensation_enabled: true
+    takeup_transaction_enabled: true
+    backlash_tendon_takeup_joint_range_enabled: true
+    engaged_gain_enabled: false
+    reversal_scheduler_enabled: false
+    mppi_grouped_mode_sampling: false
+    mppi_engaged_gain_scenarios: false
+    mppi_best_candidate_guard: false
+    mppi_takeup_risk_weight: 0.0

@@ -6,10 +6,20 @@ def declare_parameters(node, *, source_name):
     node.declare_parameter("source_name", source_name)
     node.declare_parameter("command_output_enabled", False)
     node.declare_parameter("simulation_state_reset_enabled", False)
+    # Shared bounded scheduling policy for all controller sessions. Deferral
+    # begins at arm; reference counting and duration/RSS guards remain active.
+    node.declare_parameter("task_gc_enabled", True)
+    node.declare_parameter("task_gc_maximum_s", 300.0)
+    node.declare_parameter("task_gc_growth_mb", 256.0)
     node.declare_parameter("frame_id", "robot_base")
     node.declare_parameter("model_manifest", "")
+    # Explicit G5 opt-in; never inferred from a manifest or command-output flag.
+    node.declare_parameter("engagement_control_enabled", False)
     # Stay in prequential shadow mode until causal replay is reviewed.
     node.declare_parameter("adaptation_enabled", False)
+    node.declare_parameter("control_method", "mppi")
+    node.declare_parameter("adapj_initialization_dir", "")
+    node.declare_parameter("adapj_reference_step_mm", 1.0)
     node.declare_parameter("adaptation_minimum_observations", 4)
     node.declare_parameter("adaptation_minimum_normalized_action", 0.01)
     node.declare_parameter("adaptation_minimum_rotation_deg", 0.10)
@@ -37,8 +47,11 @@ def declare_parameters(node, *, source_name):
     # axis only inside this controller; manager/firmware limits remain the
     # final independent safety authority.
     node.declare_parameter("controller_velocity_max", [-1.0]*6)
+    node.declare_parameter("synchronized_sheath_rotation", False)
     node.declare_parameter("device", "cpu")
     node.declare_parameter("estimator_device", "")
+    # Opt-in spawn-isolated full MPPI solve; estimator snapshots must be CPU.
+    node.declare_parameter("planner_process_enabled", False)
     node.declare_parameter("estimator_dtype", "")
     node.declare_parameter("marker_estimator", "gauss_newton")
     node.declare_parameter("estimator_filter_initial_covariance", 0.25)
@@ -56,12 +69,15 @@ def declare_parameters(node, *, source_name):
     node.declare_parameter("mppi_point_prediction_tail_steps", 0)
     node.declare_parameter("mppi_point_prediction_tail_step_s", 0.12)
     node.declare_parameter("samples", 32)
+    # Dimensionless multiplier of the eligible-cost standard deviation.
+    node.declare_parameter("mppi_temperature", 1.0)
     node.declare_parameter("mppi_noise_std", [4.0, 20.0, 2.0])
     node.declare_parameter("mppi_noise_correlation", 0.65)
     node.declare_parameter("mppi_exploration_fraction", 0.15)
     node.declare_parameter(
         "mppi_reversal_backlash_rad", [0.0, 0.0, 0.0])
     node.declare_parameter("backlash_compensation_enabled", False)
+    node.declare_parameter("backlash_tendon_takeup_joint_range_enabled", False)
     node.declare_parameter("backlash_width_rad", [0.0, 0.0, 0.0])
     node.declare_parameter(
         "backlash_width_positive_rad", [0.0, 0.0, 0.0])
@@ -78,8 +94,11 @@ def declare_parameters(node, *, source_name):
         "backlash_response_direction_cosine", 0.50)
     node.declare_parameter(
         "backlash_minimum_response_evidence", 0.50)
+    node.declare_parameter("backlash_response_window_max_s", 1.0)
     node.declare_parameter(
         "backlash_minimum_distal_bending_increment", 0.05)
+    node.declare_parameter("backlash_minimum_distal_marker_deformation_mm", 0.3)
+    node.declare_parameter("backlash_distal_confirmation_release_ratio", 0.75)
     node.declare_parameter("backlash_width_learning_rate", 0.05)
     node.declare_parameter(
         "backlash_engagement_confirmation_observations", 1)
@@ -143,6 +162,7 @@ def declare_parameters(node, *, source_name):
     node.declare_parameter("mppi_seed", 0)
     node.declare_parameter("planning_deadline_s", 0.06)
     node.declare_parameter("plan_rate_hz", 15.0)
+    node.declare_parameter("mppi_execution_mode", "velocity")
     node.declare_parameter("command_rate_hz", 100.0)
     node.declare_parameter("diagnostic_rate_hz", 10.0)
     node.declare_parameter("encoder_update_rate_hz", 50.0)
@@ -153,6 +173,8 @@ def declare_parameters(node, *, source_name):
     node.declare_parameter("feedback_timeout_s", 0.15)
     # If raw ENC remains fresh while estimator correction runs, command
     # zero for this bounded window before retaining encoder_stale.
+    # Shared continuous zero-output recovery budget (seconds), including the
+    # fresh-observation/decision barrier. It is not a motion freshness limit.
     node.declare_parameter("estimator_catchup_timeout_s", 0.35)
     node.declare_parameter("marker_timeout_s", 0.15)
     node.declare_parameter("maximum_marker_lag_s", 0.15)

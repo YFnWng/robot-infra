@@ -36,6 +36,43 @@ def test_loads_the_same_limits_as_the_production_manager(contract):
     assert np.allclose(contract.model_encoder_count_margin, [1000]*3)
 
 
+@pytest.mark.parametrize("rate", [-25., -7., 0., 7., 25.])
+def test_synchronized_rotation_matches_realized_shafts_without_sheath_bend(contract, rate):
+    local = replace(contract, synchronized_sheath_rotation=True)
+    position = np.array([20., 0., 7., 40., 0., 0.])
+    request = [0., rate, 0., 0., -11., 13.]
+    result = local.project_velocity(request, position)
+    assert result.realized_motor_axis_velocity[1] == result.realized_motor_axis_velocity[4]
+    assert result.realized_motor_axis_velocity[5] == 0.
+    assert np.sign(result.realized_motor_axis_velocity[1]) == np.sign(rate)
+    batch = local.project_velocity_batch(np.array([request]), position)
+    assert batch.realized_motor_axis_velocity[0] == pytest.approx(result.realized_motor_axis_velocity)
+
+
+@pytest.mark.parametrize("axis,position_value,rate", [(1, 270., 10.), (4, 180., 10.),
+                                                      (5, -360., 10.), (4, -180., -10.)])
+def test_synchronized_rotation_stops_both_at_any_member_limit(contract, axis, position_value, rate):
+    local = replace(contract, synchronized_sheath_rotation=True)
+    position = np.array([20., 0., 7., 40., 0., 0.])
+    position[axis] = position_value
+    result = local.project_velocity([0., rate, 0., 0., 0., 0.], position)
+    assert result.realized_motor_axis_velocity[[1, 4, 5]] == pytest.approx([0., 0., 0.])
+
+
+def test_synchronized_encoder_guard_and_repeated_publication(contract):
+    local = replace(contract, synchronized_sheath_rotation=True)
+    position = np.array([20., 0., 7., 40., 0., 0.])
+    position[1] = ((local.model_encoder_count_upper[1]-local.model_encoder_count_margin[1])
+                   *MOTOR_AXIS_UNITS_PER_ENCODER_COUNT[1])
+    result = local.project_velocity([0., 20., 0., 0., 0., 0.], position)
+    assert result.realized_motor_axis_velocity[[1, 4, 5]] == pytest.approx([0., 0., 0.])
+    position[1] = 0.
+    result = local.project_publishable_velocity([0., 7., 0., 0., 0., 0.], position)
+    repeated = local.project_publishable_velocity(result, position)
+    assert repeated == pytest.approx(result)
+    assert local.project_velocity(result, position).realized_motor_axis_velocity[5] == 0.
+
+
 def test_encoder_counts_convert_directly_to_motor_shaft_radians(contract):
     counts = np.array([8000, -8000, 1, 0, 100, -100])
     radians = contract.encoder_counts_to_motor_radians(counts)

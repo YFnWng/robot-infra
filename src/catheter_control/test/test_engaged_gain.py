@@ -4,6 +4,24 @@ import pytest
 from catheter_control.transmission.engaged_gain import EngagedGainConfig, EngagedGainEstimator
 
 
+def test_takeup_discards_excitation_and_requires_fresh_motor_and_shape_response():
+    estimator = EngagedGainEstimator(EngagedGainConfig(enabled=True))
+    def observe(nominal, shape, motor, engaged=True):
+        return estimator.observe(2, -1, nominal, shape, 1, engaged=engaged,
+                                 motor_position=motor)
+    assert not observe(0., 0., 0.)
+    assert observe(.2, .1, -.2)
+    mean = estimator.snapshot().mean.copy()
+    count = estimator.snapshot().update_count.copy()
+    assert not observe(5., -5., -.2, engaged=False)
+    assert not observe(5., -5., -.2)  # Completion anchors; never learns.
+    assert not observe(6., 3., -.2)  # Estimator correction without motor motion.
+    assert not observe(6.1, 3.001, -.4)  # Unresolved shape response.
+    np.testing.assert_array_equal(estimator.snapshot().mean, mean)
+    np.testing.assert_array_equal(estimator.snapshot().update_count, count)
+    assert observe(6.2, 3.1, -.6)
+
+
 def test_gain_updates_only_after_confirmed_engagement():
     estimator = EngagedGainEstimator(EngagedGainConfig(
         enabled=True, observation_std=0.02,

@@ -22,6 +22,24 @@ def test_simulation_launch_has_no_serial_bridge():
     assert all(token not in source for token in forbidden)
 
 
+def test_position_stream_endpoints_are_isolated_and_explicitly_opt_in():
+    source = LAUNCH.read_text()
+    for endpoint in ('/teleop/position_control', '/manager/open_position_stream'):
+        assert source.count(f"('{endpoint}', '/sim{endpoint}')") == 2
+    assert '"position_stream_enabled": execution_mode == \'position_stream\'' in source
+    assert '"mppi_execution_mode": execution_mode' in source
+    assert '/sim/teleop/position_control' in source
+
+
+def test_adapj_initialization_services_are_isolated_and_evidence_required():
+    source = LAUNCH.read_text()
+    for service in ("adapj_initialization", "adapj_cancel_initialization"):
+        assert f'("/catheter_mppi/{service}", "/sim/catheter_mppi/{service}")' in source
+    assert 'if adapj and not adapj_directory:' in source
+    assert '"adapj_initialization_dir": adapj_directory' in source
+    assert 'PLAIN ADAPJ' in source
+
+
 def test_all_safety_critical_endpoints_are_explicitly_remapped():
     source = LAUNCH.read_text(encoding="utf-8")
     required = (

@@ -17,6 +17,7 @@ enum Failure : uint8_t {
   RESPONSE_OVERFLOW = 3,
   EXPLICIT_REJECTION = 4,
   MALFORMED_RESPONSE = 5,
+  AUTHORITY_CANCELLED = 6,  // lease/watchdog cancellation, not driver silence
 };
 
 struct Result {

@@ -15,6 +15,8 @@
   <depend>std_srvs</depend>
   <depend>sensor_msgs</depend>
   <exec_depend>control_tasks</exec_depend>
+  <exec_depend>catheter_control</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rosbag2_py</exec_depend>

@@ -11,7 +11,68 @@ from perception.marker_tracking import (
     load_live_camera_config,
     marker_point_cloud,
     rig_liveness_values,
+    frame_stage_timing_values,
 )
+
+
+def test_frame_ready_only_notifies_executor_and_ignores_shutdown():
+    calls = []
+    node = SimpleNamespace(closed=False,
+        frame_ready_guard=SimpleNamespace(trigger=lambda: calls.append(1)))
+    MarkerTrackingNode._notify_frame_ready(node)
+    assert calls == [1]
+    node.closed = True
+    MarkerTrackingNode._notify_frame_ready(node)
+    assert calls == [1]
+    MarkerTrackingNode._process_latest(node)  # No work after shutdown.
+
+
+def test_capture_stage_times_preserve_source_and_clock_domains():
+    frame = SimpleNamespace(timestamp_ns=1_000_000_000,
+        grab_return_wall_ns=1_010_000_000,
+        retrieval_complete_wall_ns=1_013_000_000,
+        ready_monotonic_ns=40_000_000)
+    values = frame_stage_timing_values({'primary': frame}, 45_000_000)
+    assert values == {
+        'rig_primary_image_to_grab_return_ms': '10.000',
+        'rig_primary_image_to_retrieval_complete_ms': '13.000',
+        'rig_primary_ready_to_pair_selection_ms': '5.000'}
+    assert frame.timestamp_ns == 1_000_000_000
+    assert set(frame_stage_timing_values(
+        {'primary': SimpleNamespace(timestamp_ns=1)}, 2).values()) == {'unknown'}
+
+
+def test_frame_notification_runs_work_on_executor_not_capture_thread():
+    import threading
+    import rclpy
+    from rclpy.context import Context
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.node import Node
+
+    context = Context()
+    rclpy.init(args=[], context=context, domain_id=213)
+    node = Node('frame_ready_notification_test', context=context)
+    executor = SingleThreadedExecutor(context=context)
+    calls = []
+    try:
+        guard = node.create_guard_condition(
+            lambda: calls.append(threading.get_ident()))
+        timer = node.create_timer(60, lambda: None)
+        assert guard.callback_group is timer.callback_group
+        owner = SimpleNamespace(closed=False, frame_ready_guard=guard)
+        worker = threading.Thread(
+            target=lambda: MarkerTrackingNode._notify_frame_ready(owner))
+        worker.start()
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert calls == []
+        executor.add_node(node)
+        executor.spin_once(timeout_sec=1)
+        assert calls == [threading.get_ident()]
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        context.shutdown()
 
 
 def test_diagnostics_report_owned_recording_readiness_without_mutating_input():

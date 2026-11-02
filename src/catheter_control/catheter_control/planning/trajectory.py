@@ -59,7 +59,7 @@ class TrajectorySequencer:
             raise ValueError("start time must be finite")
         self.started_at = float(now)
 
-    def update(self, tip_m, now: float) -> TrajectoryUpdate:
+    def update(self, tip_m, now: float, *, external_hold=False) -> TrajectoryUpdate:
         if self.started_at is None:
             raise RuntimeError("trajectory has not started")
         if self.complete:
@@ -72,9 +72,10 @@ class TrajectorySequencer:
         now = float(now)
         elapsed = now-self.started_at
         error = 1000.0*float(np.linalg.norm(self.waypoints[self.index]-tip))
-        within = error <= self.tolerance_mm
+        within = not external_hold and error <= self.tolerance_mm
         if within:
-            self.within_since = self.within_since or now
+            if self.within_since is None:
+                self.within_since = now
         else:
             self.within_since = None
         reached = bool(

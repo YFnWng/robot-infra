@@ -18,6 +18,19 @@
 # expects is mm/s and deg/s.
 
 catheters:
+  # Temporary, measured +20 mm boot-offset recovery ONLY. Reported -20 mm
+  # equals the original physical zero. Stop MPPI; restore imricor_test after
+  # physical verification and Teensy restart at that zero. Never SET_ZERO.
+  # Restrict insertion to physical [-1,21] mm and lock all other joint targets
+  # at zero. Positive speed maxima are required by the manager loader; other
+  # axes must receive zero speed and zero targets during this recovery.
+  imricor_translation_offset_recovery:
+    pos_lower: [-21.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pos_upper: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    feedback_limit_tolerance: [0.001, 0.01, 0.002, 0.001, 0.01, 0.01]
+    vel_min: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    vel_max: [2.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
   default:
     pos_lower: [-250.0,   -360.0, 0.0,   -100.0,   -360.0, -360.0]
     pos_upper: [250.0,  360.0, 20.8,  100.0,  360.0,  360.0]   # TODO: real lin/rot ranges

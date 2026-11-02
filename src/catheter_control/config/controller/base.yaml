@@ -1,5 +1,8 @@
 /**:
   ros__parameters:
+    task_gc_enabled: true
+    task_gc_maximum_s: 300.0
+    task_gc_growth_mb: 256.0
     adaptation_enabled: false
     backlash_width_rad: [0.0, 0.0, 0.0]
     backlash_width_positive_rad: [0.0, 0.0, 0.0]
@@ -8,6 +11,9 @@
     backlash_engagement_confirmation_observations: 3
     backlash_provisional_rejection_observations: 2
     backlash_minimum_distal_bending_increment: 0.05
+    backlash_minimum_distal_marker_deformation_mm: 0.3
+    # Persistence after raw onset only: 0.225 mm at the unchanged 0.30 mm onset.
+    backlash_distal_confirmation_release_ratio: 0.75
     engaged_gain_minimum: 0.1
     engaged_gain_maximum: 2.0
     engaged_gain_prior_mean: [1.0, 1.0]

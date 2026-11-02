@@ -79,6 +79,7 @@ def test_preconnect_firmware_status_reports_identity_without_transport_ready():
         _logged_firmware_identity=None,
         rx_ready=threading.Event(),
         _set_transport_status=statuses.append,
+        _publish_firmware_identity=lambda identity: None,
     )
     build = b'teensy_tekceleo:bootdiag-v1|built=test'
     body = bytes([1, 0]) + struct.pack('<I', 1234) + build
@@ -108,6 +109,7 @@ def test_firmware_status_exposes_watchdog_stop_flag():
         _logged_firmware_identity=None,
         rx_ready=threading.Event(),
         _set_transport_status=lambda status: None,
+        _publish_firmware_identity=lambda identity: None,
     )
     body = bytes([1, 0x05]) + struct.pack('<I', 1500) + b'test-build'
 
@@ -229,9 +231,11 @@ def test_close_fails_pending_request_and_publishes_status(monkeypatch):
         rx_ready=threading.Event(),
         firmware_alive=threading.Event(),
         firmware_identity='test-build',
+        _publish_firmware_identity=lambda identity: None,
         pending_lock=threading.Lock(),
         pending={bytes(16): {'future': future, 'deadline': 100.0}},
         _last_transport_status=None,
+        transport_status_lock=threading.Lock(),
         transport_status_pub=SimpleNamespace(publish=statuses.append),
         get_logger=lambda: SimpleNamespace(info=lambda message: None),
     )
@@ -417,9 +421,10 @@ def test_position_stream_proves_bidirectional_transport():
     statuses = []
     ready = threading.Event()
     fake = SimpleNamespace(
+        io_lock=threading.RLock(),
         rx_ready=ready,
         last_rx_time=None,
-        serial_port=SimpleNamespace(port='/dev/ttyACM0'),
+        serial_port=SimpleNamespace(port='/dev/ttyACM0', is_open=True),
         configured_port='/dev/ttyACM0',
         _set_transport_status=statuses.append,
     )
@@ -428,6 +433,85 @@ def test_position_stream_proves_bidirectional_transport():
 
     assert ready.is_set() is True
     assert statuses == ['SERIAL_READY:/dev/ttyACM0']
+
+
+def test_existing_rx_ready_reconciles_late_open_status_without_republishing(monkeypatch):
+    published = []
+    ready = threading.Event()
+    ready.set()
+    fake = SimpleNamespace(
+        io_lock=threading.RLock(), transport_status_lock=threading.Lock(),
+        rx_ready=ready, last_rx_time=None,
+        serial_port=SimpleNamespace(port='/dev/ttyACM0', is_open=True),
+        _last_transport_status='SERIAL_OPEN:/dev/ttyACM0',
+        transport_status_pub=SimpleNamespace(publish=lambda msg: published.append(msg.data)),
+    )
+    fake._set_transport_status = lambda status: SerialCommunication._set_transport_status(fake, status)
+    monkeypatch.setattr('control_interface_py.device_serial_com.rclpy.ok', lambda: True)
+    SerialCommunication._mark_rx_ready(fake, DeviceStream.ENC)
+    SerialCommunication._mark_rx_ready(fake, DeviceStream.ENC)
+    assert published == ['SERIAL_READY:/dev/ttyACM0']
+    assert fake._last_transport_status == published[-1]
+
+
+def test_old_or_closed_port_feedback_cannot_resurrect_transport():
+    statuses = []
+    current = SimpleNamespace(port='/dev/ttyACM0', is_open=True)
+    old = SimpleNamespace(port='/dev/ttyACM0', is_open=True)
+    fake = SimpleNamespace(io_lock=threading.RLock(), rx_ready=threading.Event(),
+                           serial_port=current, _set_transport_status=statuses.append)
+    SerialCommunication._mark_rx_ready(fake, DeviceStream.ENC, received_port=old)
+    current.is_open = False
+    SerialCommunication._mark_rx_ready(fake, DeviceStream.ENC, received_port=current)
+    assert not fake.rx_ready.is_set() and not statuses
+
+
+def test_status_cache_and_publication_are_serialized(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    published = []
+
+    def publish(msg):
+        if msg.data.startswith('SERIAL_OPEN:'):
+            entered.set()
+            assert release.wait(2.)
+        published.append(msg.data)
+
+    fake = SimpleNamespace(transport_status_lock=threading.Lock(),
+                           _last_transport_status=None,
+                           transport_status_pub=SimpleNamespace(publish=publish))
+    monkeypatch.setattr('control_interface_py.device_serial_com.rclpy.ok', lambda: True)
+    first = threading.Thread(target=SerialCommunication._set_transport_status,
+                             args=(fake, 'SERIAL_OPEN:/dev/test'))
+    second = threading.Thread(target=SerialCommunication._set_transport_status,
+                              args=(fake, 'SERIAL_READY:/dev/test'))
+    first.start()
+    assert entered.wait(2.)
+    second.start()
+    release.set()
+    first.join(2.)
+    second.join(2.)
+    assert not first.is_alive() and not second.is_alive()
+    assert published == ['SERIAL_OPEN:/dev/test', 'SERIAL_READY:/dev/test']
+    assert fake._last_transport_status == published[-1]
+
+
+def test_connect_open_status_precedes_rx_readiness(monkeypatch):
+    statuses = []
+    fake = SimpleNamespace(
+        configured_port='/dev/test', connection_lock=threading.RLock(),
+        io_lock=threading.RLock(), serial_port=None, is_connected=False,
+        rx_ready=threading.Event(), firmware_alive=threading.Event(),
+        firmware_identity=None, connect_retries=1, baudrate=115200,
+        _publish_firmware_identity=lambda identity: None,
+        serial_timeout_s=.1, _set_transport_status=statuses.append,
+    )
+    fake.get_logger = lambda: SimpleNamespace(
+        info=lambda text: SerialCommunication._mark_rx_ready(fake, DeviceStream.ENC),
+        warn=lambda text: None, error=lambda text: None)
+    monkeypatch.setattr('control_interface_py.device_serial_com.serial.Serial',
+                        lambda *args, **kwargs: SimpleNamespace(port='/dev/test', is_open=True))
+    assert SerialCommunication.connect(fake)
+    assert statuses == ['SERIAL_OPEN:/dev/test', 'SERIAL_READY:/dev/test']
 
 
 def test_connection_disconnect_is_explicit_not_a_toggle():

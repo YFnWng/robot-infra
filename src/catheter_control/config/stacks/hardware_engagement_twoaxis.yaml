@@ -1,0 +1,11 @@
+schema_version: 1
+name: hardware.engagement.twoaxis
+node_name: catheter_mppi
+description: Explicit G5 trial; requires a separately supplied experimental manifest.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/engagement.yaml
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/sparse_points/engagement_twoaxis.yaml

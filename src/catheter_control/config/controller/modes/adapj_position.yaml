@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    # Existing native endpoint backend; no moving target replacement.
+    mppi_execution_mode: position_stream

@@ -1,0 +1,21 @@
+# Empirical bending direction from the frozen mount01 reaching targets.
+# A planar circle is a task proposal, not a proof of workspace reachability.
+frame_id: robot_base
+action_name: /catheter_mppi/track_tip_path
+marker_topic: /shape_tracking/markers
+auto_arm: true
+nominal_speed_mm_s: 1.0
+total_timeout_s: 120.0
+final_tolerance_mm: 1.8
+final_settle_time_s: 0.3
+soft_error_mm: 2.0
+pause_error_mm: 5.0
+resume_error_mm: 1.5
+hard_error_mm: 15.0
+generator:
+  type: circle_plane_from_current_tip
+  plane_basis: [[0.7071067811865476, 0.7071067811865476, 0.0], [0.0, 0.0, 1.0]]
+  radius_mm: 4.0
+  waypoint_count: 72
+  direction: ccw
+  close_circle: true

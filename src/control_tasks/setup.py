@@ -23,6 +23,7 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
+            "catheter_adapj_initialize = control_tasks.bootstrap:catheter_adapj_initialize",
             ("catheter_target_offset = "
              "control_tasks.bootstrap:catheter_target_offset"),
             ("catheter_tip_trajectory = "

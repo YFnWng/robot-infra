@@ -28,6 +28,7 @@ import yaml
 from .target_offset import controller_status, measured_tip
 from .trajectory_file import _circle_waypoints
 from .trial_records import TrialRecords, finite_error
+from .task_outcomes import TaskFailure
 
 
 @dataclass(frozen=True)
@@ -314,6 +315,8 @@ class SparsePointExperiment(Node):
         self.rotation_guard_violation = None
         self.home_request_stamp = None
         self.home_accepted_target = None
+        self.home_stage_start_ns = None
+        self.home_transaction_failure = None
         self.control_pub = self.create_publisher(
             ControlStream, spec.control_topic, 10)
         self.event_pub = self.create_publisher(
@@ -333,6 +336,8 @@ class SparsePointExperiment(Node):
         self.create_subscription(
             DeviceStream, spec.manager_control_topic,
             self._manager_control_cb, 10)
+        self.create_subscription(
+            ManagerEvent, "/manager/event", self._home_event_cb, 10)
         safety_qos = QoSProfile(depth=1)
         safety_qos.reliability = ReliabilityPolicy.RELIABLE
         safety_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -371,6 +376,25 @@ class SparsePointExperiment(Node):
         self.manager_ready = message.text == "MANAGER_READY"
         self.safety_text = message.text
         self.safety_time = time.monotonic()
+
+    def _home_event_cb(self, message):
+        if self.home_stage_start_ns is None:
+            return
+        stamp = (int(message.header.stamp.sec)*1_000_000_000
+                 + int(message.header.stamp.nanosec))
+        if stamp < self.home_stage_start_ns:
+            return
+        if (message.predicate == ManagerEvent.POSITION_STATUS
+                and len(message.state) >= 3
+                and message.state[1] in (
+                    ManagerEvent.POSITION_TIMED_OUT,
+                    ManagerEvent.POSITION_REJECTED)):
+            self.home_transaction_failure = (
+                f"{message.text} mask=0x{message.state[2]:02X} "
+                f"device_errors={list(message.data[3:])}")
+            self.home_failure_status = message.state[1]
+            self.home_failure_mask = message.state[2]
+            self.home_failure_time = time.monotonic()
 
     def _status_cb(self, message):
         try:
@@ -634,9 +658,45 @@ class SparsePointExperiment(Node):
                                    + int(message.header.stamp.nanosec))
         self.control_pub.publish(message)
 
+    def _stop_before_home_retry(self, deadline, failure_time):
+        """Verify a fresh, stationary, manager-ready stop; never clear faults."""
+        self._publish_mode(ManagerEvent.NONE)
+        anchor = None
+        stationary_since = None
+        next_heartbeat = 0.0
+        while rclpy.ok() and time.monotonic() < min(deadline, failure_time+2.0):
+            rclpy.spin_once(self, timeout_sec=0.02)
+            now = time.monotonic()
+            if (not self.manager_ready or self.safety_time is None
+                    or now-self.safety_time > 1.0):
+                raise RuntimeError("manager inhibited or stale during home retry stop")
+            if now >= next_heartbeat:
+                self._publish_mode(ManagerEvent.NONE)
+                next_heartbeat = now+0.10
+            if (self.safety_time < failure_time or self.position_time is None
+                    or self.position_time < failure_time
+                    or now-self.position_time > 0.5):
+                anchor = stationary_since = None
+                continue
+            if anchor is None or np.any(np.abs(self.position-anchor)
+                                         > self.spec.home_tolerance*0.25):
+                anchor = self.position.copy()
+                stationary_since = self.position_time
+            elif self.position_time-stationary_since >= 0.20:
+                self._publish_mode(ManagerEvent.JOINT_POS)
+                ready_at = time.monotonic()+self.spec.home_mode_settle_s
+                while rclpy.ok() and time.monotonic() < ready_at:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("home deadline exhausted during retry mode settle")
+                    rclpy.spin_once(self, timeout_sec=0.02)
+                    if not self.manager_ready:
+                        raise RuntimeError("manager inhibited while reclaiming home mode")
+                return
+        raise RuntimeError("fresh stationary feedback not verified for home retry")
+
     def _run_home_stage(self, target, axes, deadline, label,
-                        allow_insertion_projection=False):
-        """Drive one guarded position stage without leaving position mode."""
+                        allow_insertion_projection=False, stop_when=None):
+        """Drive a guarded stage, with at most one stopped timeout retry."""
         target = np.asarray(target, dtype=np.float64)
         axes = np.asarray(axes, dtype=np.int64)
         within_since = None
@@ -645,17 +705,64 @@ class SparsePointExperiment(Node):
         self.home_request_stamp = None
         effective_target = None
         projection_logged = False
+        self.home_stage_start_ns = self.get_clock().now().nanoseconds
+        self.home_transaction_failure = None
+        attempt_start = None if self.position is None else self.position.copy()
+        retries = 0
         while rclpy.ok() and time.monotonic() < deadline:
             now = time.monotonic()
             if (not self.manager_ready or self.safety_time is None
                     or now-self.safety_time > 1.0):
                 raise RuntimeError(
                     "manager became inhibited or stale while homing")
+            if stop_when is not None and stop_when():
+                self._publish_mode(ManagerEvent.NONE)
+                self.home_stage_start_ns = None
+                return True
             if now >= next_publish:
                 self._publish_home(target)
                 next_publish = now+0.10
             rclpy.spin_once(self, timeout_sec=0.02)
             now = time.monotonic()
+            if self.home_transaction_failure is not None:
+                failure = self.home_transaction_failure
+                mask = getattr(self, "home_failure_mask", 0)
+                failed_axes = np.asarray([i for i in range(6) if mask & (1 << i)])
+                progress = None
+                if (effective_target is not None and attempt_start is not None
+                        and self.position is not None and failed_axes.size):
+                    # Firmware masks refer to physical motors, not coupled
+                    # logical insertion. Knob motion is not chassis progress.
+                    start, current, endpoint = (v.copy() for v in
+                                               (attempt_start, self.position, effective_target))
+                    for value in (start, current, endpoint):
+                        value[0] -= value[2]
+                    progress = np.abs(endpoint-start)-np.abs(endpoint-current)
+                eligible = (
+                    getattr(self, "home_failure_status", None) == ManagerEvent.POSITION_TIMED_OUT
+                    and retries == 0 and progress is not None
+                    and self.position_time is not None and now-self.position_time <= 0.5
+                    and np.all(progress[failed_axes] >= self.spec.home_tolerance[failed_axes]))
+                self.home_stage_start_ns = None
+                if not eligible:
+                    raise RuntimeError(f"{label} device transaction failed: {failure}; retry not eligible")
+                self.get_logger().warn(f"{label}: {failure}; verifying stop before one bounded retry")
+                SparsePointExperiment._stop_before_home_retry(
+                    self, deadline, self.home_failure_time)
+                retries += 1
+                target = effective_target.copy()
+                allow_insertion_projection = False
+                attempt_start = self.position.copy()
+                self.home_accepted_target = self.home_request_stamp = None
+                self.home_transaction_failure = None
+                self.home_stage_start_ns = self.get_clock().now().nanoseconds
+                within_since = None
+                next_publish = 0.0
+                continue
+            if stop_when is not None and stop_when():
+                self._publish_mode(ManagerEvent.NONE)
+                self.home_stage_start_ns = None
+                return True
             if self.home_accepted_target is None:
                 within_since = None
                 continue
@@ -689,6 +796,7 @@ class SparsePointExperiment(Node):
                 self.get_logger().info(
                     "%s complete: %s" % (
                         label, np.round(self.position, 4).tolist()))
+                self.home_stage_start_ns = None
                 return
         if effective_target is None:
             detail = "no matching manager-approved POS command received"
@@ -702,6 +810,7 @@ class SparsePointExperiment(Node):
                 f"position={np.round(self.position, 4).tolist()} "
                 f"residual={np.round(residual, 4).tolist()} "
                 f"tolerance={self.spec.home_tolerance.tolist()}")
+        self.home_stage_start_ns = None
         raise RuntimeError(f"{label} timed out: {detail}")
 
     def wait_for_inputs(self, timeout_s):
@@ -778,6 +887,7 @@ class SparsePointExperiment(Node):
                 self.spec.home_position, range(6), deadline,
                 f"point {index+1} home")
         except RuntimeError:
+            self.home_stage_start_ns = None
             self._publish_mode(ManagerEvent.NONE)
             raise
         self._publish_mode(ManagerEvent.NONE)
@@ -846,8 +956,10 @@ class SparsePointExperiment(Node):
                 index+1, count, result.reached_waypoints,
                 result.timed_out_waypoints, result.final_error_mm))
         if not result.success:
-            raise RuntimeError(
-                f"point {index+1} controller action failed: {result.message}")
+            raise TaskFailure(
+                f"point {index+1} controller action failed: {result.message}",
+                fault_reason=result.fault_reason,
+                fault_snapshot_json=result.fault_snapshot_json)
         self.active_goal_handle = None
         self.wait_for_disarmed()
         return result
@@ -868,17 +980,43 @@ def _arguments(argv):
     parser.add_argument("yaml_file")
     parser.add_argument("--startup-timeout-s", type=float, default=10.0)
     parser.add_argument("--trial-records", help="New JSONL task journal path")
+    parser.add_argument("--home-only", action="store_true",
+                        help="Run guarded initial home only; do not generate targets or arm MPPI")
+    parser.add_argument("--freeze-targets", help="Home and preview only; save an exclusive frozen YAML, then exit without reaching")
     result = parser.parse_args(remove_ros_args(args=argv)[1:])
+    if result.home_only and result.freeze_targets:
+        parser.error("--home-only and --freeze-targets are mutually exclusive")
     if (not math.isfinite(result.startup_timeout_s)
             or result.startup_timeout_s <= 0.0):
         parser.error("--startup-timeout-s must be finite and positive")
     return result
 
 
+def save_frozen_targets(source, output, targets):
+    """Preserve reviewed task gates; replace only its target generator."""
+    config = yaml.safe_load(Path(source).read_text())
+    values = np.asarray(targets,dtype=float)
+    if values.ndim != 2 or values.shape[1] != 3 or not len(values) or not np.isfinite(values).all():
+        raise ValueError('finite frozen XYZ targets in metres required')
+    generated_preview = config.get('generator', {}).get('type') == 'controller_model_joint_displacements'
+    config['generator'] = {'type':'absolute_targets_m','targets_m':values.tolist()}
+    if generated_preview and config.get('required_controller_status', {}).get('engagement_control_enabled'):
+        config['target_preview'] = {
+            'semantics': 'hypothetical_post_engagement_shape_displacement',
+            'takeup_execution_feasibility_certified': False,
+            'model_reachability_bounds': 'advisory',
+            'execution_limits_and_takeup_checks': 'unchanged',
+        }
+    with Path(output).open('x') as stream:
+        yaml.safe_dump(config,stream,sort_keys=False)
+
+
 def main(args=None):
     argv = sys.argv if args is None else args
     parsed = _arguments(argv)
     spec = load_sparse_point_experiment(parsed.yaml_file)
+    if parsed.freeze_targets and Path(parsed.freeze_targets).exists():
+        raise FileExistsError(parsed.freeze_targets)
     records = TrialRecords(parsed.trial_records)
     rclpy.init(args=argv)
     node = SparsePointExperiment(spec)
@@ -886,16 +1024,23 @@ def main(args=None):
     def record(event, **fields):
         records.write(event, node.get_clock().now().nanoseconds, **fields)
 
-    def home(index):
-        record("home_started", trial=index + 1)
+    def home(index, *, final=False):
+        record("final_home_started" if final else "home_started",
+               trial=None if final else index + 1)
         node.home(index)
-        record("home_completed", trial=index + 1,
+        record("final_home_completed" if final else "home_completed",
+               trial=None if final else index + 1,
                measured_tip_m=None if node.tip is None else node.tip.tolist())
 
     def reach(index, count, target):
         record("trial_started", trial=index + 1, target_m=target.tolist(),
                measured_tip_m=None if node.tip is None else node.tip.tolist())
-        result = node.run_target(index, count, target)
+        try:
+            result = node.run_target(index, count, target)
+        except TaskFailure as error:
+            record("trial_failed", trial=index + 1, reason=str(error),
+                   **error.fields())
+            raise
         record("trial_completed", trial=index + 1,
                reached=int(result.reached_waypoints),
                timed_out=int(result.timed_out_waypoints),
@@ -906,8 +1051,14 @@ def main(args=None):
     try:
         record("task_started")
         node.wait_for_inputs(parsed.startup_timeout_s)
+        if parsed.home_only:
+            home(0)
+            record("task_completed", home_only=True)
+            return
         regenerate = bool(spec.generator.get(
             "regenerate_after_each_home", False))
+        if regenerate and parsed.freeze_targets:
+            raise ValueError('freeze-targets requires one common initial-home preview')
         if regenerate:
             count = len(spec.generator["logical_displacements"])
             for index in range(count):
@@ -930,6 +1081,10 @@ def main(args=None):
             home_tip = node.tip.copy()
             targets = node.generate_targets(home_tip)
             record("targets_frozen", targets_m=[target.tolist() for target in targets])
+            if parsed.freeze_targets:
+                save_frozen_targets(parsed.yaml_file,parsed.freeze_targets,targets)
+                node.get_logger().info(f"Frozen targets saved: {parsed.freeze_targets}; no reaching started")
+                return
             node.get_logger().info(
                 "froze %d sparse targets from home "
                 "tip=[%.3f, %.3f, %.3f] mm" % (
@@ -941,6 +1096,10 @@ def main(args=None):
                     index, len(targets), target))
         reached = sum(result.reached_waypoints for result in results)
         timed_out = sum(result.timed_out_waypoints for result in results)
+        # Reuse guarded position homing after normal completion (including
+        # target timeouts), not exception/cancellation cleanup. A fault must
+        # never trigger an automatic actuator recovery in finally.
+        home(len(results), final=True)
         node.get_logger().info(
             f"sparse-point experiment complete: {reached} reached, "
             f"{timed_out} timed out")
@@ -950,10 +1109,16 @@ def main(args=None):
         node._publish_mode(ManagerEvent.NONE)
         node.get_logger().warn("sparse-point experiment interrupted")
         record("task_interrupted")
+        if parsed.home_only:
+            raise
     except Exception as exc:
         node.cancel_active()
         node._publish_mode(ManagerEvent.NONE)
-        record("task_failed", reason=str(exc))
+        record("task_failed", reason=str(exc),
+               **(exc.fields() if isinstance(exc, TaskFailure) else {}))
+        if isinstance(exc, TaskFailure):
+            node.get_logger().error(str(exc))
+            return 2
         raise
     finally:
         records.close()
@@ -963,4 +1128,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

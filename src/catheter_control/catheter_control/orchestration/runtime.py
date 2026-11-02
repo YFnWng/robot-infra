@@ -76,13 +76,25 @@ def load_runtime(
 
 def load_runtime_pair(model_manifest: str, *, estimator_device: str,
                       planner_device: str, estimator_dtype="float32",
-                      planner_dtype="float32", options=None):
+                      planner_dtype="float32", options=None,
+                      experimental_engagement=False):
     """Reuse identical compute settings; verify split artifacts and precision."""
     if (estimator_dtype not in ("float32", "float64")
             or planner_dtype not in ("float32", "float64")):
         raise ValueError("runtime dtype must be float32 or float64")
     estimator = load_runtime(model_manifest, device=estimator_device,
-                             dtype=estimator_dtype, options=options)
+                             dtype=estimator_dtype, options={} if experimental_engagement else options)
+    experimental = getattr(getattr(estimator,'identity',None),'runtime_family',None) == "experimental_joint_engagement"
+    if experimental != experimental_engagement:
+        raise ValueError("engagement_control_enabled must match the selected experimental family")
+    if experimental:
+        # The parent owns CPU inference only. ProcessPlanner loads its GPU
+        # backend in the child, exactly as qualified by G4.
+        if estimator_device != "cpu":
+            raise ValueError("experimental engagement requires CPU estimator")
+        if not estimator.runtime.command_capable:
+            raise ValueError("G5 requires an explicit command-trial manifest; G4 shadow cannot command")
+        return estimator, estimator
     if estimator_device == planner_device and estimator_dtype == planner_dtype:
         return estimator, estimator
     from cr_meta_lnn.deployment import RuntimeState

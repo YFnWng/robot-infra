@@ -19,12 +19,19 @@ def module():
     return value
 
 
-def test_composition_has_one_recorder_and_output_disabled(tmp_path, monkeypatch):
+@pytest.mark.parametrize("estimator_device,estimator_dtype", [("", ""), ("cpu", "float64")])
+@pytest.mark.parametrize("planner_process", ["", "false", "true"])
+@pytest.mark.parametrize("temperature", ["", "0.3"])
+def test_composition_has_one_recorder_and_output_disabled(
+        tmp_path, monkeypatch, estimator_device, estimator_dtype, planner_process,
+        temperature):
     import launch.logging
     monkeypatch.setattr(launch.logging.launch_config, "_log_dir", str(tmp_path))
     source = module()
     registration = tmp_path / "registration.json"
     registration.write_text("{}")
+    registration_config = tmp_path / "registration_config.yaml"
+    registration_config.write_text("units: mm\n")
     camera = tmp_path / "camera.yaml"
     camera.write_text("camera: {resolution: HD720, fps: 30}\n")
     camera_python = tmp_path / "venv" / "bin" / "python"
@@ -33,12 +40,20 @@ def test_composition_has_one_recorder_and_output_disabled(tmp_path, monkeypatch)
     context = LaunchContext()
     context.launch_configurations.update({
         "video": "true", "command_output_enabled": "false",
+        "point_rollout_step_override_s": "0.06666666666666667",
+        "horizon_steps_override": "12",
         "camera_config": str(camera), "registration_file": str(registration),
+        "registration_config": str(registration_config), "registration_frames": "20",
         "stack_config": "hardware_grouped_no_rotation_farther_tendon_12",
         "startup_timeout_s": "60", "session_root": str(tmp_path / "sessions"),
         "session_label": "attribution_grouped_n512_repeat01",
         "shape_tracking_root": str(tmp_path),
         "camera_python": str(camera_python),
+        "estimator_device": estimator_device, "estimator_dtype": estimator_dtype,
+        "planner_process_enabled": planner_process,
+        "mppi_temperature": temperature,
+        "path_prediction_grid": "point",
+        "model_manifest": "/tmp/explicit-engagement-manifest.json",
     })
     monkeypatch.setattr(source, "Node", lambda **kw: SimpleNamespace(**kw))
     actions = source._setup(context)
@@ -48,10 +63,33 @@ def test_composition_has_one_recorder_and_output_disabled(tmp_path, monkeypatch)
     manifest = json.loads(manifest_path.read_text())
     assert manifest["state"] == "allocated"
     assert not manifest["command_output_enabled"]
+    assert manifest["estimator_device"] == estimator_device
+    assert manifest["planner_process_enabled"] == planner_process
+    assert manifest["mppi_temperature"] == temperature
+    assert manifest["path_prediction_grid"] == "point"
+    assert "path_prediction_grid:=point" in manifest["commands"]["controller"]
+    assert manifest['point_rollout_step_override_s'] == '0.06666666666666667'
+    assert 'point_rollout_step_override_s:=0.06666666666666667' in manifest['commands']['controller']
+    assert manifest['horizon_steps_override'] == '12'
+    assert 'horizon_steps_override:=12' in manifest['commands']['controller']
+    for name, value in (("estimator_device", estimator_device),
+                        ("estimator_dtype", estimator_dtype),
+                        ("planner_process_enabled", planner_process),
+                        ("mppi_temperature", temperature)):
+        if value:
+            assert f"{name}:={value}" in manifest["commands"]["controller"]
+        else:
+            assert not any(argument.startswith(f"{name}:=")
+                           for argument in manifest["commands"]["controller"])
     assert "record:=false" in manifest["commands"]["controller"]
+    assert "model_manifest:=/tmp/explicit-engagement-manifest.json" in manifest['commands']['controller']
     assert "command_output_enabled:=false" in manifest["commands"]["controller"]
     assert manifest["commands"]["bag"].count("record") == 1
     assert "recording_enabled:=true" in manifest["commands"]["camera"]
+    assert "registration_refresh_enabled:=true" in manifest["commands"]["camera"]
+    assert "registration_frames:=20" in manifest["commands"]["camera"]
+    assert not any('registration_file:=' in item for item in manifest['commands']['camera'])
+    assert manifest['registration_policy'] == 'session_charuco_independent_per_rig'
     assert manifest["commands"]["camera"][0] == str(camera_python)
     assert not Path(manifest["video_directory"]).exists()
     assert not Path(manifest["bag_directory"]).exists()

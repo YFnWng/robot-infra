@@ -110,6 +110,8 @@ class EngagedGainEstimator:
         self.active_direction = np.zeros(CONTROL_AXES, dtype=np.int8)
         self.last_nominal = np.full(CONTROL_AXES, np.nan)
         self.last_observed = np.full(CONTROL_AXES, np.nan)
+        self.last_motor = np.full(CONTROL_AXES, np.nan)
+        self.previous_motor = np.full(CONTROL_AXES, np.nan)
         self.last_observation_timestamp_ns = np.zeros(
             CONTROL_AXES, dtype=np.int64)
         self.last_reason = ["disabled" if not config.enabled else "unobserved"
@@ -139,6 +141,8 @@ class EngagedGainEstimator:
         self.active_direction[axis] = int(np.sign(direction))
         self.last_nominal[axis] = np.nan
         self.last_observed[axis] = np.nan
+        self.last_motor[axis] = np.nan
+        self.previous_motor[axis] = np.nan
         self.last_observation_timestamp_ns[axis] = 0
         self.log_variance[axis, index] = max(
             self.log_variance[axis, index],
@@ -178,7 +182,8 @@ class EngagedGainEstimator:
         self.last_reason[axis] = reason
 
     def observe(self, axis: int, direction: int, nominal_lambda,
-                observed_lambda, timestamp_ns, *, engaged: bool):
+                observed_lambda, timestamp_ns, *, engaged: bool,
+                motor_position=None, minimum_motor_travel=0.10):
         """Update from posterior versus pre-correction nominal lambda change."""
         axis = int(axis)
         if not self.config.enabled or axis != self.config.tendon_axis:
@@ -186,6 +191,12 @@ class EngagedGainEstimator:
             return False
         direction = int(np.sign(direction))
         if not engaged or direction == 0:
+            # Do not carry excitation through another shaft's take-up or an
+            # unconfirmed interval. Preserve the learned posterior itself.
+            self.last_nominal[axis] = np.nan
+            self.last_observed[axis] = np.nan
+            self.last_motor[axis] = np.nan
+            self.previous_motor[axis] = np.nan
             self.last_reason[axis] = "not_engaged"
             return False
         nominal = float(nominal_lambda)
@@ -194,6 +205,26 @@ class EngagedGainEstimator:
         if not np.isfinite(nominal) or not np.isfinite(observed):
             self.last_reason[axis] = "nonfinite_observation"
             return False
+        if motor_position is not None:
+            motor = float(motor_position)
+            if not np.isfinite(motor):
+                raise ValueError("gain motor position must be finite")
+            moving = (not np.isfinite(self.previous_motor[axis])
+                      or abs(motor-self.previous_motor[axis]) > 1e-9)
+            self.previous_motor[axis] = motor
+            if not moving:
+                self.last_motor[axis] = motor
+                self.confirm(axis, direction, nominal, observed, timestamp)
+                self.last_reason[axis] = "stationary_tendon"
+                return False
+            if not np.isfinite(self.last_motor[axis]):
+                self.last_motor[axis] = motor
+                self.confirm(axis, direction, nominal, observed, timestamp)
+                return False
+            travel = motor-self.last_motor[axis]
+            if travel*direction < minimum_motor_travel:
+                self.last_reason[axis] = "insufficient_engaged_motor_travel"
+                return False
         if (self.active_direction[axis] != direction
                 or not np.isfinite(self.last_nominal[axis])
                 or not np.isfinite(self.last_observed[axis])):
@@ -209,6 +240,9 @@ class EngagedGainEstimator:
 
         phi = nominal-self.last_nominal[axis]
         response = observed-self.last_observed[axis]
+        if motor_position is not None and abs(response) < self.config.observation_std:
+            self.last_reason[axis] = "insufficient_shape_response"
+            return False
         if abs(phi) < self.config.minimum_nominal_increment:
             self.last_reason[axis] = "insufficient_nominal_excitation"
             return False
@@ -231,12 +265,16 @@ class EngagedGainEstimator:
             self._reject_and_reanchor(
                 axis, index, nominal, observed, timestamp,
                 "contradictory_response")
+            if motor_position is not None:
+                self.last_motor[axis] = motor
             return False
 
         if abs(normalized) > self.config.maximum_normalized_innovation:
             self._reject_and_reanchor(
                 axis, index, nominal, observed, timestamp,
                 "innovation_rejected")
+            if motor_position is not None:
+                self.last_motor[axis] = motor
             return False
 
         robust = min(1.0, self.config.huber_sigma/max(abs(normalized), 1e-12))
@@ -254,6 +292,8 @@ class EngagedGainEstimator:
         self.last_nominal[axis] = nominal
         self.last_observed[axis] = observed
         self.last_observation_timestamp_ns[axis] = timestamp
+        if motor_position is not None:
+            self.last_motor[axis] = motor
         self.last_reason[axis] = "updated"
         return True
 

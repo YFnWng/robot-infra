@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -80,7 +81,10 @@ def test_response_diagnostics_preserve_units_and_optional_direction():
 
     values = response_diagnostic_values(response, pending_count=4)
 
-    assert len(values) == 12
+    assert len(values) == 16
+    assert values["response_comparison_valid"] == "False"
+    assert values["response_comparison_reason"] == "unaligned_observations"
+    assert values["response_root_readout_error_mm"] == "none"
     assert values["response_forecast_horizon_ms"] == "200"
     assert values["response_observation_lateness_ms"] == "50"
     assert values["response_start_observation_skew_ms"] == "10"
@@ -133,7 +137,16 @@ def test_transmission_diagnostics_preserve_belief_and_transaction_state():
     values = transmission_diagnostic_values(
         np.zeros(6), np.ones(6), True, None, snapshot, True, arbiter)
 
-    assert len(values) == 49
+    assert len(values) == 58
+    assert values['backlash_tendon_response_timestamp_ns'] == '0'
+    assert values['backlash_tendon_response_encoder_quiet'] == 'False'
+    assert values['takeup_response_stop_source_ns'] == 'None'
+    assert values['takeup_response_post_stop_observations'] == '0'
+    assert values['backlash_tendon_response_onset'] == 'False'
+    assert values['backlash_tendon_response_noise_mm'] == 'nan'
+    assert values['backlash_tendon_response_onset_floor_mm'] == 'nan'
+    assert values['backlash_tendon_response_deformation_mm'] == '0'
+    assert values['backlash_tendon_response_chord_support_mm'] == '0'
     assert values["command"] == "[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]"
     assert values["backlash_model_encoder_input"] == (
         "estimated_transmitted")
@@ -141,6 +154,25 @@ def test_transmission_diagnostics_preserve_belief_and_transaction_state():
     assert values["backlash_width_rad"] == "[1.0, 2.0, 3.0]"
     assert values["takeup_transaction_state"] == "READY_TO_PLAN"
     assert values["takeup_transaction_active_mask"] == "[0, 0, 0]"
+
+
+def test_transmission_diagnostics_with_joint_belief_without_legacy_gain():
+    snapshot, arbiter = _transmission_state()
+    arguments = (np.zeros(6), np.ones(6), True, None)
+    baseline = transmission_diagnostic_values(
+        *arguments, snapshot, True, arbiter)
+    values = transmission_diagnostic_values(
+        *arguments, replace(snapshot, engaged_gain=None), True, arbiter)
+
+    assert values.keys() == baseline.keys()
+    assert values["engaged_gain_enabled"] == "False"
+    for key in baseline:
+        if key == "engaged_gain_enabled":
+            continue
+        if key.startswith("engaged_gain_"):
+            assert values[key] == "none"
+        else:
+            assert values[key] == baseline[key]
 
 
 def test_planner_policy_diagnostics_preserve_mode_and_group_counts():
@@ -155,11 +187,13 @@ def test_planner_policy_diagnostics_preserve_mode_and_group_counts():
     }
 
     values = planner_policy_diagnostic_values(
-        MppiConfig(), capture, scheduler, arbiter)
+        MppiConfig(temperature=0.3), capture, scheduler, arbiter)
 
-    assert len(values) == 39
+    assert len(values) == 41
+    assert values["mppi_always_engaged_rollout"] == "False"
     assert values["reversal_mode_selector"] == "grouped_mppi"
     assert values["mppi_samples"] == "32"
+    assert values["mppi_temperature"] == "0.3"
     assert values["mppi_active_proposal_groups"] == "1"
     assert values["mppi_minimum_samples_per_active_group"] == "32"
     assert values["capture_last_response_reason"] == "consistent"
@@ -170,6 +204,7 @@ def test_runtime_diagnostics_preserve_none_and_boolean_encoding():
     contract = SimpleNamespace(
         velocity_min=np.full(6, -1.0),
         velocity_max=np.ones(6),
+        synchronized_sheath_rotation=False,
     )
 
     values = runtime_diagnostic_values(
@@ -188,7 +223,7 @@ def test_runtime_diagnostics_preserve_none_and_boolean_encoding():
         takeup_response_free_mask=np.array([True, True, False]),
     )
 
-    assert len(values) == 15
+    assert len(values) == 16
     assert values["takeup_saturation_position"] == "none"
     assert values["takeup_saturation_position_timestamp_ns"] == "none"
     assert values["planner_snapshot_age_ms"] == "none"

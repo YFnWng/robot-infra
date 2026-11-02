@@ -59,11 +59,13 @@ rotation_guard:
   tolerance: 1.0e-9
 
 generator:
-  # Exact targets recorded from the successful grouped-controller session
-  # 20260929_104353_mppi_demo. Both baselines execute the same Cartesian task.
+  # Shared fixed target revision 20261005: target 1 X/Y use the first home tip
+  # from attribution_twoaxis_points_plain_v171_n512_mount01_repeat01_20261005T205325853046Z.
+  # Its Z and targets 2-4 retain the 20260929_104353_mppi_demo coordinates.
+  # All three controller variants use this set; never recenter per run.
   type: absolute_targets_m
   targets_m:
-    - [0.024685867130756378, 0.020163964480161667, 0.08448133617639542]
+    - [0.02608313597738743, 0.022739075124263763, 0.08448133617639542]
     - [0.03320372849702835, 0.02986534871160984, 0.06324673444032669]
     - [0.031191052868962288, 0.02978038229048252, 0.0510878749191761]
     - [0.031725503504276276, 0.029091984033584595, 0.050746046006679535]

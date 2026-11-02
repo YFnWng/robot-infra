@@ -5,8 +5,147 @@ import pytest
 import yaml
 
 from control_tasks.sparse_point_experiment import (
-    accepted_home_target, decoupled_tendon_prehome_target, load_sparse_point_experiment,
+    SparsePointExperiment, accepted_home_target, decoupled_tendon_prehome_target, load_sparse_point_experiment,
     sparse_circle_targets)
+from control_interface.msg import ManagerEvent
+from types import SimpleNamespace
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError("home failed"), KeyboardInterrupt()])
+def test_home_only_never_generates_or_reaches(tmp_path, monkeypatch, failure):
+    from control_tasks import sparse_point_experiment as module
+    events = []
+    class Node:
+        tip = np.array([.01, .02, .03])
+        def wait_for_inputs(self, timeout):
+            events.append("inputs")
+        def home(self, index):
+            events.append("home")
+            if failure is not None:
+                raise failure
+        def get_clock(self):
+            return SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=123))
+        def cancel_active(self):
+            events.append("cancel")
+        def _publish_mode(self, mode):
+            assert mode == ManagerEvent.NONE
+        def get_logger(self):
+            return SimpleNamespace(warn=lambda _: None)
+        def destroy_node(self):
+            events.append("destroy")
+    monkeypatch.setattr(module, "SparsePointExperiment", lambda _: Node())
+    monkeypatch.setattr(module.rclpy, "init", lambda **_: None)
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    monkeypatch.setattr(module.rclpy, "shutdown", lambda: events.append("shutdown"))
+    journal = tmp_path / "home.jsonl"
+    args = ["task", str(CONFIG_ROOT / "experiments/sparse_points/farther_tendon_12_plain.yaml"),
+            "--home-only", "--trial-records", str(journal)]
+    if failure is None:
+        module.main(args)
+        assert '"home_only": true' in journal.read_text()
+        assert '"event": "home_completed"' in journal.read_text()
+    else:
+        with pytest.raises(type(failure)):
+            module.main(args)
+        assert '"event": "home_completed"' not in journal.read_text()
+    assert events[:2] == ["inputs", "home"]
+    assert events[-2:] == ["destroy", "shutdown"]
+
+
+@pytest.mark.parametrize("failure", [None, "reach", "final_home"])
+def test_task_homes_after_normal_results_not_fault_cleanup(tmp_path, monkeypatch, failure):
+    from control_tasks import sparse_point_experiment as module
+    events = []
+    class Node:
+        tip = np.array([.01, .02, .03])
+        def wait_for_inputs(self, timeout): pass
+        def home(self, index):
+            events.append(("home", index))
+            if failure == "final_home" and index == 1:
+                raise RuntimeError("home failed")
+        def generate_targets(self, tip): return np.array([[.02, .02, .03]])
+        def run_target(self, index, count, target):
+            events.append(("reach", index))
+            if failure == "reach": raise RuntimeError("controller faulted")
+            return SimpleNamespace(reached_waypoints=0, timed_out_waypoints=1, final_error_mm=3.)
+        def get_clock(self):
+            return SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=123))
+        def cancel_active(self): events.append(("cancel", None))
+        def _publish_mode(self, mode): assert mode == ManagerEvent.NONE
+        def get_logger(self): return SimpleNamespace(info=lambda _: None)
+        def destroy_node(self): pass
+    monkeypatch.setattr(module, "SparsePointExperiment", lambda _: Node())
+    monkeypatch.setattr(module.rclpy, "init", lambda **_: None)
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    monkeypatch.setattr(module.rclpy, "shutdown", lambda: None)
+    journal = tmp_path / "task.jsonl"
+    args = ["task", str(CONFIG_ROOT / "experiments/sparse_points/farther_tendon_12_plain.yaml"),
+            "--trial-records", str(journal)]
+    if failure:
+        with pytest.raises(RuntimeError): module.main(args)
+        assert '"event": "task_completed"' not in journal.read_text()
+    else:
+        module.main(args)
+        assert events == [("home", 0), ("reach", 0), ("home", 1)]
+        assert '"event": "final_home_completed"' in journal.read_text()
+        assert '"event": "task_completed"' in journal.read_text()
+    if failure == "reach":
+        assert ("home", 1) not in events
+
+
+def test_frozen_preview_preserves_task_guards_and_never_overwrites(tmp_path):
+    from control_tasks.sparse_point_experiment import save_frozen_targets
+    source=tmp_path/'preview.yaml'
+    config={'required_controller_status':{'engagement_control_enabled':True},
+            'generator':{'type':'controller_model_joint_displacements'}}
+    source.write_text(yaml.safe_dump(config))
+    output=tmp_path/'frozen.yaml'
+    save_frozen_targets(source,output,[[.01,.02,.03]])
+    frozen=yaml.safe_load(output.read_text())
+    assert frozen['required_controller_status']==config['required_controller_status']
+    assert frozen['generator']=={'type':'absolute_targets_m','targets_m':[[.01,.02,.03]]}
+    assert frozen['target_preview']['semantics']=='hypothetical_post_engagement_shape_displacement'
+    assert frozen['target_preview']['takeup_execution_feasibility_certified'] is False
+    with pytest.raises(FileExistsError):save_frozen_targets(source,output,[[0.,0.,0.]])
+
+
+def test_g5_baseline_targets_survive_freeze_load_round_trip(tmp_path):
+    from control_tasks.sparse_point_experiment import save_frozen_targets
+    configs = Path(__file__).resolve().parents[2]/'catheter_control/config/experiments/sparse_points'
+    source = configs/'engagement_twoaxis.yaml'
+    spec = load_sparse_point_experiment(source)
+    baseline = load_sparse_point_experiment(configs/'farther_tendon_12_grouped.yaml')
+    targets = sparse_circle_targets(spec, np.ones(3))
+    np.testing.assert_array_equal(targets, sparse_circle_targets(baseline, np.zeros(3)))
+    output = tmp_path/'frozen.yaml'
+    save_frozen_targets(source, output, targets)
+    restored = load_sparse_point_experiment(output)
+    np.testing.assert_array_equal(sparse_circle_targets(restored, np.zeros(3)), targets)
+    assert restored.required_controller_status['engagement_control_enabled'] is True
+    assert 'target_preview' not in yaml.safe_load(output.read_text())
+
+
+@pytest.mark.parametrize("status", [ManagerEvent.POSITION_TIMED_OUT,
+                                  ManagerEvent.POSITION_REJECTED])
+def test_home_terminal_event_is_reported_without_retry(status):
+    node = SimpleNamespace(home_stage_start_ns=2_000_000_000,
+                           home_transaction_failure=None)
+    event = ManagerEvent()
+    event.header.stamp.sec = 1
+    event.predicate = ManagerEvent.POSITION_STATUS
+    event.state = [1, status, 4]
+    event.text = "POSITION_TIMED_OUT"
+    event.data = [1., float(status), 4., 0., 0., -6.4018, 0., 0., 0.]
+    SparsePointExperiment._home_event_cb(node, event)
+    assert node.home_transaction_failure is None  # Previous transaction.
+    event.header.stamp.sec = 3
+    SparsePointExperiment._home_event_cb(node, event)
+    assert "mask=0x04" in node.home_transaction_failure
+    assert "-6.4018" in node.home_transaction_failure
+    node.home_stage_start_ns = None
+    node.home_transaction_failure = None
+    SparsePointExperiment._home_event_cb(node, event)
+    assert node.home_transaction_failure is None
 
 
 CONFIG_ROOT = (Path(__file__).resolve().parents[2]
@@ -240,6 +379,16 @@ def test_v175_tendon_12_targets_preserve_insertion_range():
 
 @pytest.mark.parametrize("path, expected", [
     (
+        CONFIG_ROOT / "experiments/sparse_points/farther_tendon_12_plain_with_takeup_fixed_gain.yaml",
+        {
+            "backlash_compensation_enabled": True,
+            "takeup_transaction_enabled": True,
+            "backlash_model_encoder_input": "estimated_transmitted",
+            "engaged_gain_enabled": False,
+            "mppi_engaged_gain_scenarios": False,
+        },
+    ),
+    (
         V175_PLAIN_TAKEUP_TARGET_CONFIG,
         {
             "backlash_compensation_enabled": True,
@@ -265,7 +414,7 @@ def test_plain_baseline_targets_require_exact_runtime_identity(path, expected):
 
     assert spec.generator["type"] == "absolute_targets_m"
     np.testing.assert_allclose(spec.generator["targets_m"], [
-        [0.024685867130756378, 0.020163964480161667, 0.08448133617639542],
+        [0.02608313597738743, 0.022739075124263763, 0.08448133617639542],
         [0.03320372849702835, 0.02986534871160984, 0.06324673444032669],
         [0.031191052868962288, 0.02978038229048252, 0.0510878749191761],
         [0.031725503504276276, 0.029091984033584595, 0.050746046006679535],
@@ -384,6 +533,8 @@ def test_prehome_settles_at_projected_endpoint_then_requires_exact_home(monkeypa
                            spec=SimpleNamespace(home_tolerance=np.asarray([.1] * 6),
                                                 home_settle_s=.1))
     node.get_logger = lambda: SimpleNamespace(info=lambda *_: None, warn=warnings.append)
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=int(now[0]*1e9)))
     def publish(target):
         node.home_accepted_target = np.asarray(target).copy()
         node.home_accepted_target[0] = max(-10., target[0])
@@ -399,6 +550,91 @@ def test_prehome_settles_at_projected_endpoint_then_requires_exact_home(monkeypa
     with pytest.raises(RuntimeError, match="home timed out"):
         module.SparsePointExperiment._run_home_stage(
             node, [20., 0., 0., 0., 0., 0.], range(6), now[0] + .2, "home")
+
+
+@pytest.mark.parametrize("status,progress,second_failure,allowed", [
+    ("timeout", True, False, True),
+    ("timeout", False, False, False),
+    ("rejected", True, False, False),
+    ("timeout", True, True, False),
+])
+def test_home_retry_is_bounded_and_requires_progress(monkeypatch, status, progress,
+                                                   second_failure, allowed):
+    from types import SimpleNamespace
+    from control_tasks import sparse_point_experiment as module
+    now = [0.]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    node = SimpleNamespace(manager_ready=True, safety_time=0., position_time=0.,
+                           position=np.asarray([10., 0., 10., 0., 0., 0.]),
+                           spec=SimpleNamespace(home_tolerance=np.asarray([.1]*6),
+                                                home_settle_s=.1))
+    node.get_logger = lambda: SimpleNamespace(info=lambda *_: None, warn=lambda *_: None)
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=int(now[0]*1e9)))
+    commands, stops = [], []
+    def publish(target):
+        commands.append(np.asarray(target).copy())
+        node.home_accepted_target = np.asarray(target).copy()
+    node._publish_home = publish
+    def stop(*args):
+        stops.append(now[0])
+    monkeypatch.setattr(module.SparsePointExperiment, "_stop_before_home_retry", stop)
+    failures = [0]
+    def spin(*args, **kwargs):
+        now[0] += .02
+        node.safety_time = node.position_time = now[0]
+        if (failures[0] == 0 and now[0] >= .04) or (second_failure and failures[0] == 1 and stops):
+            node.position[0] = node.position[2] = 5. if progress else 10.
+            node.home_transaction_failure = "test failure"
+            node.home_failure_status = (module.ManagerEvent.POSITION_TIMED_OUT
+                                       if status == "timeout" else module.ManagerEvent.POSITION_REJECTED)
+            node.home_failure_mask = 4
+            node.home_failure_time = now[0]
+            failures[0] += 1
+        elif stops:
+            node.position[:] = 0.
+    monkeypatch.setattr(module.rclpy, "spin_once", spin)
+    if allowed:
+        module.SparsePointExperiment._run_home_stage(node, np.zeros(6), [0, 2], 1., "home")
+        assert len(stops) == 1
+        assert all(np.array_equal(command, np.zeros(6)) for command in commands)
+    else:
+        with pytest.raises(RuntimeError, match="retry not eligible"):
+            module.SparsePointExperiment._run_home_stage(node, np.zeros(6), [0, 2], 1., "home")
+        assert len(stops) == int(second_failure)
+
+
+@pytest.mark.parametrize("moving,ready,fresh", [(False, True, True),
+                                               (True, True, True),
+                                               (False, False, True),
+                                               (False, True, False)])
+def test_home_retry_stop_requires_fresh_stationary_ready_feedback(monkeypatch, moving, ready, fresh):
+    from types import SimpleNamespace
+    from control_tasks import sparse_point_experiment as module
+    now = [0.]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module.rclpy, "ok", lambda: True)
+    modes = []
+    node = SimpleNamespace(manager_ready=ready, safety_time=0., position_time=0.,
+                           position=np.zeros(6), _publish_mode=modes.append,
+                           spec=SimpleNamespace(home_tolerance=np.asarray([.1]*6),
+                                                home_mode_settle_s=.04))
+    def spin(*args, **kwargs):
+        now[0] += .02
+        node.safety_time = now[0]
+        if fresh:
+            node.position_time = now[0]
+        if moving:
+            node.position[2] += .1
+    monkeypatch.setattr(module.rclpy, "spin_once", spin)
+    if ready and fresh and not moving:
+        module.SparsePointExperiment._stop_before_home_retry(node, 1., 0.)
+        assert modes[-1] == module.ManagerEvent.JOINT_POS
+    else:
+        with pytest.raises(RuntimeError):
+            module.SparsePointExperiment._stop_before_home_retry(node, 1., 0.)
+        assert module.ManagerEvent.JOINT_POS not in modes
 
 
 def test_v175_no_rotation_profile_only_disables_rotation_velocity():

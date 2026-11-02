@@ -100,3 +100,31 @@ PYTHONNOUSERSITE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   RUN_RECORDING_ROS_SMOKE=1 /usr/bin/python3 -m pytest \
   src/experiments/test/test_recording_ros_smoke.py -q
 ```
+# Per-session independent camera registration
+
+`research_session.launch.py` now refreshes the camera frame's robot-base pose
+before publishing markers or starting SVO recording. Keep the existing
+No earlier base or inter-rig transform is used. `registration_file` is retained
+only for compatibility with old launch commands and is not required by this
+startup route. Expose the robot-base ChArUco fixture to both rigs and keep the frame and
+fixture stationary through startup. Optional launch arguments are
+`registration_config:=/path/to/registration_config.yaml` and
+`registration_frames:=20` (default; minimum 10).
+
+Startup reuses shape_tracking's pose detection, robust averaging and overlays.
+It collects distinct valid poses after 15 warm-up grabs, checks translation
+spread <=1 mm per coordinate and rotation spread <=0.5 degrees, then refreshes
+each rig's camera-to-base pose independently. The SDK stereo calibration
+within each ZED remains in use, but the transform between ZED rigs is derived
+only from their new base fits. Stability checks are not a claim of
+submillimetre absolute accuracy. Missing boards, unstable fits or timeout fail
+startup without stale-registration fallback.
+
+Each video/session directory receives `registration.json`, refresh provenance,
+fit statistics and four `registration_<rig>_<eye>.png` overlays. The trackers
+use that exact file; registration remains frozen throughout motion. Even with
+`video:=false`, the directory retains calibration evidence. The old seed and
+frozen experiment targets are never rewritten. Independent fit reports and
+overlays remain in `registration_fits/` even if a subsequent check fails.
+Verify overlays and measured
+home after a frame move before deciding whether targets need revision.

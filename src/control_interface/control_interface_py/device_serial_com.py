@@ -15,15 +15,23 @@ from rclpy.task import Future
 from std_msgs.msg import String
 
 import serial
+from control_interface_py.driver_evidence import TRACE, decode_trace
 
 from control_interface.msg import DeviceStream, DeviceEvent, ManagerEvent
 from control_interface.srv import DeviceCmd
 from control_interface_py.command_freshness import validate_command_stamp
+from control_interface_py.streamed_position import (
+    CAPABILITY, OPEN_SESSION, STREAM_COMMAND, STREAM_STATUS, PositionEnvelope,
+    parse_session_response, decode_status,
+    LIVE_UPDATE, LIVE_CAPABILITY, live_update_payload,
+)
 
 stream_prefix = [DeviceStream.POS, DeviceStream.VEL, DeviceStream.ENC]
 event_prefix = [
     ManagerEvent.FIRMWARE_STATUS, ManagerEvent.LIMIT, ManagerEvent.STALL,
     ManagerEvent.POSITION_STATUS]
+event_prefix.append(STREAM_STATUS)
+event_prefix.append(TRACE)
 response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.MODE, 
                     ManagerEvent.DEBUG,
@@ -34,11 +42,16 @@ response_prefix = [ManagerEvent.CONNECTION,
                     ManagerEvent.FAULT_STATUS,
                     ManagerEvent.SET_ZERO,
                     ManagerEvent.SET_TARGET_VEL]
+response_prefix.append(OPEN_SESSION)
 
 
 def encode_device_command(predicate, req_id, cmd='', data=()):
     if len(req_id) != 16:
         raise ValueError('device request id must contain 16 bytes')
+    if predicate == OPEN_SESSION:
+        if cmd or len(data) != 1 or not float(data[0]).is_integer() or not 1 <= data[0] <= 0xffffffff:
+            raise ValueError('position session opening requires one nonzero uint32 nonce')
+        return bytes([OPEN_SESSION]) + req_id + struct.pack('<I', int(data[0]))
     if predicate == ManagerEvent.SET_TARGET_VEL and cmd:
         raise ValueError('SET_TARGET_VEL does not accept a text payload')
     values = [float(value) for value in data]
@@ -111,8 +124,12 @@ class SerialCommunication(Node):
         self.last_rx_time = None
         self.rx_errors = {}
         self._last_transport_status = None
+        self.transport_status_lock = threading.Lock()
         self._last_control_stamp_ns = 0
         self.control_tx_lock = threading.Lock()
+        self.declare_parameter('position_stream_enabled', False)
+        self.position_stream_enabled = bool(self.get_parameter('position_stream_enabled').value)
+        self.position_stream_session = 0
 
         # Services may wait for firmware responses. Keep them out of the same
         # mutually-exclusive callback group as velocity traffic and watchdogs.
@@ -147,6 +164,9 @@ class SerialCommunication(Node):
         transport_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.transport_status_pub = self.create_publisher(
             String, '/device/transport_status', transport_qos)
+        self.firmware_identity_pub = self.create_publisher(
+            String, '/device/firmware_identity', transport_qos)
+        self._publish_firmware_identity('')
 
         self.cmd_srv = self.create_service(
             DeviceCmd, '/device/command', self.handle_device_command,
@@ -187,17 +207,19 @@ class SerialCommunication(Node):
             self.rx_ready.clear()
             self.firmware_alive.clear()
             self.firmware_identity = None
+            self._publish_firmware_identity('')
             self.last_rx_time = None
             for attempt in range(1, self.connect_retries + 1):
                 try:
                     candidate = serial.Serial(
                         target, self.baudrate,
                         timeout=self.serial_timeout_s)
+                    # Announce OPEN before the RX thread can use this port.
+                    self._set_transport_status(f'SERIAL_OPEN:{target}')
                     with self.io_lock:
                         self.serial_port = candidate
                         self.is_connected = candidate.is_open
                     self.get_logger().info(f"Serial connected: {target}")
-                    self._set_transport_status(f'SERIAL_OPEN:{target}')
                     return self.is_connected
                 except serial.SerialException as exc:
                     self.get_logger().warn(
@@ -211,6 +233,7 @@ class SerialCommunication(Node):
     def close(self, reason='requested'):
         """Idempotently close the port and fail outstanding transactions."""
         with self.connection_lock:
+            self.position_stream_session = 0
             with self.io_lock:
                 port = self.serial_port
                 self.serial_port = None
@@ -218,6 +241,7 @@ class SerialCommunication(Node):
                 self.rx_ready.clear()
                 self.firmware_alive.clear()
                 self.firmware_identity = None
+                self._publish_firmware_identity('')
                 if port and port.is_open:
                     try:
                         port.close()
@@ -258,6 +282,8 @@ class SerialCommunication(Node):
         
     def on_manager_control(self, msg: DeviceStream):
         expected = {DeviceStream.VEL: 6, DeviceStream.POS: 12}
+        expected[STREAM_COMMAND] = 17
+        expected[LIVE_UPDATE] = 3
         if msg.predicate not in expected or len(msg.data) != expected[msg.predicate]:
             self.get_logger().error(
                 f'Invalid manager control frame predicate={msg.predicate} '
@@ -283,8 +309,33 @@ class SerialCommunication(Node):
                     f'Rejected manager control frame: {reason}')
                 return
             prefix = bytes([msg.predicate])
-            data = struct.pack("<" + "f" * len(msg.data),
-                               *[float(x) for x in msg.data])
+            if msg.predicate == STREAM_COMMAND:
+                try:
+                    envelope = PositionEnvelope.from_data(msg.data)
+                    if (not self.position_stream_enabled or CAPABILITY not in (self.firmware_identity or '')
+                            or envelope.session_id != self.position_stream_session):
+                        raise ValueError('position stream session/capability unavailable')
+                    # Conservative age subtraction also covers source->manager
+                    # time already deducted there; never adds authority.
+                    elapsed_us = max(0, (self.get_clock().now().nanoseconds-source_stamp_ns)//1000)
+                    envelope = PositionEnvelope(envelope.session_id, envelope.remaining_us-elapsed_us,
+                                                envelope.command)
+                    data = envelope.encode_payload()
+                except ValueError as error:
+                    self.get_logger().warn(f'rejected position stream TX: {error}')
+                    return
+            elif msg.predicate == LIVE_UPDATE:
+                try:
+                    data = live_update_payload(msg.data)
+                    if (not self.position_stream_enabled or LIVE_CAPABILITY not in (self.firmware_identity or '')
+                            or int(msg.data[0]) != self.position_stream_session):
+                        raise ValueError('live probe session/capability unavailable')
+                except ValueError as error:
+                    self.get_logger().warn(str(error))
+                    return
+            else:
+                data = struct.pack("<" + "f" * len(msg.data),
+                                   *[float(x) for x in msg.data])
             transmitted = self.send_bytes(prefix + data)
             if transmitted and accepted:
                 self._last_control_stamp_ns = source_stamp_ns
@@ -300,14 +351,16 @@ class SerialCommunication(Node):
     # ============================================================
 
     def _set_transport_status(self, status):
-        if status == self._last_transport_status:
-            return
-        self._last_transport_status = status
         if not rclpy.ok():
             return
-        msg = String()
-        msg.data = status
-        self.transport_status_pub.publish(msg)
+        # Order the retained sample and cache consistently across RX/services.
+        with self.transport_status_lock:
+            if status == self._last_transport_status:
+                return
+            msg = String()
+            msg.data = status
+            self.transport_status_pub.publish(msg)
+            self._last_transport_status = status
 
     def _record_rx_error(self, kind):
         count = self.rx_errors.get(kind, 0) + 1
@@ -324,19 +377,24 @@ class SerialCommunication(Node):
             if not future.done():
                 future.set_result({'success': False, 'response': reason})
 
-    def _mark_rx_ready(self, prefix):
+    def _mark_rx_ready(self, prefix, received_port=None):
         # Fault/limit events can be emitted autonomously before the firmware has
         # processed CONNECT. They prove only Teensy -> host communication. POS
         # or ENC telemetry is gated by firmware pc_connected and therefore
         # proves that the host -> Teensy CONNECT frame was processed as well.
         if prefix not in stream_prefix:
             return
-        self.last_rx_time = time.monotonic()
-        if not self.rx_ready.is_set():
-            self.rx_ready.set()
+        with self.io_lock:
             port = self.serial_port
-            name = getattr(port, 'port', self.configured_port)
-            self._set_transport_status(f'SERIAL_READY:{name}')
+            if (port is None or not port.is_open
+                    or received_port is not None and received_port is not port):
+                return
+            self.last_rx_time = time.monotonic()
+            self.rx_ready.set()
+            # Reconcile late startup status using actual current-link feedback,
+            # even when RX was already ready. Deduplication avoids 100 Hz status
+            # traffic. Fault/power qualification remains manager-owned.
+            self._set_transport_status(f'SERIAL_READY:{port.port}')
 
     def rx_loop(self):
         while rclpy.ok() and not self.stop_event.is_set():
@@ -386,7 +444,7 @@ class SerialCommunication(Node):
                 else:
                     self._record_rx_error(f'UNKNOWN_PREFIX_{prefix}')
                     continue
-                self._mark_rx_ready(prefix)
+                self._mark_rx_ready(prefix, received_port=port)
 
             except (struct.error, ValueError, IndexError) as exc:
                 self._record_rx_error(f'MALFORMED_FRAME:{type(exc).__name__}')
@@ -417,8 +475,30 @@ class SerialCommunication(Node):
         msg.data = [float(x) for x in values]  # int32 -> float64 is exact
         self.state_pub.publish(msg)
 
+    def _publish_firmware_identity(self, identity):
+        # Separate retained latest-value metadata; never retain/replay motion
+        # commands or the high-volume diagnostic event stream.
+        message = String()
+        message.data = identity
+        self.firmware_identity_pub.publish(message)
+
     def handle_device_event(self, prefix: int, body: bytes):
+        if prefix == TRACE:
+            text, values = decode_trace(body)
+            msg = DeviceEvent()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.predicate, msg.text, msg.data = TRACE, text, values
+            self.event_pub.publish(msg)
+            return
+        if prefix == STREAM_STATUS:
+            text, values = decode_status(body)
+            msg = DeviceEvent()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.predicate, msg.text, msg.data = STREAM_STATUS, text, values
+            self.event_pub.publish(msg)
+            return
         if prefix == ManagerEvent.FIRMWARE_STATUS:
+            self.position_stream_session = 0
             if len(body) < 7:
                 raise ValueError(
                     'firmware status requires schema, flags, uptime, and build')
@@ -436,6 +516,7 @@ class SerialCommunication(Node):
                 if flags & 0x04 else f'FIRMWARE_ALIVE:{build}')
             msg.data = [float(schema), float(flags), float(uptime_ms)]
             self.firmware_identity = build
+            self._publish_firmware_identity(build)
             self.firmware_alive.set()
             if not self.rx_ready.is_set():
                 self._set_transport_status(
@@ -553,6 +634,11 @@ class SerialCommunication(Node):
             return
 
         decoded = payload.decode("utf-8", errors="ignore")
+        if prefix == OPEN_SESSION and not decoded.startswith('ERR'):
+            try:
+                self.position_stream_session = parse_session_response(decoded)
+            except ValueError:
+                decoded = 'ERR_POSITION_SESSION_ACK'
         if not entry["future"].done():
             entry["future"].set_result({
                 "success": not decoded.startswith("ERR"),
@@ -570,6 +656,13 @@ class SerialCommunication(Node):
         if request.predicate == ManagerEvent.SET_ZERO:
             response.success = False
             response.response = 'SET_ZERO_FORBIDDEN'
+            return response
+        if request.predicate in (STREAM_COMMAND, LIVE_UPDATE):
+            response.success, response.response = False, 'POSITION_STREAM_MANAGER_ONLY'
+            return response
+        if request.predicate == OPEN_SESSION and (
+                not self.position_stream_enabled or CAPABILITY not in (self.firmware_identity or '')):
+            response.success, response.response = False, 'POSITION_STREAM_DISABLED_OR_UNSUPPORTED'
             return response
 
         if request.predicate == ManagerEvent.CONNECTION:

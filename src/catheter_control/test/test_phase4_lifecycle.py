@@ -4,7 +4,8 @@ import pytest
 
 from catheter_control.safety.lifecycle import (
     ControllerState, FreshnessLimits, GateInputs, paired_source_skew_s,
-    readiness, recoverable_encoder_processing_lag)
+    readiness, recoverable_encoder_processing_lag,
+    recoverable_runtime_interruption, controller_motion_held)
 
 
 @pytest.fixture
@@ -114,6 +115,39 @@ def test_encoder_processing_pause_rejects_nonpositive_timeout(ready_inputs):
         recoverable_encoder_processing_lag(
             ready_inputs, FreshnessLimits(), catchup_elapsed_s=0.0,
             catchup_timeout_s=0.0)
+
+
+@pytest.mark.parametrize("reason", ["encoder_stale", "accepted_marker_stale",
+    "marker_diagnostic_degraded", "marker_diagnostic_error", "deadline_missed",
+    "planner_snapshot_stale_at_commit", "ready"])
+def test_shared_pause_allows_only_zero_for_transient_fields(ready_inputs, reason):
+    inputs = replace(ready_inputs, encoder_age_s=.2, marker_age_s=.3,
+                     marker_diagnostic_error=True)
+    assert recoverable_runtime_interruption(inputs, FreshnessLimits(), reason, .1, .35)
+    assert not recoverable_runtime_interruption(inputs, FreshnessLimits(), reason, .36, .35)
+
+
+@pytest.mark.parametrize("change", [dict(manager_ready=False),
+    dict(position_valid=False), dict(encoder_valid=False), dict(model_valid=False),
+    dict(position_age_s=1.), dict(encoder_receive_age_s=1.),
+    dict(position_age_s=float("nan")), dict(manager_age_s=float("inf")),
+    dict(position_encoder_skew_s=1.), dict(accepted_observations=4),
+    dict(consecutive_rejections=3), dict(estimator_health="FAILED"),
+    dict(collection_present=True), dict(target_available=False)])
+def test_visual_gap_cannot_mask_hard_failure(ready_inputs, change):
+    inputs = replace(ready_inputs, marker_age_s=1., **change)
+    assert not recoverable_runtime_interruption(inputs, FreshnessLimits(),
+                                               "accepted_marker_stale", .1, .35)
+
+
+def test_unknown_recovery_reason_and_nonfinite_budget_fail_closed(ready_inputs):
+    assert not recoverable_runtime_interruption(ready_inputs, FreshnessLimits(),
+                                               "numerical_error", 0., .35)
+    with pytest.raises(ValueError):
+        recoverable_runtime_interruption(ready_inputs, FreshnessLimits(), "ready", 0., float("nan"))
+    assert controller_motion_held("runtime_pause_zero:ready")
+    assert controller_motion_held("takeup_confirmation_hold")
+    assert not controller_motion_held("active")
 
 
 def test_transient_marker_rejection_uses_configured_rejection_budget(

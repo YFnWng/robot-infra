@@ -3,6 +3,10 @@
 from catheter_control.bootstrap import run_in_venv
 
 
+def catheter_adapj_initialize():
+    return run_in_venv("control_tasks.adapj_initialize")
+
+
 def catheter_target_offset():
     return run_in_venv("control_tasks.target_offset")
 

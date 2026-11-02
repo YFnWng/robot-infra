@@ -20,11 +20,13 @@ find_package(rosidl_default_generators REQUIRED)
 # Messages / Services
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ControlStream.msg"
+  "msg/StreamedPositionControl.msg"
   "msg/ManagerStream.msg"
   "msg/ManagerEvent.msg"
   "msg/DeviceStream.msg"
   "msg/DeviceEvent.msg"
   "msg/MppiResponseTrace.msg"
+  "msg/MppiAlignedResponseTrace.msg"
   "msg/ControlCycleTiming.msg"
   "msg/ControlShadowRequest.msg"
   "msg/ControlShadowDecision.msg"
@@ -36,6 +38,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/TrackTipTrajectory.action"
   "action/TrackTipPath.action"
   "srv/DeviceCmd.srv"
+  "srv/OpenPositionStream.srv"
   "srv/GenerateSparseTargets.srv"
   DEPENDENCIES std_msgs geometry_msgs action_msgs
 )
@@ -45,10 +48,16 @@ ament_export_dependencies(rosidl_default_runtime)
 
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME}_py)
+add_library(catheter_position_stream SHARED native/position_stream.cpp)
+target_compile_features(catheter_position_stream PRIVATE cxx_std_11)
+target_include_directories(catheter_position_stream PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/teensy_tekceleo")
+install(TARGETS catheter_position_stream LIBRARY DESTINATION lib)
 # Install Python executables
 install(PROGRAMS
   control_interface_py/manager.py
   control_interface_py/device_serial_com.py
+  control_interface_py/position_stream_probe.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

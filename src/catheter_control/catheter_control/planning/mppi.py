@@ -6,7 +6,9 @@ zero operation.  The Phase-4 node will own arming and command heartbeats.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
 from itertools import product
+from inspect import Parameter, signature
 from threading import Lock
 from time import monotonic, perf_counter
 from typing import Any, Callable
@@ -37,11 +39,15 @@ def _synchronize_torch_device(device: torch.device) -> None:
 
 def _tip_tracking_error_squared(
         tips: torch.Tensor, target: torch.Tensor,
-        target_tangent: torch.Tensor | None) -> torch.Tensor:
+        target_tangent: torch.Tensor | None, *, x_only=False, xz_only=False) -> torch.Tensor:
     """Squared point error or forward-path-corridor error in millimetres."""
     target_view = target.reshape(
         (1,)*(tips.ndim-target.ndim)+tuple(target.shape))
     error_mm = (tips-target_view)*1000.0
+    if x_only:
+        return error_mm[..., 0].square()
+    if xz_only:
+        return error_mm[..., 0].square()+error_mm[..., 2].square()
     if target_tangent is None:
         return error_mm.square().sum(-1)
     along_mm = torch.sum(error_mm*target_tangent[None], dim=-1)
@@ -83,11 +89,16 @@ class MppiConfig:
     terminal_weight: float = 6.0
     slew_weight: float = 0.04
     takeup_risk_weight: float = 4.0
+    # Cost per second of useful prediction time potentially lost to take-up.
+    # The delay charge saturates at the scored horizon; raw travel and joint
+    # reserve are NOT clipped to that horizon.
     takeup_confirmation_time_s: float = 0.10
     # Robust engaged-response scenarios are evaluated as complete rollouts.
     # Scenario zero is the posterior mean; lower/upper credible gains are used
     # only in the risk aggregate and never to edit a selected control plan.
     engaged_gain_scenarios: bool = False
+    # External take-up owns slack; useful-motion prediction must not replay it.
+    always_engaged_rollout: bool = False
     engaged_gain_risk_beta: float = 0.50
     engaged_gain_cvar_alpha: float = 0.67
     engaged_gain_maximum_first_step_shift: float = 0.0
@@ -293,10 +304,25 @@ class CatheterMppi:
         self.backend = rollout_backend
         self.contract = contract
         self.config = config or MppiConfig()
+        if self.config.always_engaged_rollout:
+            # Reject an old installed model before arming, not halfway through
+            # a hardware task. No silent fallback to history-dependent rollout.
+            for name in ("predict_sequence", "predict_control_sequence",
+                         "predict_control_sequence_coarse"):
+                method = getattr(self.backend, name, None)
+                if method is None:
+                    continue
+                parameters = signature(method).parameters
+                if ("always_engaged" not in parameters
+                        and not any(p.kind == Parameter.VAR_KEYWORD
+                                    for p in parameters.values())):
+                    raise ValueError("compensated MPPI requires an updated model "
+                                     f"package with {name}(always_engaged=...)")
         self._clock = clock
         self._rng = np.random.default_rng(self.config.seed)
         self._nominal = np.zeros(
             (self.config.horizon_steps, CONTROL_AXES), dtype=np.float64)
+        self._previous_sequence = None
         self._capture_lock = Lock()
         self._capture_hold_until_s = float("-inf")
         self._capture_rearm_blocked = False
@@ -310,12 +336,38 @@ class CatheterMppi:
     def reset(self) -> None:
         """Clear warm-start state without touching hardware or model state."""
         self._nominal.fill(0.0)
+        self._previous_sequence = None
         with self._capture_lock:
             self._capture_hold_until_s = float("-inf")
             self._capture_rearm_blocked = False
 
+    def execution_memory(self) -> dict:
+        """Copy planner-only memory for a serialized, non-commanding solve."""
+        with self._capture_lock:
+            capture = {name: deepcopy(getattr(self, name)) for name in (
+                "_capture_hold_until_s", "_capture_rearm_blocked",
+                "_capture_passive_response_scale", "_capture_last_response_ratio",
+                "_capture_last_response_reason", "_capture_release_count")}
+        return {"nominal": self._nominal.copy(),
+                "previous_sequence": (None if self._previous_sequence is None
+                                      else self._previous_sequence.copy()),
+                "rng": deepcopy(self._rng.bit_generator.state),
+                "capture": capture}
+
+    def restore_execution_memory(self, memory: dict, *, capture=True) -> None:
+        """Restore a complete solve state; capture may have newer observations."""
+        self._nominal = memory["nominal"].copy()
+        previous = memory.get("previous_sequence")
+        self._previous_sequence = None if previous is None else previous.copy()
+        self._rng.bit_generator.state = deepcopy(memory["rng"])
+        if capture:
+            with self._capture_lock:
+                for name, value in memory["capture"].items():
+                    setattr(self, name, deepcopy(value))
+
     def reset_capture_target(self) -> None:
         """End target-local hold state while retaining learned passive scale."""
+        self._previous_sequence = None
         with self._capture_lock:
             self._capture_hold_until_s = float("-inf")
             self._capture_rearm_blocked = False
@@ -351,7 +403,7 @@ class CatheterMppi:
         predicted = _finite_vector(
             "predicted_delta_mm", predicted_delta_mm, 3)
         measured = _finite_vector("measured_delta_mm", measured_delta_mm, 3)
-        predicted_norm = float(np.linalg.vector_norm(predicted))
+        predicted_norm = float(np.linalg.norm(predicted))
         minimum = self.config.capture_response_minimum_prediction_mm
         ratios = []
         if predicted_norm >= minimum:
@@ -414,7 +466,8 @@ class CatheterMppi:
     def predict_sparse_targets(
             self, root_state: Any, joint_position, observed_tip_m,
             logical_displacements, rollout_steps: int,
-            minimum_endpoint_reserve, *, transmission_state=None
+            minimum_endpoint_reserve, *, transmission_state=None,
+            reserve_takeup: bool = True, enforce_endpoint_reserve: bool = True
             ) -> SparseTargetPrediction:
         """Preview model-generated targets without changing planner state.
 
@@ -423,6 +476,12 @@ class CatheterMppi:
         bound before integrating useful motion. Rollouts are exclusively in
         effective post-engagement coordinates; no immediate-engagement or
         partial-take-up response is synthesized inside MPPI.
+
+        With reserve_takeup=False this constructs a hypothetical engaged shape
+        target, not an execution-feasibility certificate. Useful-motion limits
+        and endpoint reserves still apply; live planning always reserves takeup.
+        Disabling enforce_endpoint_reserve makes the additional preview-only
+        endpoint check advisory. Command projection remains unchanged.
         """
         measured_position = _finite_vector(
             "joint_position", joint_position, N_AXES)
@@ -462,9 +521,11 @@ class CatheterMppi:
             requested)
         if np.any(internal_reversal):
             raise ValueError("constant sparse preview unexpectedly reverses")
-        takeup_offset, _ = self._takeup_position_offsets(
-            first_direction, np.zeros(CONTROL_AXES, dtype=np.int8),
-            transmission_state)
+        takeup_offset = np.zeros((len(displacement), N_AXES))
+        if reserve_takeup:
+            takeup_offset, _ = self._takeup_position_offsets(
+                first_direction, np.zeros(CONTROL_AXES, dtype=np.int8),
+                transmission_state)
         (logical, realized, motor_rates, _, _, blocked) = self._project(
             requested, position,
             np.zeros(CONTROL_AXES, dtype=np.int8), takeup_offset)
@@ -493,7 +554,7 @@ class CatheterMppi:
             (endpoint < reserve_lower[None])
             | (endpoint > reserve_upper[None]))
         outside = np.any(outside_hard | outside_reserve, axis=1)
-        if np.any(outside):
+        if enforce_endpoint_reserve and np.any(outside):
             details = []
             for candidate in np.flatnonzero(outside):
                 axes = np.flatnonzero(
@@ -568,6 +629,8 @@ class CatheterMppi:
                      (2, 1.0), (2, -1.0)), start=2):
                 requested[candidate] = 0.0
                 requested[candidate, :, axis] = sign*basis_scale[axis]
+        self._expand_physical_axis_coverage(requested)
+        self._sample_temporal_shaft_holds(requested)
         if rotation_lock_direction and self.contract.velocity_max[1] > 0.0:
             direction = float(np.sign(rotation_lock_direction))
             floor = float(self.contract.velocity_min[1])
@@ -580,6 +643,90 @@ class CatheterMppi:
         disabled = self.contract.velocity_max[:CONTROL_AXES] <= 0.0
         requested[..., disabled] = 0.0
         return requested
+
+    def _sample_temporal_shaft_holds(self, requested: np.ndarray) -> None:
+        """Explore exact move/hold transitions in physical-shaft coordinates.
+
+        Reuse alternate slots in the existing exploration budget, excluding
+        reserved proposals. Each shaft retains one direction throughout a
+        candidate, but its moving state is resampled with the existing noise
+        correlation as persistence. This supplies generic pauses without
+        prescribing pulse lengths or requiring multiple take-up transactions.
+        Dense proposals and deterministic coverage remain available.
+        """
+        explore = int(round(self.config.samples*self.config.exploration_fraction))
+        reserved = 24 + len(self._physical_speed_probes())
+        start = max(reserved, len(requested)-explore)
+        indices = np.arange(start + start % 2, len(requested), 2)
+        if not len(indices) or self.config.horizon_steps < 2:
+            return
+        physical = requested[indices].copy()
+        physical[..., 0] -= physical[..., 2]
+        direction = np.sign(physical[:, 0])
+        moving = self._rng.random(direction.shape) < .5
+        mask = np.empty(physical.shape, dtype=bool)
+        mask[:, 0] = moving
+        for step in range(1, self.config.horizon_steps):
+            refresh = (self._rng.random(direction.shape)
+                       >= self.config.noise_correlation)
+            moving = np.where(refresh, self._rng.random(direction.shape) < .5,
+                              moving)
+            mask[:, step] = moving
+        maximum = self.contract.velocity_max[:CONTROL_AXES]
+        minimum = self.contract.velocity_min[:CONTROL_AXES]
+        speed = self._rng.uniform(minimum, maximum, physical.shape)
+        physical = speed*direction[:, None]*mask
+        physical[..., maximum <= 0.] = 0.
+        physical[..., 0] += physical[..., 2]
+        requested[indices] = physical
+
+    def _expand_physical_axis_coverage(self, requested: np.ndarray) -> None:
+        """Represent exact shaft holds and the speed range within the budget.
+
+        Gaussian noise followed by minimum-speed projection almost never
+        produces a hold. U/C groups restrict direction, not which unknown
+        shafts move, so they cannot supply this missing subspace themselves.
+        Leave the hold, warm start, legacy basis, and path-correction slots
+        (0:24) intact. Keep half the remaining stochastic population dense.
+        """
+        start = 24
+        if len(requested) <= start:
+            return
+        maximum = np.asarray(self.contract.velocity_max[:CONTROL_AXES])
+        active = np.flatnonzero(maximum > 0.0)
+        if not len(active):
+            return
+        masks = np.zeros(((1 << len(active)) - 1, CONTROL_AXES), dtype=bool)
+        for mask in range(1, len(masks) + 1):
+            for bit, axis in enumerate(active):
+                masks[mask - 1, axis] = bool(mask & (1 << bit))
+        physical = requested[start::2].copy()
+        physical[..., 0] -= physical[..., 2]
+        physical *= masks[np.arange(len(physical)) % len(masks), None, :]
+        physical[..., 0] += physical[..., 2]
+        requested[start::2] = physical
+        # Sustained single-shaft probes cover low, middle, and maximum speed.
+        # In particular, a knob-only probe includes its logical insertion
+        # coupling: it must not inadvertently reverse the chassis shaft.
+        for index, (axis, speed) in enumerate(self._physical_speed_probes(), start):
+            if index >= len(requested):
+                break
+            requested[index] = 0.0
+            requested[index, :, axis] = speed
+            if axis == 2:
+                requested[index, :, 0] = speed
+
+    def _physical_speed_probes(self) -> list[tuple[int, float]]:
+        probes = []
+        for axis, maximum in enumerate(self.contract.velocity_max[:CONTROL_AXES]):
+            if maximum <= 0.0:
+                continue
+            minimum = self.contract.velocity_min[axis]
+            low = minimum if minimum > 0.0 else min(
+                self.config.noise_std[axis], maximum)
+            for speed in dict.fromkeys((maximum, low, (low + maximum) / 2.0)):
+                probes.extend(((axis, speed), (axis, -speed)))
+        return probes
 
     def _rotation_lock_direction(self, transmission_state) -> int:
         if (not self.config.rotation_direction_latch
@@ -658,24 +805,18 @@ class CatheterMppi:
         for step in range(horizon):
             requested = np.zeros((count, N_AXES), dtype=np.float64)
             requested[:, :CONTROL_AXES] = requested_three[:, step]
+            if self.contract.synchronized_sheath_rotation:
+                # These members are intentional commands, not projection
+                # error relative to independent zero sheath commands.
+                requested[:, 4] = requested[:, 1]
+                requested[:, 5] = -requested[:, 1]
             # Preserve the candidate's intended physical shaft direction
             # before position projection.  At a coupled boundary the final
             # contract may erase the saturated shaft while leaving motion on
             # another shaft (for example bend compensation leaking into
             # insertion).  Looking only at the realized motor command would
             # therefore miss exactly the direction registered at saturation.
-            intended_logical = np.clip(
-                requested, -self.contract.velocity_max,
-                self.contract.velocity_max)
-            below_floor = (
-                (np.abs(intended_logical) > 0.0)
-                & (np.abs(intended_logical)
-                   < self.contract.velocity_min[None]))
-            intended_logical = np.where(
-                below_floor,
-                np.copysign(
-                    self.contract.velocity_min[None], intended_logical),
-                intended_logical)
+            intended_logical = self.contract.bound_logical_velocity(requested)
             intended_motor_axis = intended_logical.copy()
             intended_motor_axis[:, 0] -= intended_motor_axis[:, 2]
             intended_motor_axis[:, 5] += intended_motor_axis[:, 4]
@@ -770,7 +911,43 @@ class CatheterMppi:
         internal_reversal = np.any(sign > 0, axis=1) & np.any(sign < 0, axis=1)
         return first, internal_reversal
 
-    def _grouped_candidates(self, lease_direction: np.ndarray):
+    def _path_correction_samples(self, raw):
+        """Reserve small physical-shaft corrections in the existing budget.
+
+        Coarse horizons need both sustained minimum-speed proposals and a
+        single moving step followed by zero, without an internal reversal.
+        Hold, warm start and existing actuator-basis samples are preserved.
+        Projection, eligibility and scoring still own executable feasibility.
+        """
+        choices = [(-1, 0, 1) if self.contract.velocity_max[axis] > 0
+                   else (0,) for axis in (0, 2)]
+        speeds = [min(self.contract.velocity_max[axis],
+                      self.contract.velocity_min[axis]
+                      if self.contract.velocity_min[axis] > 0
+                      else self.config.noise_std[axis])
+                  for axis in (0, 2)]
+        result = raw.copy()
+        index = 8
+        for shaft_sign, tendon_sign in product(*choices):
+            if not shaft_sign and not tendon_sign:
+                continue
+            shaft, tendon = shaft_sign*speeds[0], tendon_sign*speeds[1]
+            for moving_steps in (self.config.horizon_steps, 1):
+                if index >= len(result):
+                    return result
+                result[index] = 0.
+                result[index, :moving_steps, 0] = shaft+tendon
+                result[index, :moving_steps, 2] = tendon
+                result[index, :, self.contract.velocity_max[:CONTROL_AXES] <= 0] = 0.
+                index += 1
+        return result
+
+    def _rate_bounded_samples(self, requested):
+        logical = np.zeros((*requested.shape[:-1], N_AXES), dtype=np.float64)
+        logical[..., :CONTROL_AXES] = requested
+        return self.contract.bound_logical_velocity(logical)[..., :CONTROL_AXES]
+
+    def _grouped_candidates(self, lease_direction: np.ndarray, *, path_tracking=False):
         """Build U/C proposal groups with deterministic tendon probes.
 
         Every grouped proposal that can move the tendon receives a sustained
@@ -780,6 +957,16 @@ class CatheterMppi:
         the configured random population.
         """
         raw = self._samples()
+        if path_tracking:
+            raw = self._path_correction_samples(raw)
+        raw = self._rate_bounded_samples(raw)
+        # A coarse rollout step can exceed the actual replanning interval.
+        # Keep the unshifted executable sequence as a scored proposal too;
+        # never bypass current projection, eligibility or transaction checks.
+        previous_index = None
+        if self._previous_sequence is not None:
+            previous_index = len(raw)
+            raw = np.concatenate((raw, self._previous_sequence[None]), axis=0)
         if not self.config.grouped_mode_sampling:
             self._last_tendon_probe_mask = np.zeros(len(raw), dtype=bool)
             return raw, np.zeros(len(raw), dtype=np.uint8), 1
@@ -799,12 +986,24 @@ class CatheterMppi:
                 float(self.contract.velocity_min[2])/learning_scale))
         unit_sign = float(np.sign(
             MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM[2]))
+        speed_probes = np.arange(24, min(
+            len(raw), 24 + len(self._physical_speed_probes())))
+        unconstrained_slots = speed_probes
+        if previous_index is not None:
+            unconstrained_slots = np.unique(
+                np.append(unconstrained_slots, previous_index))
         for group_index, choices in enumerate(masks):
             # Partition the complete random population, then append a small
             # deterministic coverage set. This keeps total stochastic samples
             # fixed while ensuring no U/C branch loses tendon exploration due
             # to round-robin assignment.
             indices = np.arange(group_index, len(raw), len(masks))
+            # Keep both signs of the reserved speed probes in U rather than
+            # accidentally assigning every negative probe to a +C branch.
+            # Reassign existing slots; do not duplicate or grow the budget.
+            indices = indices[~np.isin(indices, unconstrained_slots)]
+            if group_index == 0:
+                indices = np.sort(np.concatenate((indices, unconstrained_slots)))
             if not len(indices):
                 continue
             candidate = raw[indices].copy()
@@ -862,6 +1061,9 @@ class CatheterMppi:
         The MPPI samples describe post-engagement motion.  Reaching that state
         still consumes encoder travel, so every reversing mode is checked from
         the position expected after its direction-dependent gap is exhausted.
+        Use the point estimate for this feasibility prediction, not the
+        heuristic upper interval bound. Uncertainty remains a scoring input;
+        live projection and the manager enforce actual joint limits.
         """
         count = len(first_direction)
         travel = np.zeros((count, CONTROL_AXES), dtype=np.float64)
@@ -872,32 +1074,12 @@ class CatheterMppi:
         remaining = np.zeros(CONTROL_AXES, dtype=np.float64)
         phase = ("ENGAGED",)*CONTROL_AXES
         if transmission_state is not None:
-            point_positive = np.asarray(
+            positive = np.asarray(
                 transmission_state.width_positive_rad, dtype=np.float64)
-            point_negative = np.asarray(
+            negative = np.asarray(
                 transmission_state.width_negative_rad, dtype=np.float64)
-            point_remaining = np.asarray(
+            remaining = np.asarray(
                 transmission_state.remaining_rad, dtype=np.float64)
-            positive_upper = np.asarray(
-                getattr(transmission_state, "width_positive_upper_rad",
-                        point_positive), dtype=np.float64)
-            negative_upper = np.asarray(
-                getattr(transmission_state, "width_negative_upper_rad",
-                        point_negative), dtype=np.float64)
-            remaining_upper = np.asarray(
-                getattr(transmission_state, "remaining_upper_rad",
-                        point_remaining), dtype=np.float64)
-            # Backward-compatible snapshots without interval evidence use the
-            # old point estimate as a degenerate interval.
-            positive = np.where(
-                (positive_upper <= 0.0) & (point_positive > 0.0),
-                point_positive, positive_upper)
-            negative = np.where(
-                (negative_upper <= 0.0) & (point_negative > 0.0),
-                point_negative, negative_upper)
-            remaining = np.where(
-                (remaining_upper <= 0.0) & (point_remaining > 0.0),
-                point_remaining, remaining_upper)
             motion = np.asarray(
                 transmission_state.motion_direction, dtype=np.int8)
             phase = tuple(transmission_state.phase)
@@ -922,14 +1104,13 @@ class CatheterMppi:
         logical[:, 5] -= logical[:, 4]
         return logical, np.abs(travel)
 
-    def _takeup_low_confidence_extra_travel(
+    def _takeup_uncertainty_extra_travel(
             self, first_direction, transmission_state):
-        """Extra conservative travel from interval width and confidence.
+        """Scoring uncertainty, separate from point-estimate feasibility.
 
-        The upper interval bound is already reserved by the take-up position
-        offsets. Low confidence expands that bound by up to one additional
-        interval width. This remains a physical travel quantity, not a second
-        independently weighted cost.
+        Preserve upper-bound plus low-confidence delay pricing by adding the
+        upper-minus-point difference here. This must not inflate reserved
+        joint displacement or veto a candidate solely on interval uncertainty.
         """
         count = len(first_direction)
         extra = np.zeros((count, CONTROL_AXES), dtype=np.float64)
@@ -974,6 +1155,7 @@ class CatheterMppi:
             direction = first_direction[:, axis]
             lower = np.where(direction > 0, pos_lo[axis], neg_lo[axis])
             upper = np.where(direction > 0, pos_hi[axis], neg_hi[axis])
+            point = np.where(direction > 0, point_pos[axis], point_neg[axis])
             changed = ((direction != 0)
                        & ((motion[axis] == 0)
                           | (direction != motion[axis])))
@@ -981,13 +1163,26 @@ class CatheterMppi:
                       & np.isin(phase[axis], ("TAKEUP", "PROVISIONAL")))
             lower = np.where(active, rem_lo[axis], lower)
             upper = np.where(active, rem_hi[axis], upper)
+            point = np.where(active, point_rem[axis], point)
             relevant = changed | active
             interval_width = np.maximum(0.0, upper-lower)
             extra[:, axis] = np.where(
                 relevant,
-                np.clip(1.0-confidence[axis], 0.0, 1.0)*interval_width,
+                np.maximum(0.0, upper-point)
+                + np.clip(1.0-confidence[axis], 0.0, 1.0)*interval_width,
                 0.0)
         return extra*self.config.takeup_limit_reserve_scale
+
+    def _takeup_risk_cost(self, risk_s, prediction_horizon_s):
+        """Price unavailable prediction time, not an unbounded future wait.
+
+        Useful post-engagement tracking is scored over a finite horizon. An
+        uncertain transaction longer than that horizon can lose at most that
+        much scored time. Keep the full delay for diagnostics and full travel
+        for projection; this soft objective does not approve a transaction.
+        """
+        return self.config.takeup_risk_weight*np.minimum(
+            risk_s, prediction_horizon_s)
 
     def _gain_learning_velocity_scales(
             self, first_direction, transmission_state):
@@ -1107,16 +1302,26 @@ class CatheterMppi:
     def plan(self, root_state: Any, joint_position,
              target_tip_base_m, *, target_markers_base_m=None,
              target_tangent_base=None,
+             x_only=False,
+             xz_only=False,
              observed_tip_base_m=None,
+             tip_readout_offset_m=None, capture_tip_base_m=None,
              previous_logical_velocity=None,
              deadline_started_s=None, transmission_state=None,
              takeup_motor_radians_per_second=None,
              blocked_motor_direction=None, direction_lease=None,
-             approved_reversal_direction=None) -> MppiPlan:
+             approved_reversal_direction=None,
+             candidate_diagnostics=None) -> MppiPlan:
         """Plan one action and shift warm start for the next camera frame."""
         started = (self._clock() if deadline_started_s is None
                    else float(deadline_started_s))
         position = _finite_vector("joint_position", joint_position, N_AXES)
+        if not isinstance(xz_only, bool) or (x_only and xz_only):
+            raise ValueError("xz_only must be boolean and mutually exclusive with x_only")
+        if not isinstance(x_only, bool):
+            raise ValueError("x_only must be boolean")
+        if (x_only or xz_only) and target_markers_base_m is not None:
+            raise ValueError("x_only/xz_only cannot be combined with marker targets")
         target_tip = np.asarray(target_tip_base_m, dtype=np.float64)
         horizon = self.config.horizon_steps
         if target_tip.shape == (3,):
@@ -1127,6 +1332,12 @@ class CatheterMppi:
         observed_tip = (
             None if observed_tip_base_m is None else
             _finite_vector("observed_tip_base_m", observed_tip_base_m, 3))
+        tip_offset = (None if tip_readout_offset_m is None else
+                      _finite_vector("tip_readout_offset_m", tip_readout_offset_m, 3))
+        capture_tip = (observed_tip if capture_tip_base_m is None else
+                       _finite_vector("capture_tip_base_m", capture_tip_base_m, 3))
+        if tip_offset is not None and target_markers_base_m is not None:
+            raise ValueError("tip readout anchoring cannot be combined with marker targets")
         target_tangent = None
         if target_tangent_base is not None:
             target_tangent = np.asarray(
@@ -1216,6 +1427,17 @@ class CatheterMppi:
         blocked_direction = blocked_direction.copy()
         lease_direction = lease_direction.copy()
         approved_direction = approved_direction.copy()
+        # Grouped proposals need a confirmed physical continuation direction,
+        # not the optional legacy scheduler's approval bookkeeping. With that
+        # scheduler disabled its leases are zero; do not silently reduce U/C
+        # sampling to one unconstrained group. Plain MPPI semantics stay intact.
+        if self.config.grouped_mode_sampling and transmission_state is not None:
+            confirmed = np.isin(
+                transmission_state.phase, ("PROVISIONAL", "ENGAGED"))
+            engaged = np.asarray(
+                transmission_state.engaged_direction, dtype=np.int8)
+            lease_direction = np.where(
+                (lease_direction == 0) & confirmed, engaged, lease_direction)
         blocked_direction[disabled_axes] = 0
         lease_direction[disabled_axes] = 0
         approved_direction[disabled_axes] = 0
@@ -1224,13 +1446,12 @@ class CatheterMppi:
         # each leased shaft is either unconstrained or restricted to continue
         # (zero is included). No selected plan is edited after scoring.
         requested, proposal_group, proposal_group_count = (
-            self._grouped_candidates(lease_direction))
+            self._grouped_candidates(
+                lease_direction, path_tracking=target_tangent is not None))
         candidate_count = len(requested)
-        first_requested_direction, internal_reversal = (
-            self._first_physical_direction(requested))
         gain_learning_velocity_scales = (
             self._gain_learning_velocity_scales(
-                first_requested_direction, transmission_state))
+                self._first_physical_direction(requested)[0], transmission_state))
         if np.any(gain_learning_velocity_scales < 1.0):
             requested = requested.copy()
             tendon_axis = int(transmission_state.engaged_gain.tendon_axis)
@@ -1247,6 +1468,9 @@ class CatheterMppi:
             else:
                 requested[:, :, tendon_axis] *= (
                     gain_learning_velocity_scales[:, None])
+        requested = self._rate_bounded_samples(requested)
+        first_requested_direction, internal_reversal = (
+            self._first_physical_direction(requested))
         reversal_direction = np.where(
             (lease_direction[None] != 0)
             & (first_requested_direction != 0)
@@ -1274,6 +1498,35 @@ class CatheterMppi:
         # optimized sequence as the sole executable/warm-start sequence.
         realized_logical = rollout_realized_logical[:, :horizon]
         blocked_candidate |= np.any(internal_reversal, axis=1)
+        # Position/RPM projection must not turn the priced take-up mode into
+        # another physical direction. Erasing a shaft is allowed; a different
+        # nonzero direction or projected within-horizon reversal is not.
+        realized_sign = np.sign(motor_rates[..., :CONTROL_AXES]).astype(np.int8)
+        realized_index = np.argmax(realized_sign != 0, axis=1)
+        realized_first = np.take_along_axis(
+            realized_sign, realized_index[:, None, :], axis=1)[:, 0]
+        blocked_candidate |= np.any(
+            (realized_first != 0)
+            & (realized_first != first_requested_direction), axis=1)
+        blocked_candidate |= np.any(
+            np.any(realized_sign > 0, axis=1)
+            & np.any(realized_sign < 0, axis=1), axis=1)
+        constrained_axes = ((proposal_group[:, None]
+                             & (1 << np.arange(CONTROL_AXES))[None, :]) != 0)
+        blocked_candidate |= np.any(
+            constrained_axes & (realized_first != 0)
+            & (realized_first != lease_direction[None]), axis=1)
+        # Point reaching executes only step zero before replanning. A proposal
+        # that holds now but promises useful motion later can postpone that
+        # motion forever, while scoring an endpoint it never executes. Keep
+        # genuine hold (including passive model relaxation) available. Do not
+        # shift or edit a sampled trajectory, or constrain timed path targets.
+        deferred_motion = np.zeros(candidate_count, dtype=bool)
+        if point_target:
+            deferred_motion = (
+                ~np.any(motor_rates[:, 0] != 0.0, axis=1)
+                & np.any(motor_rates[:, 1:horizon] != 0.0, axis=(1, 2)))
+            blocked_candidate |= deferred_motion
         previous_motor_rate = self.contract.project_velocity(
             previous, position).motor_radians_per_second[:CONTROL_AXES]
         # MPPI predicts only effective post-engagement dynamics. Physical
@@ -1286,7 +1539,7 @@ class CatheterMppi:
             takeup_rate = _finite_vector(
                 "takeup_motor_radians_per_second",
                 takeup_motor_radians_per_second, CONTROL_AXES)
-            extra_travel = self._takeup_low_confidence_extra_travel(
+            extra_travel = self._takeup_uncertainty_extra_travel(
                 first_requested_direction, transmission_state)
             risk_travel = takeup_travel_rad+extra_travel
             takeup_risk_s = np.max(
@@ -1297,6 +1550,8 @@ class CatheterMppi:
                 transaction, self.config.takeup_confirmation_time_s, 0.0)
         gain_scenarios = self._engaged_gain_scenarios(
             first_requested_direction, transmission_state)
+        takeup_risk_cost = self._takeup_risk_cost(
+            takeup_risk_s, float(np.sum(rollout_dt)))
         gain_scenario_count = gain_scenarios.shape[1]
         if gain_scenario_count > 1 and marker_target is not None:
             return self._safe_result(
@@ -1326,6 +1581,8 @@ class CatheterMppi:
                 raise RuntimeError("backend lacks coarse rollout support")
             if control_predict is not None and marker_target is None:
                 rollout_kwargs = {}
+                if self.config.always_engaged_rollout:
+                    rollout_kwargs["always_engaged"] = True
                 if transmission_prediction_applied:
                     rollout_kwargs["raw_motor_velocity_sequence"] = (
                         raw_rollout_motor_rates)
@@ -1342,7 +1599,9 @@ class CatheterMppi:
                             raw_rollout_motor_rates))
                 else:
                     prediction = self.backend.predict_sequence(
-                        root_state, rollout_motor_rates, rollout_backend_dt)
+                        root_state, rollout_motor_rates, rollout_backend_dt,
+                        **({"always_engaged": True}
+                           if self.config.always_engaged_rollout else {}))
             tips = torch.as_tensor(prediction.tip_base_m)
             predicted_lambda = getattr(prediction, "distal_lambda", None)
             if predicted_lambda is not None:
@@ -1369,6 +1628,10 @@ class CatheterMppi:
                                   1e3*(perf_counter()-phase_started),
                                   0.0, 0.0))
         rollout_ms = 1e3*(perf_counter()-phase_started)
+        if tip_offset is not None:
+            # Common translation preserves candidate-relative model motion.
+            tips = tips + torch.as_tensor(tip_offset, device=tips.device,
+                                          dtype=tips.dtype)
         invalid_markers = bool(
             marker_target is not None
             and (markers is None
@@ -1389,23 +1652,40 @@ class CatheterMppi:
 
         first_step_lambda_shift = np.zeros(
             candidate_count, dtype=np.float64)
+        eligible_before_input_guard = ((~blocked_candidate).copy()
+            if candidate_diagnostics is not None else None)
+        input_shift_rejected = (np.zeros(candidate_count, dtype=bool)
+            if candidate_diagnostics is not None else None)
         if self.config.engaged_gain_maximum_first_step_shift > 0.0:
             if predicted_lambda is None:
                 return self._safe_result(
                     started, "engaged_gain_lambda_prediction_missing",
                     phase_timings_ms=(sample_projection_ms, rollout_ms,
                                       0.0, 0.0))
-            root_lambda = torch.as_tensor(
-                root_state.lambda_value, device=tips.device, dtype=tips.dtype)
             first_lambda = (predicted_lambda[:, 0] if gain_scenario_count == 1
                             else predicted_lambda[:, :, 0])
+            # Engaged prediction registers input to observed strain, not the
+            # history-dependent lambda stored by the estimator. Candidate 0
+            # is deterministic hold: use its registered input as the origin
+            # (per gain scenario) so registration itself consumes no motion
+            # budget and cannot invalidate hold.
+            registered_root = getattr(prediction, 'registered_root_lambda', None)
+            if registered_root is not None:
+                root_lambda = torch.as_tensor(registered_root,
+                    device=tips.device, dtype=tips.dtype)
+            elif self.config.always_engaged_rollout:
+                root_lambda = first_lambda[0]
+            else:
+                root_lambda = torch.as_tensor(root_state.lambda_value,
+                    device=tips.device, dtype=tips.dtype)
             shift_t = torch.abs(first_lambda-root_lambda)
             if gain_scenario_count > 1:
                 shift_t = shift_t.max(-1).values
             first_step_lambda_shift = shift_t.detach().cpu().numpy()
-            blocked_candidate |= (
+            input_shift_rejected = (
                 first_step_lambda_shift
                 > self.config.engaged_gain_maximum_first_step_shift)
+            blocked_candidate |= input_shift_rejected
 
         phase_started = perf_counter()
         device, dtype = tips.device, tips.dtype
@@ -1420,7 +1700,7 @@ class CatheterMppi:
         # advance to the next reference. Endpoint capture omits tangents and
         # retains the exact Euclidean point objective.
         tracking_error_squared = _tip_tracking_error_squared(
-            tips, target, tangent_t)
+            tips, target, tangent_t, x_only=x_only, xz_only=xz_only)
         step_weights = torch.ones(
             prediction_horizon, device=device, dtype=dtype)
         step_weights[-1] *= self.config.terminal_weight
@@ -1451,7 +1731,8 @@ class CatheterMppi:
             previous/safe_velocity_max,
             device=device, dtype=dtype)[None, None]
         delta = torch.cat((first, normalized[:, 1:]-normalized[:, :-1]), 1)
-        costs += self.config.slew_weight*delta.square().sum((-1, -2))
+        slew_costs = self.config.slew_weight*delta.square().sum((-1, -2))
+        costs += slew_costs
         # MPPI samples useful post-take-up motion, but the physical plant must
         # still pay to change a response-confirmed shaft direction.  Use the
         # direction lease when one exists: the immediately previous command
@@ -1469,7 +1750,7 @@ class CatheterMppi:
         switch_count = switch_event.sum(-1).astype(np.int32)
         costs += torch.as_tensor(
             self.config.boundary_weight*boundary_cost
-            + self.config.takeup_risk_weight*takeup_risk_s,
+            + takeup_risk_cost,
             device=device, dtype=dtype)
         blocked_candidate_t = torch.as_tensor(
             blocked_candidate, device=device, dtype=torch.bool)
@@ -1477,9 +1758,36 @@ class CatheterMppi:
         unrestricted_costs = torch.where(
             unrestricted_eligible_t, costs,
             torch.full_like(costs, torch.inf))
+        if candidate_diagnostics is not None:
+            # Intrusive attribution only; disabled in normal control. Opt-in
+            # worker evidence also uses this hook and requires timing checks.
+            candidate_diagnostics(dict(
+                tracking_cost=tracking_costs.detach().cpu().numpy().copy(),
+                slew_cost=slew_costs.detach().cpu().numpy().copy(),
+                boundary_cost=self.config.boundary_weight*boundary_cost.copy(),
+                takeup_cost=takeup_risk_cost.copy(),
+                raw_takeup_risk_s=takeup_risk_s.copy(),
+                total_cost=costs.detach().cpu().numpy().copy(),
+                eligible=(~blocked_candidate).copy(),
+                eligible_before_input_guard=eligible_before_input_guard,
+                input_shift_rejected=input_shift_rejected.copy(),
+                first_step_lambda_shift=first_step_lambda_shift.copy(),
+                predicted_tip_sequence_m=tips.detach().cpu().numpy().copy(),
+                deferred_motion=deferred_motion.copy(),
+                requested=requested.copy(),
+                projected=realized_logical.copy(),
+                motor_rates=motor_rates.copy(),
+                first_physical_direction=first_requested_direction.copy(),
+                realized_first_physical_direction=realized_first.copy(),
+                takeup_position_offset=takeup_position_offset.copy()))
         costs_finite_t = (
             torch.isfinite(costs).all()
             & torch.any(unrestricted_eligible_t))
+        if not bool(costs_finite_t.detach().cpu()):
+            return self._safe_result(
+                started, "invalid_cost",
+                phase_timings_ms=(sample_projection_ms, rollout_ms,
+                                  1e3*(perf_counter()-phase_started), 0.0))
         unrestricted_best_t = torch.argmin(unrestricted_costs)
         unrestricted_candidate_index = int(
             unrestricted_best_t.detach().cpu())
@@ -1516,25 +1824,29 @@ class CatheterMppi:
         reversal_axis_terminal_improvement = np.zeros(
             CONTROL_AXES, dtype=np.float64)
         hold_branch_applied = False
+        objective_mask = torch.as_tensor(
+            [1.0, 0.0, 0.0] if x_only else ([1.0, 0.0, 1.0] if xz_only else [1.0, 1.0, 1.0]),
+            device=device, dtype=dtype)
         raw_zero_terminal_error = float(torch.linalg.vector_norm(
-            (mean_tips[0, -1]-target[-1])*1000.0).detach().cpu())
+            (mean_tips[0, -1]-target[-1])*objective_mask*1000.0).detach().cpu())
         with self._capture_lock:
             capture_response_scale = self._capture_passive_response_scale
         zero_terminal_error = raw_zero_terminal_error
-        if observed_tip is not None and target_tangent is None:
+        if capture_tip is not None and target_tangent is None:
             raw_zero_tip = mean_tips[0, -1].detach().cpu().numpy()
-            adjusted_zero_tip = observed_tip + capture_response_scale*(
-                raw_zero_tip-observed_tip)
-            zero_terminal_error = float(np.linalg.vector_norm(
-                (adjusted_zero_tip-prediction_target[-1])*1000.0))
+            adjusted_zero_tip = capture_tip + capture_response_scale*(
+                raw_zero_tip-capture_tip)
+            zero_terminal_error = float(np.linalg.norm(
+                (adjusted_zero_tip-prediction_target[-1])*
+                ([1, 0, 0] if x_only else ([1, 0, 1] if xz_only else [1, 1, 1]))*1000.0))
         unrestricted_terminal = float(torch.linalg.vector_norm(
-            (mean_tips[unrestricted_best_t, -1]-target[-1])*1000.0
+            (mean_tips[unrestricted_best_t, -1]-target[-1])*objective_mask*1000.0
         ).detach().cpu())
         complete_mode_cost_improvement = max(
             0.0, float((costs[no_reversal_index]
                         - costs[unrestricted_best_t]).detach().cpu()))
         no_reversal_terminal = float(torch.linalg.vector_norm(
-            (mean_tips[no_reversal_index, -1]-target[-1])*1000.0
+            (mean_tips[no_reversal_index, -1]-target[-1])*objective_mask*1000.0
         ).detach().cpu())
         for axis in np.flatnonzero(proposed_reversal_direction):
             reversal_axis_cost_improvement[axis] = (
@@ -1566,7 +1878,9 @@ class CatheterMppi:
         # not use this point-capture rule.
         hold_branch_terminal_error = float("nan")
         capture_enabled = (
-            target_tangent is None and self.config.capture_radius_mm > 0.0)
+            not (x_only or xz_only) and target_tangent is None and self.config.capture_radius_mm > 0.0)
+        # Scalar tasks settle in the path governor. The legacy XYZ point-
+        # capture response heuristic must not reintroduce ignored Y/Z errors.
         now_s = (self._clock() if capture_enabled else float("-inf"))
         with self._capture_lock:
             hold_active = (
@@ -1600,6 +1914,11 @@ class CatheterMppi:
             eligible[0] = not blocked_candidate[0]
             hold_branch_applied = True
             hold_branch_terminal_error = zero_terminal_error
+        if not np.any(eligible):
+            return self._safe_result(
+                started, "no_eligible_candidate",
+                phase_timings_ms=(sample_projection_ms, rollout_ms,
+                                  1e3*(perf_counter()-phase_started), 0.0))
         eligible_t = torch.as_tensor(eligible, device=device, dtype=torch.bool)
         selection_costs = torch.where(
             eligible_t, costs, torch.full_like(costs, torch.inf))
@@ -1646,7 +1965,6 @@ class CatheterMppi:
         # Complete all accelerator work once, then transfer only the compact
         # result needed by the CPU safety projection and ROS diagnostics.
         _synchronize_torch_device(device)
-        costs_finite = bool(costs_finite_t.detach().cpu())
         updated_feasible = (
             updated_feasible_t.detach().cpu().numpy().copy())
         command_tips_np = (
@@ -1677,20 +1995,35 @@ class CatheterMppi:
         best_tracking_cost = float(best_tracking_cost_t.detach().cpu())
         effective_samples = float(effective_samples_t.detach().cpu())
         cost_weighting_ms = 1e3*(perf_counter()-phase_started)
-        if not costs_finite:
+        if not np.isfinite(updated_feasible).all():
             return self._safe_result(
-                started, "invalid_cost",
+                started, "invalid_weighted_command",
                 phase_timings_ms=(sample_projection_ms, rollout_ms,
                                   cost_weighting_ms, 0.0))
         phase_started = perf_counter()
         # The minimum-speed rule makes the feasible set non-convex around
         # zero. Do not snap a small weighted residual into physical motion.
-        deadband = self.contract.velocity_min[:CONTROL_AXES]
-        executable_request = np.where(
-            np.abs(updated_feasible) < deadband[None], 0.0,
-            updated_feasible)
-        updated_logical, _, updated_motor, _, _, _ = self._project(
-            executable_request[None], position, blocked_direction)
+        if scored_candidate_guard_applied:
+            # Costs used quantized realized rates; execute the original
+            # publishable command that produced those rates, not a second
+            # projection of its quantized realization. That second deadband
+            # can erase minimum-speed motion after it has been scored.
+            updated_logical = rollout_logical[
+                selected_candidate_index:selected_candidate_index+1, :horizon].copy()
+            # Coupled subtraction/addition may reconstruct an intended zero
+            # as one ulp of a moving component. Do not let the manager's
+            # minimum-speed rule amplify that numerical zero into motion.
+            updated_logical[np.abs(updated_logical) < 1e-12] = 0.0
+            updated_motor = motor_rates[
+                selected_candidate_index:selected_candidate_index+1, :horizon].copy()
+            updated_feasible = updated_logical[0, :, :CONTROL_AXES].copy()
+        else:
+            deadband = self.contract.velocity_min[:CONTROL_AXES]
+            executable_request = np.where(
+                np.abs(updated_feasible) < deadband[None], 0.0,
+                updated_feasible)
+            updated_logical, _, updated_motor, _, _, _ = self._project(
+                executable_request[None], position, blocked_direction)
         takeup_direction_latched = False
         compensated_motor = updated_motor[0].copy()
         transmitted_motor = updated_motor[0].copy()
@@ -1708,6 +2041,7 @@ class CatheterMppi:
             updated_feasible,
             -self.contract.velocity_max[:CONTROL_AXES],
             self.contract.velocity_max[:CONTROL_AXES])
+        self._previous_sequence = warm.copy()
         self._nominal[:-1] = warm[1:]
         self._nominal[-1] = warm[-1]
         return MppiPlan(
@@ -1769,8 +2103,7 @@ class CatheterMppi:
             selected_takeup_risk_s=float(
                 takeup_risk_s[int(best_t.detach().cpu())]),
             selected_takeup_risk_cost=float(
-                self.config.takeup_risk_weight
-                * takeup_risk_s[int(best_t.detach().cpu())]),
+                takeup_risk_cost[int(best_t.detach().cpu())]),
             selected_switch_count=int(
                 switch_count[int(best_t.detach().cpu())]),
             engaged_gain_scenario_count=gain_scenario_count,

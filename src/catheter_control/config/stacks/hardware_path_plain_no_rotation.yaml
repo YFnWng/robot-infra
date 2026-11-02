@@ -1,0 +1,10 @@
+schema_version: 1
+name: hardware.path.plain.no_rotation
+node_name: catheter_mppi
+description: Two-axis continuous paths with plain v171 MPPI.
+layers:
+  controller: [controller/base.yaml, controller/modes/plain.yaml]
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/twoaxis_circle.yaml
+compatibility_aliases: []

@@ -1,0 +1,12 @@
+schema_version: 1
+name: simulation.adapj.plain.twoaxis
+node_name: sim_catheter_mppi
+description: Existing isolated RViz plant with measured-tip plain AdapJ reaching.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/adapj_plain.yaml
+  platform: platform/simulation_adapj_twoaxis.yaml
+  performance: performance/adapj_cpu.yaml
+  experiment: experiments/sparse_points/adapj_plain_twoaxis_sim.yaml
+  visualization: rviz/simulation.rviz

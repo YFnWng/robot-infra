@@ -10,6 +10,77 @@ from catheter_control.orchestration.configuration import (
 CONFIG = Path(__file__).resolve().parents[1] / "config"
 
 
+@pytest.mark.parametrize('mode', ['plain', 'takeup'])
+def test_adapj_position_profiles_reuse_existing_layers(mode):
+    def resolve(name):
+        return resolve_stack(locate_stack(name, CONFIG), config_root=CONFIG,
+            allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+            expected_node_name='catheter_mppi').parameters
+    original = resolve(f'hardware_adapj_{mode}_twoaxis')
+    position = resolve(f'hardware_adapj_{mode}_position_twoaxis')
+    assert position['control_method'] == 'adapj'
+    assert position['mppi_execution_mode'] == 'position_stream'
+    assert position['task_gc_enabled'] is True
+    assert {key for key in original if original[key] != position[key]} <= {
+        'mppi_execution_mode', 'task_gc_enabled'}
+
+
+def test_synchronized_circle_reuses_baseline_and_existing_yz_geometry():
+    stack = resolve_stack(locate_stack(
+        'hardware_path_grouped_takeup_synchronized_rotation_circle', CONFIG),
+        config_root=CONFIG, allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+        expected_node_name='catheter_mppi')
+    assert stack.parameters['synchronized_sheath_rotation'] is True
+    assert stack.parameters['controller_velocity_max'][1] == 25.
+    assert stack.parameters['task_gc_enabled'] is True
+    assert stack.parameters['mppi_grouped_mode_sampling'] is True
+    assert stack.parameters['backlash_compensation_enabled'] is True
+    assert not stack.parameters.get('engagement_control_enabled', False)
+
+
+@pytest.mark.parametrize('name', [
+    'hardware_engagement_twoaxis',
+    'hardware_path_plain_no_rotation',
+    'hardware_path_grouped_takeup_no_rotation',
+])
+def test_session_profiles_enable_shared_bounded_task_gc(name):
+    stack = resolve_stack(locate_stack(name, CONFIG), config_root=CONFIG,
+                          allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+                          expected_node_name='catheter_mppi')
+    assert stack.parameters['task_gc_enabled'] is True
+    assert stack.parameters['task_gc_maximum_s'] == 300.0
+    assert stack.parameters['task_gc_growth_mb'] == 256.0
+    assert stack.parameters['backlash_minimum_distal_marker_deformation_mm'] == 0.3
+
+
+@pytest.mark.parametrize("row", ["plain", "plain_takeup", "grouped_takeup", "grouped_no_takeup"])
+def test_twoaxis_path_profiles_reuse_model_and_disable_rotation(row):
+    stack = resolve_stack(locate_stack(f"hardware_path_{row}_no_rotation", CONFIG),
+                          config_root=CONFIG,
+                          allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+                          expected_node_name="catheter_mppi")
+    assert stack.parameters["controller_velocity_max"][1] == 0
+    assert stack.parameters["horizon_steps"] == 4
+    assert stack.parameters["rollout_step_s"] == .04
+    assert stack.parameters["samples"] == 512
+    assert stack.parameters["engaged_gain_enabled"] is False
+    assert not stack.parameters.get("backlash_tendon_takeup_joint_range_enabled", False)
+
+
+def test_g5_profile_is_separate_and_explicit():
+    stack=resolve_stack(locate_stack('hardware_engagement_twoaxis',CONFIG),
+        config_root=CONFIG,allowed_parameters=set(ACTIVE_CONTROLLER_PARAMETERS),
+        expected_node_name='catheter_mppi')
+    assert stack.parameters['engagement_control_enabled'] is True
+    assert stack.parameters['backlash_tendon_takeup_joint_range_enabled'] is True
+    assert stack.parameters['planner_process_enabled'] is True
+    assert stack.parameters['samples']==512
+    assert stack.parameters['estimator_device']=='cpu'
+    assert not stack.parameters['engaged_gain_enabled']
+    assert not stack.parameters['mppi_engaged_gain_scenarios']
+    assert stack.parameters['controller_velocity_max'][1]==0
+
+
 @pytest.mark.parametrize(
     ("stack_name", "legacy_name"),
     [
@@ -40,7 +111,12 @@ def test_semantic_stack_matches_legacy_profile(stack_name, legacy_name):
         expected_node_name="catheter_mppi",
     )
     legacy = yaml.safe_load((CONFIG / legacy_name).read_text())
-    expected = legacy["catheter_mppi"]["ros__parameters"]
+    expected = dict(legacy["catheter_mppi"]["ros__parameters"])
+    # Flat historical profiles omit the newly enabled shared node defaults.
+    expected.update(task_gc_enabled=True, task_gc_maximum_s=300.0,
+                    task_gc_growth_mb=256.0,
+                    backlash_minimum_distal_marker_deformation_mm=0.3)
+    expected["backlash_distal_confirmation_release_ratio"] = 0.75
     assert resolved.parameters == expected
     assert legacy_name in resolved.compatibility_aliases
 

@@ -24,6 +24,12 @@ setup(
     entry_points={
         "console_scripts": [
             "compute_profile = runtime_supervision.bootstrap:compute_profile",
+            "replay_takeup_startup = runtime_supervision.bootstrap:replay_takeup_startup",
+            "compare_compute = runtime_supervision.bootstrap:compare_compute",
+            "qualify_live_compute = runtime_supervision.bootstrap:qualify_live_compute",
+            "qualify_recovery = runtime_supervision.bootstrap:qualify_recovery",
+            "engagement_g4 = runtime_supervision.bootstrap:engagement_g4",
+            "engagement_shadow = runtime_supervision.bootstrap:engagement_shadow",
             "benchmark_accelerator = runtime_supervision.bootstrap:benchmark_accelerator",
             "causal_runtime_identity = runtime_supervision.bootstrap:runtime_identity",
             "causal_session_check = runtime_supervision.session_check:main",

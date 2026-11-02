@@ -18,8 +18,10 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud
 from std_srvs.srv import SetBool
 
-from .target_offset import controller_state, measured_tip
+from .target_offset import CONTROLLER_STATUS_NAME, controller_status, measured_tip
+from .task_outcomes import controller_failure
 from catheter_control.planning.trajectory import TrajectorySequencer
+from catheter_control.safety.lifecycle import controller_motion_held
 
 
 class TipTrajectoryActionServer(Node):
@@ -66,7 +68,9 @@ class TipTrajectoryActionServer(Node):
         self.tip_time = None
         self.controller_armed = False
         self.controller_state = None
+        self.controller_reason = ""
         self.controller_time = None
+        self.controller_failure = ("", "")
         group = ReentrantCallbackGroup()
         self.target_pub = self.create_publisher(
             PointStamped, target_topic, 10)
@@ -96,13 +100,21 @@ class TipTrajectoryActionServer(Node):
 
     def _status_cb(self, message):
         try:
-            armed, state = controller_state(message)
+            armed, state, _ = controller_status(message)
+            status = next(item for item in message.status
+                          if item.name == CONTROLLER_STATUS_NAME)
+            values = {item.key: item.value for item in status.values}
         except ValueError:
             return
         with self._lock:
             self.controller_armed = armed
             self.controller_state = state
+            self.controller_reason = str(values.get("reason", ""))
             self.controller_time = time.monotonic()
+            if state == "FAULTED":
+                self.controller_failure = controller_failure(values)
+            elif armed:
+                self.controller_failure = ("", "")
 
     def _request_spec(self, request):
         if request.header.frame_id != self.frame_id:
@@ -187,7 +199,7 @@ class TipTrajectoryActionServer(Node):
             time.sleep(0.01)
         return False, "controller did not report armed status"
 
-    def _result(self, sequence, message, final_error=math.nan):
+    def _result(self, sequence, message, final_error=math.nan, *, controller_fault=False):
         result = TrackTipTrajectory.Result()
         # Time-budget expiry is an intended waypoint transition, not an
         # action-server failure. The separate reached/timed-out counts report
@@ -197,6 +209,11 @@ class TipTrajectoryActionServer(Node):
         result.reached_waypoints = sequence.reached_waypoints
         result.timed_out_waypoints = sequence.timed_out_waypoints
         result.final_error_mm = float(final_error)
+        if controller_fault:
+            with self._lock:
+                result.fault_reason, result.fault_snapshot_json = self.controller_failure
+            if result.fault_reason:
+                result.message += f": {result.fault_reason}"
         return result
 
     def _execute(self, goal_handle):
@@ -231,7 +248,8 @@ class TipTrajectoryActionServer(Node):
                         goal_handle.canceled()
                     else:
                         goal_handle.abort()
-                    return self._result(sequence, detail)
+                    return self._result(sequence, detail,
+                        controller_fault=detail == "controller faulted while arming")
             elif not armed:
                 goal_handle.abort()
                 return self._result(
@@ -255,14 +273,17 @@ class TipTrajectoryActionServer(Node):
                 if state == "FAULTED":
                     goal_handle.abort()
                     return self._result(
-                        sequence, "controller faulted", final_error)
+                        sequence, "controller faulted", final_error,
+                        controller_fault=True)
                 if not armed:
                     goal_handle.abort()
                     return self._result(
                         sequence, "controller disarmed during trajectory",
                         final_error)
 
-                update = sequence.update(tip, loop_started)
+                with self._lock:
+                    held = controller_motion_held(self.controller_reason)
+                update = sequence.update(tip, loop_started, external_hold=held)
                 final_error = update.tracking_error_mm
                 feedback = TrackTipTrajectory.Feedback()
                 feedback.waypoint_index = update.waypoint_index

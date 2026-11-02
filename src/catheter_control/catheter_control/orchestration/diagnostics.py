@@ -189,6 +189,13 @@ def response_diagnostic_values(response, pending_count):
             ".6g"),
         "response_observation_timestamp_ns": str(
             response.observation_timestamp_ns),
+        "response_source_observation_timestamp_ns": str(
+            response.source_observation_timestamp_ns),
+        "response_comparison_valid": str(response.comparison_valid),
+        "response_comparison_reason": response.comparison_reason,
+        "response_root_readout_error_mm": (
+            "none" if response.root_readout_error_mm is None else
+            json.dumps(response.root_readout_error_mm.tolist(), separators=(",", ":"))),
         "response_observation_lateness_ms": (
             "{:.6g}".format(1e-6*(
                 response.observation_timestamp_ns
@@ -218,6 +225,8 @@ def model_diagnostic_values(model_diagnostics, model_valid):
     """Serialize the stable public subset of learned-runtime diagnostics."""
     values = {}
     for key in (
+            "phase", "direction", "effective_input", "input_std", "prediction_ready",
+            "runtime_family", "artifact_manifest_sha256",
             "distal_sha256", "jacobian_sha256", "lambda",
             "last_dt_s",
             "estimator_covariance_trace",
@@ -333,6 +342,9 @@ def transmission_diagnostic_values(
         command, effective_command, compensation_enabled, raw_encoder_counts,
         snapshot, transaction_enabled, arbiter):
     """Serialize transmission belief and take-up transaction state."""
+    # G5's joint belief replaces the optional legacy gain estimator. Keep the
+    # status keys stable without inventing gain estimates for that runtime.
+    gain = snapshot.engaged_gain
     return {
         "command": json.dumps(command.tolist()),
         "effective_command": json.dumps(
@@ -403,30 +415,46 @@ def transmission_diagnostic_values(
         "backlash_tendon_distal_response_evidence": format(
             snapshot
             .tendon_distal_response_evidence, ".6g"),
+        "backlash_tendon_response_onset": str(
+            getattr(snapshot, 'tendon_response_onset', False)),
+        "backlash_tendon_response_timestamp_ns": str(
+            getattr(snapshot, 'tendon_response_timestamp_ns', 0)),
+        "backlash_tendon_response_encoder_quiet": str(
+            getattr(snapshot, 'tendon_response_encoder_quiet', False)),
+        "backlash_tendon_response_noise_mm": format(
+            getattr(snapshot, 'tendon_response_noise_mm', float('nan')), '.6g'),
+        "backlash_tendon_response_onset_floor_mm": format(
+            getattr(snapshot, 'tendon_response_onset_floor_mm', float('nan')), '.6g'),
+        "backlash_tendon_response_deformation_mm": format(
+            getattr(snapshot, 'tendon_response_deformation_mm', 0.), '.6g'),
+        "backlash_tendon_response_chord_support_mm": format(
+            getattr(snapshot, 'tendon_response_chord_support_mm', 0.), '.6g'),
         "backlash_tendon_distal_response_confirmed": str(
             snapshot
             .tendon_distal_response_confirmed),
         "backlash_phase": json.dumps(
             list(snapshot.phase)),
         "engaged_gain_enabled": str(
-            snapshot.engaged_gain.enabled),
-        "engaged_gain_mean": json.dumps(
-            snapshot.engaged_gain.mean.tolist()),
-        "engaged_gain_lower": json.dumps(
-            snapshot.engaged_gain.lower.tolist()),
-        "engaged_gain_upper": json.dumps(
-            snapshot.engaged_gain.upper.tolist()),
-        "engaged_gain_update_count": json.dumps(
-            snapshot.engaged_gain.update_count.tolist()),
-        "engaged_gain_status": json.dumps(
-            snapshot.engaged_gain.status),
-        "engaged_gain_last_reason": json.dumps(
-            snapshot.engaged_gain.last_reason),
+            gain is not None and gain.enabled),
+        "engaged_gain_mean": (
+            "none" if gain is None else json.dumps(gain.mean.tolist())),
+        "engaged_gain_lower": (
+            "none" if gain is None else json.dumps(gain.lower.tolist())),
+        "engaged_gain_upper": (
+            "none" if gain is None else json.dumps(gain.upper.tolist())),
+        "engaged_gain_update_count": (
+            "none" if gain is None else json.dumps(gain.update_count.tolist())),
+        "engaged_gain_status": (
+            "none" if gain is None else json.dumps(gain.status)),
+        "engaged_gain_last_reason": (
+            "none" if gain is None else json.dumps(gain.last_reason)),
         "takeup_transaction_enabled": str(
             transaction_enabled),
         "takeup_transaction_state": arbiter.state,
         "takeup_transaction_generation": str(
             arbiter.generation),
+        "takeup_response_stop_source_ns": str(arbiter.response_stop_source_ns),
+        "takeup_response_post_stop_observations": str(arbiter.response_post_stop_observations),
         "takeup_transaction_active_mask": json.dumps(
             arbiter.active_mask.astype(int).tolist()),
         "takeup_transaction_pending_mask": json.dumps(
@@ -465,6 +493,8 @@ def planner_policy_diagnostic_values(
                   if scheduler.config.enabled
                   else "plain_mppi")),
         "mppi_samples": str(config.samples),
+        "mppi_temperature": format(config.temperature, ".6g"),
+        "mppi_always_engaged_rollout": str(config.always_engaged_rollout),
         "mppi_engaged_gain_scenarios": str(
             config.engaged_gain_scenarios),
         "mppi_engaged_gain_risk_beta": format(
@@ -580,6 +610,8 @@ def runtime_diagnostic_values(
         "torch_interop_threads": str(torch_interop_threads),
         "controller_velocity_min": json.dumps(
             contract.velocity_min.tolist(), separators=(",", ":")),
+        "synchronized_sheath_rotation": str(
+            contract.synchronized_sheath_rotation).lower(),
         "controller_velocity_max": json.dumps(
             contract.velocity_max.tolist(), separators=(",", ":")),
         "raw_response_during_interface_takeup": json.dumps(

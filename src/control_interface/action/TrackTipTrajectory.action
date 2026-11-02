@@ -12,6 +12,9 @@ bool auto_arm
 # intentional transition and is reported separately below.
 bool success
 string message
+# Initiating controller fault evidence; empty for non-controller outcomes.
+string fault_reason
+string fault_snapshot_json
 uint32 reached_waypoints
 uint32 timed_out_waypoints
 float64 final_error_mm

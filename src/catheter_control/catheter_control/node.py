@@ -11,8 +11,10 @@ import time
 
 from control_interface.msg import (
     ControlCycleTiming, ControlStream, DeviceStream, EstimatorStateTrace,
-    ManagerEvent, MppiResponseTrace, TipReferenceHorizon)
-from control_interface.srv import GenerateSparseTargets
+    ManagerEvent, MppiResponseTrace, MppiAlignedResponseTrace, TipReferenceHorizon)
+from control_interface.srv import GenerateSparseTargets, OpenPositionStream
+from control_interface.msg import StreamedPositionControl
+from .safety.position_execution import make_position_execution, root_encoder_counts, position_execution_in_flight, measured_standstill
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Point, Point32, PointStamped
 import numpy as np
@@ -42,16 +44,20 @@ from .orchestration.diagnostics import (
 from .orchestration.estimator_owner import marker_measurement, stamp_ns
 from .orchestration.parameters import declare_parameters
 from .orchestration.runtime import load_runtime_pair
+from .orchestration.planner_process import ProcessPlanner
 from .transmission.engaged_gain import EngagedGainConfig
 from .safety.hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
 from .safety.lifecycle import (
     ControllerState, FreshnessLimits, GateInputs, paired_source_skew_s,
-    readiness, recoverable_encoder_processing_lag)
+    readiness, recoverable_runtime_interruption)
 from .planning.mppi import CatheterMppi, MppiConfig
+from .planning.engagement import reconcile_engagement, tendon_confirmation, confirmation_from_checkpoint, confirm_at_source
+from .orchestration.configuration import validate_experimental_composition
 from .planning.path_tracking import ReferenceHorizon
 from .transmission.reversal_scheduler import (
     ReversalDirectionScheduler, ReversalSchedulerConfig)
 from .orchestration.timing import PeriodicTimerProbe, TimingWindows
+from .orchestration.task_gc import TaskGcPolicy, gc_work
 from .planning.tracking import TipForecastMonitor, tip_tracking_error_mm
 
 
@@ -70,6 +76,19 @@ class CatheterControlNode(Node):
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.command_output_enabled = bool(
             self.get_parameter("command_output_enabled").value)
+        self.control_method = str(self.get_parameter("control_method").value)
+        self.mppi_execution_mode = str(self.get_parameter("mppi_execution_mode").value)
+        if self.mppi_execution_mode not in {'velocity', 'position_stream'}:
+            raise ValueError('mppi_execution_mode must be velocity or position_stream')
+        self.position_execution = None
+        self.position_stream_session = 0
+        self.position_stream_future = None
+        self.position_stream_open_started = None
+        self.position_stream_command_id = 0
+        self.position_stream_encoder_counts = None
+        if self.control_method not in {"mppi", "adapj"}:
+            raise ValueError("control_method must be mppi or adapj")
+        self.engagement_control_enabled = bool(self.get_parameter("engagement_control_enabled").value)
         self.marker_estimator = str(
             self.get_parameter("marker_estimator").value).strip().lower()
         if self.marker_estimator not in {"gauss_newton", "ekf", "ukf"}:
@@ -91,11 +110,16 @@ class CatheterControlNode(Node):
         self._lock = threading.RLock()
         self._snapshot_lock = threading.Lock()
         self._plan_lock = threading.Lock()
+        self._task_gc = TaskGcPolicy(
+            enabled=bool(self.get_parameter("task_gc_enabled").value),
+            maximum_s=float(self.get_parameter("task_gc_maximum_s").value),
+            growth_mb=float(self.get_parameter("task_gc_growth_mb").value))
         self._timing = TimingWindows()
         self._timer_probes = {}
         self.state = ControllerState.DISARMED
         self.state_reason = "not_armed"
         self.armed = False
+        self._shutting_down = False
         self.fault_latched = False
         self.last_fault_snapshot = {}
         self.mode_claimed = False
@@ -117,6 +141,9 @@ class CatheterControlNode(Node):
         self.pending_encoder_timestamp_ns = None
         self.pending_encoder_arrival = None
         self._raw_encoder_history = deque(maxlen=256)
+        # Full input cadence for AdapJ alignment/standstill, independent of the
+        # latest-only estimator owner. All access is under the control lock.
+        self._adapj_encoder_history = deque(maxlen=1024)
         # Timestamped transmission checkpoints are owned by the same 50 Hz
         # estimator callback as the learned runtime. Delayed marker updates
         # restore and replay this belief rather than correcting current time.
@@ -153,13 +180,17 @@ class CatheterControlNode(Node):
         self.accepted_observations = 0
         self.consecutive_rejections = 0
         self.planner_warmed = False
+        self._planner_warmup_supersessions = 0
         self.consecutive_deadline_misses = 0
         self.estimator_catchup_started_at = None
+        self.estimator_catchup_observations = 0
         self.estimator_catchup_pause_count = 0
         self.model_diagnostics = {}
         self.model_valid = False
         self._planner_snapshot = None
         self._planner_snapshot_source_time = None
+        self._tip_readout_offset_m = None
+        self._planner_tip_readout_offset_m = None
         self._planner_transmission_snapshot = None
 
         self.limits = FreshnessLimits(
@@ -194,6 +225,7 @@ class CatheterControlNode(Node):
                 or self.maximum_rejections < 1
                 or self.maximum_deadline_misses < 1
                 or self.command_timeout_s <= 0.0
+                or not math.isfinite(self.estimator_catchup_timeout_s)
                 or self.estimator_catchup_timeout_s <= 0.0
                 or tip_error_log_rate < 0.0
                 or self.mode_settle_s < 0.0):
@@ -278,9 +310,14 @@ class CatheterControlNode(Node):
             str(self.get_parameter("model_manifest").value),
             estimator_device=str(self.estimator_compute_device.device),
             estimator_dtype=str(self.get_parameter("estimator_dtype").value).strip() or "float32",
-            planner_device=str(self.compute_device.device), options=runtime_options)
+            planner_device=str(self.compute_device.device), options=runtime_options,
+            experimental_engagement=self.engagement_control_enabled)
+        if self.engagement_control_enabled:
+            runtime_options = {}
         self.runtime = self.runtime_bundle.runtime
         self.planner_runtime = self.planner_runtime_bundle.runtime
+        if self.engagement_control_enabled:
+            self.runtime.use_external_tendon_confirmation()
         self.model_diagnostics = self.runtime.diagnostics()
         self.model_valid = True
         self.contract = load_hardware_contract(
@@ -304,7 +341,9 @@ class CatheterControlNode(Node):
         self.contract = replace(
             self.contract,
             velocity_min=resolved_velocity_min,
-            velocity_max=resolved_velocity_max)
+            velocity_max=resolved_velocity_max,
+            synchronized_sheath_rotation=bool(self.get_parameter(
+                "synchronized_sheath_rotation").value))
         if self.contract.model_encoder_count_lower is None:
             raise ValueError(
                 "selected catheter profile lacks v171 model encoder bounds")
@@ -346,7 +385,26 @@ class CatheterControlNode(Node):
                 f"take-up={list(round(value, 6) for value in fitted_width)} "
                 "rad; external compensation="
                 f"{self.backlash_compensation_enabled}")
+        if self.engagement_control_enabled and self.runtime.proximal is not None:
+            transmission = self.runtime.proximal.transmission
+            symmetric_backlash_width = tuple(((transmission.positive_play+transmission.negative_play)
+                /transmission.axis_scale.abs()).cpu().tolist())
+            directional_widths_present = False
+        tendon_travel_limit_rad = 0.0
+        if bool(self.get_parameter(
+                "backlash_tendon_takeup_joint_range_enabled").value):
+            # Only the tendon acquisition budget changes. Projection still
+            # enforces the directional headroom from the current position,
+            # including knob/chassis coupling and encoder-count limits.
+            tendon_span = self.contract.position_upper[2] - self.contract.position_lower[2]
+            tendon_mm_per_rad = abs(self.contract.motor_radians_per_second_to_motor_axis_velocity(
+                np.ones(6))[2])
+            tendon_travel_limit_rad = float(tendon_span / tendon_mm_per_rad)
+            self.get_logger().warn(
+                f"Experimental tendon take-up joint-range budget: {tendon_span:.3f} mm "
+                f"({tendon_travel_limit_rad:.3f} rad); joint limits remain enforced")
         backlash_config = BacklashConfig(
+            tendon_unconfirmed_travel_limit_rad=tendon_travel_limit_rad,
             width_rad=symmetric_backlash_width,
             width_positive_rad=(
                 positive_backlash_width if directional_widths_present
@@ -366,8 +424,14 @@ class CatheterControlNode(Node):
                 "backlash_response_direction_cosine").value),
             minimum_response_evidence=float(self.get_parameter(
                 "backlash_minimum_response_evidence").value),
+            response_window_max_s=float(self.get_parameter(
+                "backlash_response_window_max_s").value),
             minimum_distal_bending_increment=float(self.get_parameter(
                 "backlash_minimum_distal_bending_increment").value),
+            minimum_distal_marker_deformation_mm=float(self.get_parameter(
+                "backlash_minimum_distal_marker_deformation_mm").value),
+            distal_confirmation_release_ratio=float(self.get_parameter(
+                "backlash_distal_confirmation_release_ratio").value),
             distal_confirmation_enabled=True,
             width_learning_rate=float(self.get_parameter(
                 "backlash_width_learning_rate").value),
@@ -454,6 +518,11 @@ class CatheterControlNode(Node):
             (takeup_transaction_requested
              or legacy_transmission_aware_rollout)
             and self.backlash_compensation_enabled)
+        if self.mppi_execution_mode == 'position_stream':
+            if self.backlash_compensation_enabled and not self.takeup_transaction_enabled:
+                raise ValueError('position_stream requires explicit takeup transactions, not legacy feedforward')
+            if self.contract.synchronized_sheath_rotation:
+                raise ValueError('position_stream synchronized rotation needs separate paired-endpoint qualification')
         self.reversal_scheduler = ReversalDirectionScheduler(
             ReversalSchedulerConfig(
                 enabled=(bool(self.get_parameter(
@@ -479,6 +548,8 @@ class CatheterControlNode(Node):
         self.planner = CatheterMppi(
             self.planner_runtime, self.contract,
             MppiConfig(
+                always_engaged_rollout=(self.takeup_transaction_enabled
+                                       and not self.engagement_control_enabled),
                 horizon_steps=int(
                     self.get_parameter("horizon_steps").value),
                 step_s=float(self.get_parameter("rollout_step_s").value),
@@ -493,6 +564,7 @@ class CatheterControlNode(Node):
                 point_prediction_tail_step_s=float(self.get_parameter(
                     "mppi_point_prediction_tail_step_s").value),
                 samples=int(self.get_parameter("samples").value),
+                temperature=float(self.get_parameter("mppi_temperature").value),
                 noise_std=tuple(float(value) for value in self.get_parameter(
                     "mppi_noise_std").value),
                 noise_correlation=float(self.get_parameter(
@@ -542,7 +614,40 @@ class CatheterControlNode(Node):
                 seed=int(self.get_parameter("mppi_seed").value),
                 planning_deadline_s=float(
                     self.get_parameter("planning_deadline_s").value)))
+        self.planner_process_enabled = bool(
+            self.get_parameter("planner_process_enabled").value)
+        if self.engagement_control_enabled:
+            if not self.takeup_transaction_enabled:
+                raise ValueError('G5 requires takeup compensation')
+            validate_experimental_composition(self.runtime,self.planner,self.takeup_arbiter,
+                isolated=self.planner_process_enabled,planner_device=self.compute_device.device,
+                marker_estimator=self.marker_estimator,gain_enabled=self.engaged_gain_config.enabled,
+                scheduler_enabled=self.reversal_scheduler.config.enabled)
+        if self.planner_process_enabled:
+            if self.runtime.device.type != "cpu":
+                raise ValueError("planner_process_enabled requires estimator_device=cpu")
+            self.planner = ProcessPlanner(
+                self.planner_runtime, self.contract, self.planner.config,
+                manifest=str(self.get_parameter("model_manifest").value),
+                device=str(self.compute_device.device), options=runtime_options,
+                identity=self.runtime_bundle.identity.manifest_sha256,
+                threads=(self.torch_intraop_threads, self.torch_interop_threads))
         self.reset_pending = False
+
+        self.adapj = None
+        if self.control_method == "adapj":
+            if self.engagement_control_enabled or self.planner_process_enabled:
+                raise ValueError("AdapJ requires baseline and local execution")
+            if self.takeup_transaction_enabled != self.backlash_compensation_enabled:
+                raise ValueError("AdapJ compensation requires the shared takeup transaction")
+            from .planning.adapj import TipAdapJ
+            self.adapj = TipAdapJ(self.contract,
+                1./float(self.get_parameter("plan_rate_hz").value),
+                float(self.get_parameter("adapj_reference_step_mm").value),
+                exclude_takeup_from_initialization=self.takeup_transaction_enabled,
+                position_mode=self.mppi_execution_mode == 'position_stream')
+            if self.mppi_execution_mode == 'position_stream' and self.adapj.step_s > .25:
+                raise ValueError('AdapJ position_stream interval must not exceed 250 ms')
 
         # One callback owns every mutation of the learned runtime. Device and
         # marker subscriptions only replace pending inputs. This makes causal
@@ -592,6 +697,9 @@ class CatheterControlNode(Node):
         self.diagnostic_timer = self.create_timer(
             1.0/diagnostic_rate, self._diagnostic_tick,
             callback_group=self.io_group)
+        self.gc_maintenance_timer = self.create_timer(
+            1.0, self._gc_maintenance_tick,
+            callback_group=MutuallyExclusiveCallbackGroup())
         self.get_logger().info(
             "catheter MPPI loaded DISARMED with %s marker estimator on %s "
             "(%s), %d samples x %d steps; controller velocity max=%s; "
@@ -614,6 +722,10 @@ class CatheterControlNode(Node):
         motion_qos.durability = DurabilityPolicy.VOLATILE
         self.control_pub = self.create_publisher(
             ControlStream, "/teleop/control", motion_qos)
+        self.position_control_pub = self.create_publisher(
+            StreamedPositionControl, '/teleop/position_control', motion_qos)
+        self.position_stream_client = self.create_client(
+            OpenPositionStream, '/manager/open_position_stream', callback_group=self.service_group)
         self.event_pub = self.create_publisher(
             ManagerEvent, "/teleop/event", 10)
         self.status_pub = self.create_publisher(
@@ -627,6 +739,8 @@ class CatheterControlNode(Node):
         trace_qos.durability = DurabilityPolicy.VOLATILE
         self.response_trace_pub = self.create_publisher(
             MppiResponseTrace, "/catheter_mppi/response_trace", trace_qos)
+        self.aligned_response_trace_pub = self.create_publisher(
+            MppiAlignedResponseTrace, "/catheter_mppi/aligned_response_trace", trace_qos)
         self.estimator_trace_pub = self.create_publisher(
             EstimatorStateTrace, "/catheter_mppi/estimator_trace", trace_qos)
         self.control_cycle_timing_pub = self.create_publisher(
@@ -665,6 +779,11 @@ class CatheterControlNode(Node):
         self.create_service(
             SetBool, "/catheter_mppi/set_armed", self._arm_cb,
             callback_group=self.service_group)
+        if self.adapj is not None:
+            self.create_service(SetBool, "/catheter_mppi/adapj_initialization",
+                self._adapj_initialization_cb, callback_group=self.service_group)
+            self.create_service(Trigger, "/catheter_mppi/adapj_cancel_initialization",
+                self._adapj_cancel_initialization_cb, callback_group=self.service_group)
         self.create_service(
             Trigger, "/catheter_mppi/emergency_stop", self._stop_cb,
             callback_group=self.service_group)
@@ -731,7 +850,9 @@ class CatheterControlNode(Node):
                 int(request.rollout_steps),
                 np.asarray(request.minimum_endpoint_reserve,
                            dtype=np.float64),
-                transmission_state=transmission)
+                transmission_state=transmission,
+                reserve_takeup=not self.engagement_control_enabled,
+                enforce_endpoint_reserve=not self.engagement_control_enabled)
             displacement_mm = 1000.0*np.linalg.norm(
                 prediction.predicted_tip_displacement_m, axis=1)
             minimum = float(request.minimum_tip_displacement_mm)
@@ -742,11 +863,14 @@ class CatheterControlNode(Node):
             outside = np.flatnonzero(
                 (displacement_mm < minimum) | (displacement_mm > maximum))
             if len(outside):
-                raise ValueError(
+                warning = (
                     "model target displacement outside requested bounds: "
                     + ",".join(
                         f"{index}={displacement_mm[index]:.3f}mm"
                         for index in outside))
+                if not self.engagement_control_enabled:
+                    raise ValueError(warning)
+                self.get_logger().warn(warning + "; advisory G5 preview only")
             response.targets = [
                 Point(x=float(value[0]), y=float(value[1]),
                       z=float(value[2]))
@@ -758,6 +882,11 @@ class CatheterControlNode(Node):
             response.success = True
             response.message = "generated %d guarded sparse targets" % len(
                 response.targets)
+            if self.engagement_control_enabled:
+                response.message += (
+                    "; hypothetical post-engagement shape preview; "
+                    "model reachability bounds advisory; "
+                    "takeup execution feasibility not certified")
             self.get_logger().info(
                 "%s; tip displacement mm=%s" % (
                     response.message,
@@ -836,8 +965,8 @@ class CatheterControlNode(Node):
             else:
                 # Pairing describes transport/source coherence, so track the
                 # newest received ENC stamp here. The separate encoder_time is
-                # advanced only after estimator processing and remains the
-                # fail-closed processed-feedback freshness signal.
+                # advanced only after estimator processing and remains MPPI's
+                # processed-feedback freshness signal. AdapJ consumes raw ENC.
                 previous_source_timestamp_ns = (
                     self.encoder_source_timestamp_ns)
                 if (previous_source_timestamp_ns is None
@@ -846,6 +975,14 @@ class CatheterControlNode(Node):
                 if (previous_source_timestamp_ns is None
                         or timestamp_ns > previous_source_timestamp_ns):
                     self.encoder_receive_time = now
+                    if getattr(self, 'adapj', None) is not None:
+                        if np.any(counts != np.rint(counts)) or np.any(np.abs(counts) > 2147483647):
+                            self._fault_locked('malformed_adapj_encoder_feedback')
+                            return
+                        self._adapj_encoder_history.append((int(timestamp_ns), counts.copy()))
+                        if self.mppi_execution_mode == 'position_stream':
+                            self.position_stream_encoder_counts = counts.copy()
+                            self.adapj.confirm_position_standstill(self._adapj_encoder_history)
         if not valid:
             self._fault_if_active("encoder_feedback_out_of_range")
             return
@@ -894,6 +1031,8 @@ class CatheterControlNode(Node):
             self._planner_snapshot = state
             self._planner_snapshot_source_time = source_time
             self._planner_transmission_snapshot = transmission_state
+            self._planner_tip_readout_offset_m = getattr(
+                self, "_tip_readout_offset_m", None)
 
     def _process_encoder_sample(self, sample):
         if sample is None:
@@ -903,33 +1042,58 @@ class CatheterControlNode(Node):
             "encoder_pending_age", self._steady()-arrival)
         started = self._steady()
         backlash_snapshot = None
+        with self._lock:
+            control_owned = bool(self.armed)
         try:
             if (self.runtime.state is not None
                     and timestamp_ns <= self.runtime.state.timestamp_ns):
                 return False
             raw_counts = np.asarray(counts, dtype=np.float64).copy()
             self._raw_encoder_history.append(
-                (int(timestamp_ns), raw_counts[:3].copy()))
+                (int(timestamp_ns), raw_counts.copy()
+                 if (self.engagement_control_enabled or getattr(self, "adapj", None) is not None
+                     or getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream')
+                 else raw_counts[:3].copy()))
+            if (getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream'
+                    and getattr(self, 'adapj', None) is None):
+                self.position_stream_encoder_counts = raw_counts.copy()
             self.latest_raw_encoder_counts = raw_counts[:3].copy()
             effective_motor = None
             if self.backlash_compensation_enabled:
                 raw_motor = (
                     raw_counts[:3]*ENCODER_RADIANS_PER_COUNT)
-                effective_motor = self.backlash_estimator.advance_motor(
-                    raw_motor)
+                advance_options = dict(external_motion=not control_owned)
+                adapj = getattr(self, "adapj", None)
+                if (not control_owned and adapj is not None and adapj.capturing
+                        and adapj.exclude_takeup_from_initialization):
+                    advance_options["track_external_response"] = True
+                self.backlash_estimator.advance_motor(raw_motor, **advance_options)
+                effective_motor = self.backlash_estimator.interface_motor_angles(raw_motor)
                 self._backlash_history.append([
                     int(timestamp_ns), raw_motor.copy(),
-                    self.backlash_estimator.clone_state()])
+                    self.backlash_estimator.clone_state(), control_owned])
                 backlash_snapshot = self.backlash_estimator.snapshot()
+            if self.engagement_control_enabled:
+                effective_motor = None  # Joint runtime owns interface transmission.
+                if self.runtime.state is None:
+                    self.encoder_time = arrival
+                    return False  # Initialization awaits causally bracketed markers.
             if self.runtime.state is None:
                 state = self.runtime.initialize(
                     timestamp_ns, raw_counts,
                     interface_motor_angle_rad=effective_motor)
             else:
-                state = self.runtime.advance_encoder(
-                    timestamp_ns, raw_counts,
-                    interface_motor_angle_rad=effective_motor)
+                if self.engagement_control_enabled:
+                    self.runtime.advance_encoder(timestamp_ns,raw_counts,return_snapshot=False,
+                        tendon_confirmation=tendon_confirmation(self.runtime,backlash_snapshot))
+                    state = self.runtime.clone_state(include_history=False)
+                else:
+                    state = self.runtime.advance_encoder(timestamp_ns,raw_counts,
+                        interface_motor_angle_rad=effective_motor)
             model_diagnostics = self.runtime.diagnostics()
+            if self.engagement_control_enabled:
+                backlash_snapshot = reconcile_engagement(self.runtime,backlash_snapshot,
+                    backlash_config=self.backlash_config)
         except (ValueError, RuntimeError) as error:
             with self._lock:
                 self._fault_locked(
@@ -960,36 +1124,31 @@ class CatheterControlNode(Node):
 
     def _observe_backlash_at_timestamp(
             self, timestamp_ns, interface_pose, model, strain,
-            nominal_distal_lambda=None, observed_distal_lambda=None):
-        """Correct the transmission belief at source time and replay.
+            nominal_distal_lambda=None, observed_distal_lambda=None, *,
+            observed_interface_position_m, observed_marker_points_m):
+        """Sole estimator-owner composition of shared source-time confirmation."""
+        bending_mode = None if strain is None else (
+            self.runtime.mechanics.mode if self.engagement_control_enabled else self.runtime.port.mode).detach().cpu().numpy()
+        snapshot, history = self.backlash_estimator.observe_at_timestamp(
+            self._backlash_history, timestamp_ns, interface_pose, model,
+            control_owned=self.armed, observed_interface_position_m=observed_interface_position_m,
+            observed_marker_points_m=observed_marker_points_m,
+            distal_strain=strain, distal_bending_mode=bending_mode,
+            nominal_distal_lambda=nominal_distal_lambda, observed_distal_lambda=observed_distal_lambda)
+        self._backlash_history = deque(history, maxlen=256)
+        return snapshot
 
-        This executes only in the sole estimator-owner callback. It mirrors
-        the learned runtime's delayed-marker rewind without adding a second
-        mutable state owner or blocking the planner snapshot path.
+    def _engagement_confirmation_at_source(self, timestamp_ns, estimator, points):
+        """Use the shared policy before the model's existing source-time replay.
+
+        The transient callback stays inside the sole estimator owner. It never
+        enters a runtime checkpoint or planner IPC payload.
         """
-        if not self._backlash_history:
-            return self.backlash_snapshot
-        entries = list(self._backlash_history)
-        index = next((
-            i for i in range(len(entries)-1, -1, -1)
-            if entries[i][0] <= int(timestamp_ns)), None)
-        if index is None:
-            return self.backlash_snapshot
-        self.backlash_estimator.restore_state(entries[index][2])
-        self.backlash_estimator.observe_response(
-            entries[index][1], interface_pose, model.jacobian,
-            model.state_scale, strain,
-            self.runtime.port.mode.detach().cpu().numpy(),
-            timestamp_ns=int(timestamp_ns),
-            nominal_distal_lambda=nominal_distal_lambda,
-            observed_distal_lambda=observed_distal_lambda)
-        entries[index][2] = self.backlash_estimator.clone_state()
-        for replay_index in range(index+1, len(entries)):
-            self.backlash_estimator.advance_motor(entries[replay_index][1])
-            entries[replay_index][2] = (
-                self.backlash_estimator.clone_state())
-        self._backlash_history = deque(entries, maxlen=256)
-        return self.backlash_estimator.snapshot()
+        self.backlash_snapshot, history, decisions = confirm_at_source(self.runtime,
+            self.backlash_estimator, self._backlash_history, timestamp_ns, estimator, points,
+            control_owned=self.armed)
+        self._backlash_history = deque(history, maxlen=256)
+        return decisions
 
     def _marker_cb(self, message: PointCloud):
         try:
@@ -1000,6 +1159,7 @@ class CatheterControlNode(Node):
             return
         self._record_header_age("marker", message)
         arrival = self._steady()
+        quality = dict(quality, callback_arrival_ros_ns=self.get_clock().now().nanoseconds)
         with self._lock:
             if timestamp_ns <= self._simulation_reset_source_floor_ns:
                 return
@@ -1017,6 +1177,8 @@ class CatheterControlNode(Node):
         state_timestamp_ns = (
             None if self.runtime.state is None
             else self.runtime.state.timestamp_ns)
+        if self.engagement_control_enabled and state_timestamp_ns is None and self._raw_encoder_history:
+            state_timestamp_ns = self._raw_encoder_history[-1][0]
         with self._lock:
             if self.pending_marker_timestamp_ns is None:
                 return None
@@ -1049,19 +1211,56 @@ class CatheterControlNode(Node):
             "marker_pending_age", self._steady()-arrival)
         started = self._steady()
         try:
+            self._stop_on_raw_tendon_onset(timestamp_ns, points, quality, arrival)
+            if self.engagement_control_enabled:
+                quality = dict(visible=(np.asarray(quality['confidence']) > 0)
+                    & (np.asarray(quality['source_rig_count']) >= 1)
+                    & (np.asarray(quality['reprojection_error_px']) >= 0),
+                    point_std_m=np.full(4,self.runtime.config.point_std_m))
+                if self.runtime.state is None:
+                    earlier = [item for item in self._raw_encoder_history if item[0] <= timestamp_ns]
+                    later = [item for item in self._raw_encoder_history if item[0] >= timestamp_ns]
+                    if not earlier or not later or later[0][0]-earlier[-1][0] > 250_000_000:
+                        return False
+                    a,b = earlier[-1],later[0]
+                    counts = a[1] if a[0]==b[0] else a[1]+(timestamp_ns-a[0])/(b[0]-a[0])*(b[1]-a[1])
+                    checkpoint = next(entry[2] for entry in reversed(self._backlash_history) if entry[0] <= timestamp_ns)
+                    self.runtime.initialize(timestamp_ns,counts,points,quality=quality,
+                        tendon_confirmation=confirmation_from_checkpoint(self.runtime,checkpoint))
+                    for stamp,counts in self._raw_encoder_history:
+                        if stamp > timestamp_ns:
+                            checkpoint = next(entry[2] for entry in reversed(self._backlash_history) if entry[0] <= stamp)
+                            self.runtime.advance_encoder(stamp,counts,return_snapshot=False,
+                                tendon_confirmation=confirmation_from_checkpoint(self.runtime,checkpoint))
+                    from cr_meta_lnn.deployment.v171_streaming_runtime import MarkerUpdateResult
+                    result = MarkerUpdateResult(True,'initialized',self.runtime.state.health,4)
+                else:
+                    result = self.runtime.observe_markers_for_control(timestamp_ns,points,quality,
+                        confirmation_observer=lambda estimator:self._engagement_confirmation_at_source(timestamp_ns,estimator,points))
             if self.runtime.state is None:
                 return False
-            result = self.runtime.observe_markers(
-                timestamp_ns, points, quality)
+            if not self.engagement_control_enabled:
+                result = self.runtime.observe_markers(timestamp_ns, points, quality)
             state = self.runtime.state
             accepted = state.accepted_observations
             rejected = state.consecutive_rejections
             health = state.health
             model_diagnostics = self.runtime.diagnostics()
-            snapshot = self.runtime.clone_state()
+            snapshot = (self.runtime.clone_state(include_history=False)
+                        if self.engagement_control_enabled else self.runtime.clone_state())
             observation_snapshot = (
-                self.runtime.clone_state_at_or_before(timestamp_ns)
+                (self.runtime.clone_state_at_or_before(timestamp_ns,include_history=False)
+                 if self.engagement_control_enabled else self.runtime.clone_state_at_or_before(timestamp_ns))
                 if result.accepted else None)
+            if observation_snapshot is not None:
+                # Pair raw and posterior at image source time, before encoder
+                # replay. Only the tip readout is anchored; belief is untouched.
+                source_markers = self.runtime.markers_for_state(observation_snapshot)
+                if torch.is_tensor(source_markers):
+                    source_markers = source_markers.detach().cpu().numpy()
+                self._tip_readout_offset_m = (
+                    np.asarray(points[-1], dtype=np.float64)
+                    - np.asarray(source_markers[-1], dtype=np.float64)).copy()
         except (ValueError, RuntimeError) as error:
             self.get_logger().error(
                 "marker estimator exception (%s): %s" % (
@@ -1090,6 +1289,9 @@ class CatheterControlNode(Node):
                 # double-counts queue/optimization delay and can expire a
                 # correction immediately after it is successfully applied.
                 committed = self._steady()
+                timing = getattr(self, "takeup_onset_timing", None)
+                if timing and timing['takeup_onset_source_ns'] == timestamp_ns:
+                    timing['takeup_onset_correction_commit_ros_ns'] = self.get_clock().now().nanoseconds
                 self.marker_time = committed
                 observed_tip = np.asarray(
                     points[-1], dtype=np.float64).copy()
@@ -1112,15 +1314,25 @@ class CatheterControlNode(Node):
                         if sample_timestamp <= timestamp_ns), None)
                     model = observation_snapshot.adaptive_jacobian
                     if raw_encoder_counts is not None:
-                        self.backlash_snapshot = (
-                            self._observe_backlash_at_timestamp(
-                                timestamp_ns,
-                                observation_snapshot.interface_pose.detach()
-                                .cpu().numpy(), model,
-                                observation_snapshot.strain.detach()
-                                .cpu().numpy(),
-                                result.distal_lambda_prior,
-                                result.distal_lambda_posterior))
+                        gain_coordinates = (
+                            self.runtime.engaged_input_observation(observation_snapshot)
+                            if self.takeup_transaction_enabled
+                            and not self.engagement_control_enabled else
+                            (result.distal_lambda_prior, result.distal_lambda_posterior))
+                        if not self.engagement_control_enabled:
+                            self.backlash_snapshot = (
+                                self._observe_backlash_at_timestamp(
+                                    timestamp_ns,
+                                    observation_snapshot.interface_pose.detach()
+                                    .cpu().numpy(), model,
+                                    observation_snapshot.strain.detach()
+                                    .cpu().numpy(),
+                                    *gain_coordinates,
+                                    observed_interface_position_m=points[0],
+                                    observed_marker_points_m=points))
+                        if self.engagement_control_enabled:
+                            self.backlash_snapshot = reconcile_engagement(self.runtime,self.backlash_snapshot,
+                                backlash_config=self.backlash_config)
                     failed_axes = np.flatnonzero(
                         self.backlash_snapshot.failed)
                     if self.armed and failed_axes.size:
@@ -1134,6 +1346,21 @@ class CatheterControlNode(Node):
                             "backlash_takeup_unconfirmed")
                         self._fault_locked(
                             f"{fault}:axis_{failed_axis}")
+                if getattr(self, "adapj", None) is not None:
+                    try:
+                        # Disarmed initialization probes are external position
+                        # moves: their corrected source-time history, not the
+                        # idle control-transaction arbiter, identifies takeup.
+                        self.adapj.observe(timestamp_ns, observed_tip,
+                            self._adapj_encoder_history,
+                            initialization_history=self._backlash_history,
+                            update_allowed=self.armed and not self.fault_latched
+                                and self.estimator_catchup_started_at is None
+                                and (not self.takeup_transaction_enabled or
+                                     self.takeup_arbiter.state == TakeupTransactionArbiter.READY_TO_PLAN))
+                    except (ValueError, RuntimeError) as error:
+                        self._fault_locked(f"adapj_observation:{error}")
+                        return False
             else:
                 if self.armed or rejected == 1:
                     self.get_logger().warn(
@@ -1162,6 +1389,48 @@ class CatheterControlNode(Node):
             else None)
         return True
 
+    def _stop_on_raw_tendon_onset(self, timestamp_ns, points, quality, arrival):
+        """Estimator-owner stop preview; no posterior or replay-state commit."""
+        if not self.takeup_transaction_enabled:
+            return
+        with self._lock:
+            if (not self.armed or self.fault_latched or not self.mode_claimed
+                    or self.state != ControllerState.ACTIVE
+                    or not self.takeup_arbiter.pending_mask[2]
+                    or self.takeup_arbiter.response_onset_seen):
+                return
+        confidence = np.asarray(quality['confidence'])
+        rigs = np.asarray(quality['source_rig_count'])
+        reprojection = np.asarray(quality['reprojection_error_px'])
+        if not np.all((confidence > 0) & (rigs >= 1) & (reprojection >= 0)):
+            return
+        preview = self.backlash_estimator.preview_tendon_onset(
+            self._backlash_history, timestamp_ns, points, control_owned=self.armed)
+        if preview is None:
+            return
+        with self._lock:
+            if (not self.armed or self.fault_latched or not self.mode_claimed
+                    or self.state != ControllerState.ACTIVE
+                    or not self.takeup_arbiter.note_tendon_onset(preview)):
+                return
+            detected = self._steady()
+            self.takeup_onset_timing = {
+                'takeup_onset_generation': self.takeup_arbiter.generation,
+                'takeup_onset_source_ns': int(timestamp_ns),
+                'takeup_onset_marker_arrival_ros_ns': int(quality.get('callback_arrival_ros_ns', 0)),
+                'takeup_onset_detect_ros_ns': self.get_clock().now().nanoseconds,
+                'takeup_onset_marker_arrival_steady_s': float(arrival),
+                'takeup_onset_detect_steady_s': float(detected),
+                'takeup_onset_arrival_to_detect_ms': (detected-arrival)*1000.,
+            }
+            self.last_command.fill(0.)
+            self.last_command_time = detected
+            self.state_reason = 'takeup_response_hold'
+            # A zero-only stop can precede expensive shape correction safely.
+            # The arbiter still owns the transaction; planner belief stays intact.
+            self._publish_velocity_locked(np.zeros(6))
+
+    @gc_work
     @instrument_timer("estimator")
     def _estimator_tick(self):
         # This callback is the only owner of mutable runtime state. Catch up to
@@ -1184,7 +1453,9 @@ class CatheterControlNode(Node):
                 status.level == DiagnosticStatus.ERROR)
             self.marker_diagnostic_message = str(status.message)
             if self.marker_diagnostic_error and self.mode_claimed:
-                self._fault_locked("marker_diagnostic_error")
+                if not self._pause_for_estimator_catchup_locked(
+                        self._steady(), "marker_diagnostic_error"):
+                    self._fault_locked("marker_diagnostic_error")
 
     def _safety_cb(self, message: ManagerEvent):
         with self._lock:
@@ -1212,6 +1483,8 @@ class CatheterControlNode(Node):
                 self._fault_locked("reference_source_conflict")
                 return
             self.target = point
+            if getattr(self, "adapj", None) is not None:
+                self.adapj.invalidate()
             self.reference_source = "POINT"
             self.path_reference = None
             self.reversal_scheduler.reset_intent()
@@ -1233,6 +1506,7 @@ class CatheterControlNode(Node):
                     if self.reference_source == "PATH":
                         self.reference_source = "NONE"
                         self.target = None
+                        self.planner.reset_capture_target()
                 return
         try:
             if message.header.frame_id != self.frame_id:
@@ -1254,6 +1528,8 @@ class CatheterControlNode(Node):
                 sample_period_s=float(message.sample_period_s),
                 positions_m=positions,
                 tangents=tangents,
+                x_only=bool(message.x_only),
+                xz_only=bool(message.xz_only),
                 expiry_s=min(
                     float(message.expiry_s),
                     float(self.get_parameter(
@@ -1277,7 +1553,13 @@ class CatheterControlNode(Node):
                     and reference.path_id != prior.path_id):
                 self._fault_locked("path_reference_id_changed")
                 return
-            if prior is None or reference.path_id != prior.path_id:
+            new_path = prior is None or reference.path_id != prior.path_id
+            policy_changed = new_path or (
+                reference.final_hold != prior.final_hold
+                or reference.progress_paused != prior.progress_paused
+                or reference.x_only != prior.x_only
+                or reference.xz_only != prior.xz_only)
+            if new_path:
                 self.reversal_scheduler.reset_intent()
             self.path_reference = reference
             self.reference_source = "PATH"
@@ -1287,14 +1569,53 @@ class CatheterControlNode(Node):
                 len(reference.positions_m)-1,
                 int(round(offset_s/reference.sample_period_s)))
             self.target = reference.positions_m[index].copy()
-            self.planner.reset_capture_target()
-            self.tip_forecast_monitor.clear()
-            self.last_tip_forecast_result = None
+            # Rolling samples describe the same task, not a new capture target.
+            # Resetting every 30 Hz preview invalidates in-flight worker solves.
+            if policy_changed:
+                self.planner.reset_capture_target()
+                self.tip_forecast_monitor.clear()
+                self.last_tip_forecast_result = None
 
     def _collection_event_cb(self, _message: String):
         with self._lock:
             self.collection_present = True
             self._fault_locked("collection_event_detected")
+
+    def _adapj_initialization_cb(self, request, response):
+        with self._lock:
+            if self.armed or self.mode_claimed or self.fault_latched:
+                response.success = False
+                response.message = "initialization_requires_disarmed_nonfaulted_controller"
+                return response
+            directory = str(self.get_parameter("adapj_initialization_dir").value)
+            if not directory:
+                response.success = False
+                response.message = "adapj_initialization_dir_required"
+                return response
+            try:
+                if request.data:
+                    self.adapj.begin()
+                    response.message = "adapj_initialization_recording"
+                else:
+                    response.message = str(self.adapj.finish(directory))
+                response.success = True
+            except (ValueError, OSError) as error:
+                response.success = False
+                response.message = str(error)
+            return response
+
+    def _adapj_cancel_initialization_cb(self, request, response):
+        with self._lock:
+            if self.armed or self.mode_claimed:
+                response.success = False
+                response.message = "refusing to discard armed AdapJ state"
+            else:
+                self.adapj.capturing = False
+                self.adapj.controller = None
+                self.adapj.invalidate()
+                response.success = True
+                response.message = "initialization_canceled"
+            return response
 
     def _arm_cb(self, request: SetBool.Request, response: SetBool.Response):
         # Never let a service request wait indefinitely behind recurrent
@@ -1305,9 +1626,14 @@ class CatheterControlNode(Node):
             response.message = "controller_busy"
             return response
         try:
+            if self._shutting_down:
+                response.success = False
+                response.message = "controller_shutdown"
+                return response
             if not request.data:
                 self._release_locked()
                 self.armed = False
+                self._task_gc.stop()
                 self.fault_latched = False
                 self.state = ControllerState.DISARMED
                 self.state_reason = "disarmed_by_user"
@@ -1318,8 +1644,23 @@ class CatheterControlNode(Node):
                 response.success = False
                 response.message = "collection_node_present"
                 return response
+            if getattr(self, "adapj", None) is not None and not self.adapj.initialized:
+                response.success = False
+                response.message = "adapj_initialization_required"
+                return response
+            try:
+                gc_ready = self._task_gc.begin()
+            except (OSError, ValueError, IndexError):
+                response.success = False
+                response.message = "task_gc_rss_unavailable"
+                return response
+            if not gc_ready:
+                response.success = False
+                response.message = "idle_gc_maintenance_pending"
+                return response
             self._release_locked()
             self.reset_pending = True
+            self._planner_warmup_supersessions = 0
             self.armed = True
             self.fault_latched = False
             self.last_fault_snapshot = {}
@@ -1369,6 +1710,7 @@ class CatheterControlNode(Node):
                 self.pending_marker_arrival = None
                 self._simulation_reset_source_floor_ns = self._now_ns()
                 self._raw_encoder_history.clear()
+                self._adapj_encoder_history.clear()
                 self._backlash_history.clear()
                 self.latest_raw_encoder_counts = None
                 self.encoder_valid = False
@@ -1399,12 +1741,15 @@ class CatheterControlNode(Node):
                 self.tip_forecast_monitor.clear()
                 self.last_tip_forecast_result = None
                 self.planner_warmed = False
+                self._planner_warmup_supersessions = 0
                 self.consecutive_deadline_misses = 0
                 self.estimator_catchup_started_at = None
                 self.estimator_catchup_pause_count = 0
                 with self._snapshot_lock:
                     self._planner_snapshot = None
                     self._planner_snapshot_source_time = None
+                    self._tip_readout_offset_m = None
+                    self._planner_tip_readout_offset_m = None
                     self._planner_transmission_snapshot = None
                 self.planner.reset()
                 self.reset_pending = False
@@ -1433,7 +1778,8 @@ class CatheterControlNode(Node):
             manager_ready=self.manager_ready,
             manager_age_s=age(self.manager_time),
             position_age_s=age(self.position_time),
-            encoder_age_s=age(self.encoder_time),
+            encoder_age_s=age(self.encoder_receive_time if getattr(self, 'adapj', None) is not None
+                              else self.encoder_time),
             encoder_receive_age_s=age(self.encoder_receive_time),
             position_encoder_skew_s=skew,
             marker_age_s=age(self.marker_time),
@@ -1460,21 +1806,15 @@ class CatheterControlNode(Node):
         self.estimator_catchup_started_at = None
 
     def _pause_for_estimator_catchup_locked(self, now, reason):
-        """Force zero for a bounded processed-encoder backlog.
-
-        Raw device freshness cannot authorize motion. It only prevents a
-        false latched transport fault while the estimator owner finishes a
-        bounded correction; every heartbeat in this state publishes zero.
-        """
-        if reason != "encoder_stale":
-            return False
+        """Hold zero through a bounded interruption and fresh-decision barrier."""
         new_pause = self.estimator_catchup_started_at is None
         if new_pause:
             self.estimator_catchup_started_at = now
+            self.estimator_catchup_observations = self.accepted_observations
         elapsed = now-self.estimator_catchup_started_at
         inputs = self._gate_inputs_locked(now)
-        if not recoverable_encoder_processing_lag(
-                inputs, self.limits, elapsed,
+        if not recoverable_runtime_interruption(
+                inputs, self.limits, reason, elapsed,
                 self.estimator_catchup_timeout_s):
             return False
         if new_pause:
@@ -1482,9 +1822,8 @@ class CatheterControlNode(Node):
         self.last_command.fill(0.0)
         self.last_effective_command.fill(0.0)
         self.last_command_time = now
-        self.consecutive_deadline_misses = 0
         self.state = ControllerState.ACTIVE
-        self.state_reason = "estimator_catchup_zero"
+        self.state_reason = "runtime_pause_zero:"+reason
         self._publish_velocity_locked(np.zeros(6))
         return True
 
@@ -1550,12 +1889,52 @@ class CatheterControlNode(Node):
         """
         transaction_state = self.takeup_arbiter.state
         released = self.takeup_arbiter.release_for_replan()
+        if released and getattr(self, "adapj", None) is not None:
+            self.adapj.resume_after(self.get_clock().now().nanoseconds)
         if (released and transaction_state
                 == TakeupTransactionArbiter.SATURATED_REPLAN):
             self.planner.reset()
             self.last_effective_command.fill(0.0)
         return released, transaction_state
 
+    def _planner_reference_matches_locked(self, source, target, reference,
+                                          root_timestamp_ns, now):
+        if self.reference_source != source:
+            return False
+        if source == "POINT":
+            return np.array_equal(self.target, target)
+        if source == "PATH":
+            return reference is not None and reference.compatible_with(
+                self.path_reference, root_timestamp_ns,
+                self.planner.config.horizon_steps, self.planner.config.step_s,
+                now, bounded_refresh=True, bounded_tangent_tolerance=2e-3)
+        return False
+
+    def _complete_planner_warmup_locked(self, plan):
+        """Discard cold decisions; retry supersession without motion authority."""
+        if plan.reason == "worker_state_changed":
+            self._planner_warmup_supersessions += 1
+            self.last_command.fill(0.0)
+            self.last_effective_command.fill(0.0)
+            self.last_command_time = self._steady()
+            if self._planner_warmup_supersessions >= self.maximum_deadline_misses:
+                self._fault_locked("planner_warmup:repeated_state_change")
+            else:
+                self.state = ControllerState.READY
+                self.state_reason = "planner_warmup_superseded_retry"
+            return
+        if plan.reason not in ("ok", "deadline_missed"):
+            self._fault_locked(f"planner_warmup:{plan.reason}")
+            return
+        self._planner_warmup_supersessions = 0
+        self.planner_warmed = True
+        self.state = ControllerState.READY
+        self.state_reason = "planner_warmed"
+        self.get_logger().info(
+            "MPPI warm-up complete; executable plans remain "
+            "subject to the configured deadline")
+
+    @gc_work
     @instrument_timer("plan")
     def _plan_tick(self):
         callback_started = self._steady()
@@ -1583,14 +1962,33 @@ class CatheterControlNode(Node):
                     else:
                         self.state, self.state_reason = gate_state, reason
                     return
-                self._clear_estimator_catchup_locked()
-                if not self.planner_warmed:
+                if self.estimator_catchup_started_at is not None:
+                    if not recoverable_runtime_interruption(
+                            self._gate_inputs_locked(now), self.limits, "ready",
+                            now-self.estimator_catchup_started_at,
+                            self.estimator_catchup_timeout_s):
+                        self._fault_locked("runtime_recovery_timeout")
+                        return
+                    if self.accepted_observations <= self.estimator_catchup_observations:
+                        self._pause_for_estimator_catchup_locked(now, "ready")
+                        return
+                if (self.engagement_control_enabled
+                        and not self.model_diagnostics.get('prediction_ready', False)):
+                    self.last_command.fill(0.0)
+                    self.last_effective_command.fill(0.0)
+                    self.last_command_time = now
+                    self.state_reason = 'model_posterior_not_ready'
+                    return
+                if not self.planner_warmed and getattr(self, "control_method", "mppi") != "adapj":
                     # Run the framework's lazy first rollout before claiming
                     # a control mode. Its command is discarded below.
                     warmup = True
                     self.state = ControllerState.READY
                     self.state_reason = "warming_planner"
                 elif not self.mode_claimed:
+                    if (getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream'
+                            and not self._position_stream_ready_locked(now)):
+                        return
                     self._send_mode_locked(ManagerEvent.JOINT_VEL)
                     self.mode_claimed = True
                     self.mode_requested_at = now
@@ -1600,7 +1998,8 @@ class CatheterControlNode(Node):
                 if (not warmup and self.takeup_transaction_enabled
                         and self.takeup_arbiter.state
                         in (TakeupTransactionArbiter.TAKEUP_ACTIVE,
-                            TakeupTransactionArbiter.CONFIRMATION_HOLD)):
+                            TakeupTransactionArbiter.CONFIRMATION_HOLD,
+                            TakeupTransactionArbiter.RESPONSE_HOLD)):
                     decision = self.takeup_arbiter.advance(
                         self.position, self.contract, self.backlash_snapshot)
                     if decision.state == TakeupTransactionArbiter.FAILED:
@@ -1611,6 +2010,9 @@ class CatheterControlNode(Node):
                         self._record_takeup_saturation_locked(
                             decision, self.position)
                     self.last_command = decision.command_logical_velocity
+                    # A fresh observation and current arbiter decision, not
+                    # a cached burst, authorize resuming the owned transaction.
+                    self._clear_estimator_catchup_locked()
                     self.last_command_time = now
                     self.state = ControllerState.ACTIVE
                     self.state_reason = decision.reason
@@ -1634,6 +2036,9 @@ class CatheterControlNode(Node):
                 if not warmup:
                     if now-self.mode_requested_at < self.mode_settle_s:
                         return
+                    if getattr(self, "control_method", "mppi") == "adapj":
+                        self._adapj_plan_locked(now)
+                        return
                     # Do not advertise ACTIVE until a first valid command has
                     # actually been committed. The heartbeat runs at 100 Hz;
                     # marking ACTIVE before the first plan completes lets it
@@ -1642,6 +2047,7 @@ class CatheterControlNode(Node):
                         self.state = ControllerState.READY
                         self.state_reason = "planning_first_command"
                     if (self.reference_source == "POINT"
+                            and self.estimator_catchup_started_at is None
                             and self.planner.point_capture_hold_active()):
                         # The preceding full solve already selected this
                         # deterministic branch. Re-running GPU rollouts cannot
@@ -1653,6 +2059,15 @@ class CatheterControlNode(Node):
                         self.state = ControllerState.ACTIVE
                         self.state_reason = "capture_hold_zero"
                         return
+                if (not warmup and getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream'
+                        and position_execution_in_flight(self.position_execution, self.get_clock().now().nanoseconds)):
+                    # Input, interruption, take-up and capture-hold gates above
+                    # retain priority. Fresh owner heartbeats do not renew the
+                    # immutable device deadline. Execute one native first-step
+                    # window before committing another stop-and-replace move.
+                    self.last_command_time = now
+                    self.state_reason = 'driver_native_command_in_flight'
+                    return
                 position = self.position.copy()
                 self._refresh_blocked_motor_directions_locked(position)
                 blocked_motor_direction = (
@@ -1665,6 +2080,7 @@ class CatheterControlNode(Node):
                 reference_source = self.reference_source
                 path_reference = self.path_reference
                 previous = self.last_effective_command.copy()
+                recovery_started_at = self.estimator_catchup_started_at
                 observed_tip = (
                     None if self.observed_tip is None else
                     self.observed_tip.copy())
@@ -1674,6 +2090,8 @@ class CatheterControlNode(Node):
             with self._timed_lock(self._snapshot_lock, "plan_snapshot"):
                 root = self._planner_snapshot
                 snapshot_source_time = self._planner_snapshot_source_time
+                tip_readout_offset = self._planner_tip_readout_offset_m
+                transmission_snapshot = self._planner_transmission_snapshot
             if root is None or snapshot_source_time is None:
                 with self._lock:
                     self._fault_locked("planner_snapshot_unavailable")
@@ -1700,16 +2118,28 @@ class CatheterControlNode(Node):
                     with self._lock:
                         self._fault_locked(str(error))
                     return
-            root = self._planner_root_on_device(root)
+            capture_tip = None
+            if tip_readout_offset is not None:
+                root_markers = self.runtime.markers_for_state(root)
+                if torch.is_tensor(root_markers):
+                    root_markers = root_markers.detach().cpu().numpy()
+                capture_tip = (np.asarray(root_markers[-1], dtype=np.float64)
+                    + tip_readout_offset)
+            if not self.planner_process_enabled:
+                root = self._planner_root_on_device(root)
             plan = self.planner.plan(
                 root, position, target,
+                x_only=(reference_source == "PATH" and path_reference.x_only),
+                xz_only=(reference_source == "PATH" and path_reference.xz_only),
                 target_tangent_base=(
                     None if reference_source != "PATH"
                     or path_reference.final_hold else target_tangent),
                 observed_tip_base_m=observed_tip,
+                tip_readout_offset_m=tip_readout_offset,
+                capture_tip_base_m=capture_tip,
                 previous_logical_velocity=previous,
                 deadline_started_s=callback_started,
-                transmission_state=self.backlash_snapshot,
+                transmission_state=(transmission_snapshot if self.engagement_control_enabled else self.backlash_snapshot),
                 takeup_motor_radians_per_second=(
                     self.backlash_compensator.motor_radians_per_second(
                         self.contract)),
@@ -1717,10 +2147,13 @@ class CatheterControlNode(Node):
                 direction_lease=reversal_state.lease_direction,
                 approved_reversal_direction=(
                     reversal_state.approved_direction))
+            if self.planner_process_enabled:
+                for name, seconds in self.planner.process_timings_s.items():
+                    self._timing.record_seconds(name, seconds)
             if warmup:
                 # Warm-start control values must not inherit the discarded
-                # rollout. A deadline miss alone is expected on a cold path;
-                # all other planner failures remain real faults.
+                # rollout. Cold deadline misses are expected; superseded work
+                # retries below. Real worker/transport failures remain faults.
                 self.planner.reset()
                 with self._lock:
                     plan = self.planner.enforce_deadline(
@@ -1729,22 +2162,55 @@ class CatheterControlNode(Node):
                         plan, callback_started, root.timestamp_ns)
                     if not self.armed or self.fault_latched:
                         return
-                    if plan.reason not in ("ok", "deadline_missed"):
-                        self._fault_locked(f"planner_warmup:{plan.reason}")
-                        return
-                    self.planner_warmed = True
-                    self.state = ControllerState.READY
-                    self.state_reason = "planner_warmed"
-                    self.get_logger().info(
-                        "MPPI warm-up complete; executable plans remain "
-                        "subject to the configured deadline")
+                    self._complete_planner_warmup_locked(plan)
                 return
+            # Diagnostic readout from the same immutable estimator root used
+            # by the solve. Keep root fit offset separate from predicted motion.
+            model_start_tip = None
+            if plan.valid and plan.command_tip_sequence_m is not None:
+                root_points = self.runtime.markers_for_state(root)
+                if torch.is_tensor(root_points):
+                    root_points = root_points.detach().cpu().numpy()
+                model_start_tip = np.asarray(root_points[-1], dtype=np.float64)
+                if tip_readout_offset is not None:
+                    model_start_tip = capture_tip
             with self._lock:
                 plan = self.planner.enforce_deadline(
                     plan, callback_started)
                 self._publish_control_cycle_timing_locked(
                     plan, callback_started, root.timestamp_ns)
                 if not self.armed or self.fault_latched:
+                    return
+                if (self.estimator_catchup_started_at is not None
+                        and (self.estimator_catchup_started_at != recovery_started_at
+                             or snapshot_source_time < self.estimator_catchup_started_at)):
+                    # Never resume with a solve started before the interruption,
+                    # even if readiness recovered while the worker was running.
+                    if not self._pause_for_estimator_catchup_locked(
+                            self._steady(), "ready"):
+                        self._fault_locked("runtime_recovery_timeout")
+                    return
+                if (self.planner_process_enabled
+                        and self._steady()-snapshot_source_time > self.limits.feedback_s):
+                    if self._pause_for_estimator_catchup_locked(
+                            self._steady(), "planner_snapshot_stale_at_commit"):
+                        return
+                    self._fault_locked("planner_snapshot_stale_at_commit")
+                    return
+                try:
+                    reference_matches = (
+                        not self.planner_process_enabled
+                        or self._planner_reference_matches_locked(
+                            reference_source, target, path_reference,
+                            root.timestamp_ns, self._steady()))
+                except ValueError as error:
+                    self._fault_locked(str(error))
+                    return
+                if not reference_matches:
+                    self.last_command.fill(0.0)
+                    self.last_effective_command.fill(0.0)
+                    self.last_command_time = self._steady()
+                    self.state_reason = "planner_reference_changed_zero"
                     return
                 gate_state, reason = readiness(
                     self._gate_inputs_locked(self._steady()), self.limits)
@@ -1754,7 +2220,12 @@ class CatheterControlNode(Node):
                         return
                     self._fault_locked(reason)
                     return
-                self._clear_estimator_catchup_locked()
+                if self.engagement_control_enabled and not self.model_diagnostics.get('prediction_ready',False):
+                    self.last_command.fill(0.)
+                    self.last_effective_command.fill(0.)
+                    self.last_command_time = self._steady()
+                    self.state_reason = 'model_posterior_changed_during_plan_zero'
+                    return
                 if not plan.valid and plan.reason == "deadline_missed":
                     self.consecutive_deadline_misses += 1
                     # Retain the current miss before any threshold-triggered
@@ -1774,6 +2245,10 @@ class CatheterControlNode(Node):
                     self.last_command_time = self._steady()
                     self.state = ControllerState.ACTIVE
                     self.state_reason = "planner_deadline_miss_zero"
+                    if not self._pause_for_estimator_catchup_locked(
+                            self._steady(), "deadline_missed"):
+                        self._fault_locked("runtime_recovery_timeout")
+                        return
                     self._publish_plan_locked(plan)
                     self.get_logger().warn(
                         "MPPI deadline missed; commanding zero (%d/%d)" % (
@@ -1781,9 +2256,18 @@ class CatheterControlNode(Node):
                             self.maximum_deadline_misses))
                     return
                 if not plan.valid:
+                    if plan.reason == "worker_state_changed":
+                        # A newer target/reset/capture observation won the
+                        # race. Never commit the stale worker decision.
+                        self.last_command.fill(0.0)
+                        self.last_effective_command.fill(0.0)
+                        self.last_command_time = self._steady()
+                        self.state_reason = "planner_state_changed_zero"
+                        return
                     self._fault_locked(f"planner:{plan.reason}")
                     return
                 first_active_plan = self.last_command_time is None
+                self._clear_estimator_catchup_locked()
                 self.consecutive_deadline_misses = 0
                 self.last_plan = plan
                 self.reversal_scheduler.observe_plan(
@@ -1810,7 +2294,8 @@ class CatheterControlNode(Node):
                     self.state_reason = decision.reason
                     if (decision.state
                             in (TakeupTransactionArbiter.TAKEUP_ACTIVE,
-                                TakeupTransactionArbiter.CONFIRMATION_HOLD)):
+                                TakeupTransactionArbiter.CONFIRMATION_HOLD,
+                                TakeupTransactionArbiter.RESPONSE_HOLD)):
                         self.reversal_scheduler.mark_transaction_started(
                             decision.direction)
                 else:
@@ -1819,6 +2304,7 @@ class CatheterControlNode(Node):
                     self.state_reason = "active"
                 self.last_command_time = self._steady()
                 self.state = ControllerState.ACTIVE
+                self.position_execution = None
                 compensating_backlash = not np.allclose(
                     self.last_command, self.last_effective_command,
                     rtol=0.0, atol=1e-12)
@@ -1828,6 +2314,20 @@ class CatheterControlNode(Node):
                         self.backlash_snapshot.taking_up
                         & self.takeup_response_free_mask))
                 if forecast_matches_command:
+                    if getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream':
+                        try:
+                            self.position_stream_command_id = (self.position_stream_command_id % 0xffffffff)+1
+                            position_anchor_counts = root_encoder_counts(self._raw_encoder_history, root.timestamp_ns)
+                            dt = (self.planner.config.point_rollout_step_s
+                                  if self.reference_source == 'POINT' and self.planner.config.point_rollout_step_s > 0
+                                  else self.planner.config.step_s)
+                            self.position_execution = make_position_execution(
+                                self.contract, self.position_stream_command_id, position_anchor_counts,
+                                self.position_stream_encoder_counts, self.last_command, dt,
+                                self.get_clock().now().nanoseconds)
+                        except ValueError as error:
+                            self._fault_locked(f'position_execution:{error}')
+                            return
                     self.planner.note_capture_control_executed(
                         self.last_command)
                 if (forecast_matches_command
@@ -1843,6 +2343,7 @@ class CatheterControlNode(Node):
                          else self.planner.config.step_s),
                         self.observed_tip,
                         plan.command_tip_sequence_m[0],
+                        model_start_tip_m=model_start_tip,
                         command_logical_velocity=(
                             self.last_command),
                         motor_radians_per_second=(
@@ -1867,6 +2368,107 @@ class CatheterControlNode(Node):
         finally:
             self._plan_lock.release()
 
+    def _adapj_plan_locked(self, now):
+        if self.reference_source != "POINT":
+            self._fault_locked("adapj_point_reference_required")
+            return
+        if not self.mode_claimed:
+            self._send_mode_locked(ManagerEvent.JOINT_VEL)
+            self.mode_claimed = True
+            self.mode_requested_at = now
+            self.state = ControllerState.READY
+            self.state_reason = "waiting_for_joint_velocity_mode"
+            return
+        if now-self.mode_requested_at < self.mode_settle_s:
+            return
+        if (getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream'
+                and position_execution_in_flight(self.position_execution, self.get_clock().now().nanoseconds)):
+            self.last_command_time = now
+            self.state_reason = 'adapj_driver_native_command_in_flight'
+            return
+        if self.estimator_catchup_started_at is not None:
+            self.adapj.invalidate()
+        try:
+            command = self.adapj.command(self.target, self.position,
+                                        self.get_clock().now().nanoseconds)
+        except (ValueError, RuntimeError) as error:
+            self._fault_locked(f"adapj:{error}")
+            return
+        if command is None:
+            if self.adapj.interval_active(self.get_clock().now().nanoseconds):
+                # The heartbeat bounds the pulse independently of planner ticks.
+                # A camera sample arriving early must not shorten/replan it.
+                return
+            # One bounded command interval, then zero until a causally later
+            # camera/encoder pair arrives. Never prolong an old velocity while
+            # waiting for the visual pipeline to report its response.
+            self.last_command.fill(0.)
+            self.last_effective_command.fill(0.)
+            self.last_command_time = now
+            self.state_reason = "adapj_response_hold"
+            return
+        self._clear_estimator_catchup_locked()
+        native = getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream'
+        endpoint = None
+        if native:
+            try:
+                self.position_stream_command_id = (self.position_stream_command_id % 0xffffffff)+1
+                counts = self.position_stream_encoder_counts
+                endpoint = make_position_execution(
+                    self.contract, self.position_stream_command_id, counts, counts,
+                    command, self.adapj.step_s, self.get_clock().now().nanoseconds,
+                    integer_degrees=True, authority_s=.25, preserve_displacement=True)
+            except ValueError as error:
+                self.adapj.invalidate()
+                self._fault_locked(f'adapj_position_execution:{error}')
+                return
+            if not endpoint.command.active_mask:
+                self.adapj.invalidate()
+                self.position_execution = None
+                self.last_command.fill(0.)
+                self.last_effective_command.fill(0.)
+                self.last_command_time = now
+                self.state_reason = 'adapj_position_below_driver_resolution'
+                return
+            # Reflect the quantized, shaft-masked endpoint in control status
+            # and response monitoring as well as on the native wire.
+            command = self.contract.motor_axis_to_logical_velocity(
+                (np.asarray(endpoint.command.target_counts)-counts)
+                * self.contract.encoder_counts_to_motor_axis_position(np.ones(6))
+                / self.adapj.step_s)
+            endpoint = replace(endpoint, velocity=tuple(command))
+        self.last_effective_command = command.copy()
+        if self.takeup_transaction_enabled:
+            options = {}
+            if endpoint is not None:
+                options['physical_direction'] = np.sign(
+                    np.asarray(endpoint.command.target_counts)[:3]-counts[:3])
+            decision = self.takeup_arbiter.begin(command, self.position,
+                                                self.contract, self.backlash_snapshot, **options)
+            if decision.state == TakeupTransactionArbiter.FAILED:
+                self.adapj.invalidate()
+                self._fault_locked(decision.reason)
+                return
+            if decision.state == TakeupTransactionArbiter.SATURATED_REPLAN:
+                self._record_takeup_saturation_locked(decision, self.position)
+            if not decision.execute_plan:
+                self.adapj.invalidate()
+            self.last_command = decision.command_logical_velocity
+            self.state_reason = decision.reason
+        else:
+            self.last_command = command
+            self.state_reason = "active"
+        self.position_execution = None
+        if native and (not self.takeup_transaction_enabled or decision.execute_plan):
+            self.position_execution = endpoint
+            self.last_command = np.asarray(endpoint.velocity).copy()
+        self.last_command_time = now
+        self.state = ControllerState.ACTIVE
+        message = ControlStream()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.joint_vel = command.tolist()
+        self.plan_pub.publish(message)
+
     @instrument_timer("heartbeat")
     def _heartbeat_tick(self):
         # A timer must never consume an executor thread while waiting behind a
@@ -1888,7 +2490,10 @@ class CatheterControlNode(Node):
                     return
                 self._fault_locked(reason)
                 return
-            self._clear_estimator_catchup_locked()
+            if self.estimator_catchup_started_at is not None:
+                if not self._pause_for_estimator_catchup_locked(now, "ready"):
+                    self._fault_locked("runtime_recovery_timeout")
+                return
             if self.state != ControllerState.ACTIVE:
                 self._publish_velocity_locked(np.zeros(6))
                 return
@@ -1896,6 +2501,7 @@ class CatheterControlNode(Node):
                     and self.takeup_arbiter.state
                     in (TakeupTransactionArbiter.TAKEUP_ACTIVE,
                         TakeupTransactionArbiter.CONFIRMATION_HOLD,
+                        TakeupTransactionArbiter.RESPONSE_HOLD,
                         TakeupTransactionArbiter.REPLAN_REQUIRED,
                         TakeupTransactionArbiter.SATURATED_REPLAN,
                         TakeupTransactionArbiter.FAILED)):
@@ -1933,11 +2539,14 @@ class CatheterControlNode(Node):
             # the autonomous operational-position reserve against the newest
             # feedback on every transmission so a cached command cannot drive
             # through that reserve between planner commits.
-            if not self.takeup_transaction_enabled:
+            native_adapj = (getattr(self, 'adapj', None) is not None
+                           and getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream')
+            if not self.takeup_transaction_enabled and not native_adapj:
                 self.last_command = self._compensated_command_locked(
                     self.last_effective_command, self.position)
-            command = self.contract.project_publishable_velocity(
-                self.last_command, self.position)
+            command = (self.last_command if native_adapj else
+                       self.contract.project_publishable_velocity(
+                           self.last_command, self.position))
             self._publish_velocity_locked(command)
         finally:
             self._lock.release()
@@ -1951,7 +2560,75 @@ class CatheterControlNode(Node):
         message = ControlStream()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = self.source
+        if getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream':
+            taking_up = (self.takeup_transaction_enabled and
+                         self.takeup_arbiter.state != TakeupTransactionArbiter.READY_TO_PLAN)
+            native_takeup = taking_up and getattr(self, 'adapj', None) is not None
+            if native_takeup and np.any(values):
+                execution = self.position_execution
+                now_ns = self.get_clock().now().nanoseconds
+                if (execution is not None and now_ns < execution.deadline_ros_ns
+                        and not np.allclose(values, execution.velocity, rtol=0, atol=1e-12)):
+                    # Cancel, then prove standstill before changing shaft set.
+                    # This shortened local barrier is never sent as a replacement.
+                    self.position_execution = execution = replace(
+                        execution, deadline_ros_ns=now_ns)
+                if execution is None or (now_ns >= execution.deadline_ros_ns
+                        and measured_standstill(self._adapj_encoder_history,
+                                               execution.deadline_ros_ns)):
+                    try:
+                        self.position_stream_command_id = (self.position_stream_command_id % 0xffffffff)+1
+                        counts = self.position_stream_encoder_counts
+                        self.position_execution = make_position_execution(
+                            self.contract, self.position_stream_command_id, counts, counts,
+                            values, self.adapj.step_s, now_ns, integer_degrees=True,
+                            authority_s=.25, preserve_displacement=True)
+                    except ValueError as error:
+                        self._fault_locked(f'adapj_takeup_position_execution:{error}')
+                        return
+            if not np.any(values):
+                self.position_execution = None
+            elif not taking_up or native_takeup:
+                execution = self.position_execution
+                now_ns = self.get_clock().now().nanoseconds
+                if (execution is not None and now_ns < execution.deadline_ros_ns
+                        and np.allclose(values, execution.velocity, rtol=0, atol=1e-12)):
+                    packet = StreamedPositionControl()
+                    packet.header = message.header
+                    packet.session_id = self.position_stream_session
+                    packet.command_id = execution.command.command_id
+                    packet.duration_us = execution.command.duration_us
+                    packet.deadline_ros_ns = execution.deadline_ros_ns
+                    packet.active_mask = execution.command.active_mask
+                    packet.target_counts = list(execution.command.target_counts)
+                    packet.speed_rpm = list(execution.command.speed_rpm)
+                    self.position_control_pub.publish(packet)
+                    if native_takeup:
+                        self.takeup_arbiter.note_command_publication(now_ns, bool(packet.active_mask & 4))
+                    elif getattr(self, 'adapj', None) is not None:
+                        self.adapj.note_position_execution(execution.deadline_ros_ns, now_ns)
+                    return
+                # Missing/expired/mutated endpoints never fall back to motion.
+                if not native_takeup:
+                    self.position_execution = None
+                values = np.zeros(6)
+        if (getattr(self, "adapj", None) is not None
+                and getattr(self, 'mppi_execution_mode', 'velocity') != 'position_stream'
+                and (not getattr(self, "takeup_transaction_enabled", False)
+                     or self.takeup_arbiter.state == TakeupTransactionArbiter.READY_TO_PLAN)):
+            values = self.adapj.execution_velocity(
+                values, message.header.stamp.sec*1_000_000_000
+                + message.header.stamp.nanosec)
         message.joint_vel = [float(value) for value in values]
+        if self.takeup_transaction_enabled:
+            publication_ns = message.header.stamp.sec*1_000_000_000+message.header.stamp.nanosec
+            self.takeup_arbiter.note_command_publication(publication_ns, bool(values[2]))
+            timing = getattr(self, 'takeup_onset_timing', None)
+            if timing and not np.any(values) and 'takeup_onset_zero_publish_ros_ns' not in timing:
+                timing['takeup_onset_zero_publish_ros_ns'] = publication_ns
+        self.tip_forecast_monitor.note_command(
+            message.header.stamp.sec*1_000_000_000
+            + message.header.stamp.nanosec, values)
         self.control_pub.publish(message)
 
     def _send_mode_locked(self, mode: int):
@@ -1964,7 +2641,41 @@ class CatheterControlNode(Node):
         message.text = chr(mode)
         self.event_pub.publish(message)
 
+    def _position_stream_ready_locked(self, now):
+        if getattr(self, 'mppi_execution_mode', 'velocity') != 'position_stream':
+            return True
+        if self.position_stream_session:
+            return True
+        self.state_reason = 'waiting_for_position_stream_session'
+        if self.position_stream_future is None:
+            if not self.position_stream_client.service_is_ready():
+                self._fault_locked('position_stream_service_unavailable')
+                return False
+            request = OpenPositionStream.Request()
+            request.source = self.source
+            self.position_stream_future = self.position_stream_client.call_async(request)
+            self.position_stream_open_started = now
+            return False
+        if not self.position_stream_future.done():
+            if now-self.position_stream_open_started > 2.0:
+                self._fault_locked('position_stream_session_timeout')
+            return False
+        try:
+            response = self.position_stream_future.result()
+            if not response.success or not response.session_id:
+                raise ValueError(response.message)
+            self.position_stream_session = response.session_id
+            return True
+        except Exception as error:
+            self._fault_locked(f'position_stream_session:{error}')
+            return False
+
     def _release_locked(self):
+        self.position_execution = None
+        self.position_stream_session = 0
+        self.position_stream_future = None
+        if getattr(self, "adapj", None) is not None:
+            self.adapj.invalidate()
         if self.mode_claimed:
             self._publish_velocity_locked(np.zeros(6))
             self._send_mode_locked(ManagerEvent.NONE)
@@ -2059,6 +2770,9 @@ class CatheterControlNode(Node):
         self.mode_claimed = False
         self.armed = False
         self.fault_latched = True
+        policy = getattr(self, '_task_gc', None)
+        if policy is not None:
+            policy.stop()
         self.state = ControllerState.FAULTED
         self.state_reason = str(reason)
         self.last_command.fill(0.0)
@@ -2157,7 +2871,8 @@ class CatheterControlNode(Node):
         self.trajectory_pub.publish(cloud)
 
     def _observe_capture_response_locked(self, result) -> bool:
-        if (not result.capture_hold or result.target_tip_m is None
+        if (not result.comparison_valid
+                or not result.capture_hold or result.target_tip_m is None
                 or result.start_tip_m is None
                 or result.predicted_terminal_tip_m is None
                 or result.observed_tip_m is None):
@@ -2166,7 +2881,7 @@ class CatheterControlNode(Node):
         start_error = 1e3*float(np.linalg.vector_norm(
             target-result.start_tip_m))
         predicted_error = 1e3*float(np.linalg.vector_norm(
-            target-result.predicted_terminal_tip_m))
+            target-(result.start_tip_m+result.predicted_delta_mm/1e3)))
         measured_error = 1e3*float(np.linalg.vector_norm(
             target-result.observed_tip_m))
         return self.planner.observe_capture_response(
@@ -2212,6 +2927,21 @@ class CatheterControlNode(Node):
         message.interface_jacobian = result.interface_jacobian.tolist()
         message.target_tip_m = result.target_tip_m.tolist()
         message.start_tip_m = result.start_tip_m.tolist()
+        aligned = MppiAlignedResponseTrace()
+        aligned.header.stamp.sec = result.source_observation_timestamp_ns // 1_000_000_000
+        aligned.header.stamp.nanosec = result.source_observation_timestamp_ns % 1_000_000_000
+        aligned.header.frame_id = self.frame_id
+        aligned.source_observation_timestamp_ns = result.source_observation_timestamp_ns
+        aligned.source_start_observation_timestamp_ns = (
+            result.source_start_observation_timestamp_ns)
+        aligned.comparison_valid = result.comparison_valid
+        aligned.comparison_reason = result.comparison_reason
+        aligned.model_start_tip_m = (
+            [math.nan]*3 if result.model_start_tip_m is None
+            else result.model_start_tip_m.tolist())
+        aligned.root_readout_error_mm = (
+            [math.nan]*3 if result.root_readout_error_mm is None
+            else result.root_readout_error_mm.tolist())
         message.predicted_tip_m = result.predicted_terminal_tip_m.tolist()
         message.observed_tip_m = result.observed_tip_m.tolist()
         message.predicted_delta_mm = result.predicted_delta_mm.tolist()
@@ -2223,6 +2953,8 @@ class CatheterControlNode(Node):
             0.0 if result.direction_cosine is None
             else result.direction_cosine)
         self.response_trace_pub.publish(message)
+        aligned.comparison = message
+        self.aligned_response_trace_pub.publish(aligned)
 
     @staticmethod
     def _optional_float(value):
@@ -2251,14 +2983,15 @@ class CatheterControlNode(Node):
         if raw_encoder_counts is None:
             raw_encoder_counts = motor/ENCODER_RADIANS_PER_COUNT
         message.raw_encoder_counts = np.asarray(
-            raw_encoder_counts, dtype=np.float64).tolist()
+            raw_encoder_counts, dtype=np.float64)[:3].tolist()
         message.downstream = state.downstream.detach().cpu().numpy().tolist()
         message.interface_pose = (
             state.interface_pose.detach().cpu().numpy().reshape(-1).tolist())
         message.distal_strain = (
             state.strain.detach().cpu().numpy().reshape(-1).tolist())
-        estimated_markers = self.runtime.markers_for_state(
-            state).detach().cpu().numpy()
+        estimated_markers = self.runtime.markers_for_state(state)
+        if torch.is_tensor(estimated_markers):
+            estimated_markers = estimated_markers.detach().cpu().numpy()
         message.estimated_tip_m = estimated_markers[-1].tolist()
         message.observed_tip_m = (
             [math.nan] * 3 if observed_tip_m is None else
@@ -2379,6 +3112,20 @@ class CatheterControlNode(Node):
                 DiagnosticStatus.WARN)
             capture_diagnostics = self.planner.capture_diagnostics()
             values = {
+                "mppi_execution_mode": getattr(self, 'mppi_execution_mode', 'velocity'),
+                "position_execution_backend": ('driver_native' if getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream' else 'velocity'),
+                "position_stream_session": str(getattr(self, 'position_stream_session', 0)),
+                "position_stream_command_id": str(getattr(self, 'position_stream_command_id', 0)),
+                "control_method": self.control_method,
+                "adapj_initialized": str(self.adapj is not None and self.adapj.initialized),
+                "adapj_update_count": str(0 if self.adapj is None else self.adapj.updates),
+                "adapj_reason": "disabled" if self.adapj is None else self.adapj.last_reason,
+                "adapj_decision_timestamp_ns": "none" if self.adapj is None else str(self.adapj.pending_command_ns),
+                "adapj_output_start_timestamp_ns": "none" if self.adapj is None else str(self.adapj.execution_started_ns),
+                "adapj_output_stop_timestamp_ns": "none" if self.adapj is None else str(self.adapj.execution_stopped_ns),
+                "adapj_parameters": "none" if self.adapj is None or not self.adapj.initialized else
+                    json.dumps({key: value.tolist() for key, value in
+                        self.adapj.controller.matrices.items()}, separators=(",", ":")),
                 "reason": self.state_reason,
                 "fault_snapshot": (
                     "none" if not self.last_fault_snapshot else
@@ -2402,6 +3149,8 @@ class CatheterControlNode(Node):
                 "encoder_age_ms": (
                     "none" if inputs.encoder_age_s is None
                     else f"{1e3*inputs.encoder_age_s:.3f}"),
+                "encoder_gate_basis": (
+                    "raw_receipt" if self.adapj is not None else "estimator_processed"),
                 "encoder_receive_age_ms": (
                     "none" if inputs.encoder_receive_age_s is None
                     else f"{1e3*inputs.encoder_receive_age_s:.3f}"),
@@ -2409,6 +3158,11 @@ class CatheterControlNode(Node):
                     1e3*self.estimator_catchup_timeout_s, ".6g"),
                 "estimator_catchup_pause_count": str(
                     self.estimator_catchup_pause_count),
+                "runtime_recovery_active": str(
+                    self.estimator_catchup_started_at is not None),
+                "runtime_recovery_elapsed_ms": (
+                    "0" if self.estimator_catchup_started_at is None else
+                    f"{1e3*(now-self.estimator_catchup_started_at):.3f}"),
                 "feedback_pair_skew_ms": (
                     "none" if inputs.position_encoder_skew_s is None
                     else f"{1e3*inputs.position_encoder_skew_s:.3f}"),
@@ -2466,6 +3220,7 @@ class CatheterControlNode(Node):
             }
             values.update(marker_diagnostic_values(
                 self.last_marker_result))
+            values["task_gc"] = json.dumps(self._task_gc.summary())
             values.update(transmission_diagnostic_values(
                 self.last_command, self.last_effective_command,
                 self.backlash_compensation_enabled,
@@ -2493,6 +3248,9 @@ class CatheterControlNode(Node):
                     self.raw_response_during_interface_takeup),
                 takeup_response_free_mask=self.takeup_response_free_mask))
             values.update(compute_device_diagnostics(self.compute_device))
+            values["planner_process_enabled"] = str(self.planner_process_enabled)
+            if self.planner_process_enabled:
+                values.update(self.planner.worker_diagnostics())
             values["estimator_compute_device"] = str(self.estimator_compute_device.device)
             values["planner_compute_device"] = str(self.compute_device.device)
             values["estimator_compute_dtype"] = str(self.runtime.dtype)
@@ -2516,6 +3274,15 @@ class CatheterControlNode(Node):
                 self.tip_forecast_monitor.pending_count))
             values.update(model_diagnostic_values(
                 self.model_diagnostics, self.model_valid))
+            values['engagement_control_enabled'] = str(self.engagement_control_enabled)
+            values.update({key: str(value) for key, value in
+                           getattr(self, 'takeup_onset_timing', {}).items()})
+            if self.engagement_control_enabled:
+                values['command_owner'] = ('takeup' if self.takeup_arbiter.state in (
+                    self.takeup_arbiter.TAKEUP_ACTIVE,self.takeup_arbiter.CONFIRMATION_HOLD,
+                    self.takeup_arbiter.RESPONSE_HOLD)
+                    else 'mppi' if self.state == ControllerState.ACTIVE and self.last_command.any() else 'hold')
+                values['model_widths'] = json.dumps(self.model_diagnostics.get('widths',{}))
             status.values = [
                 KeyValue(key=key, value=value)
                 for key, value in values.items()]
@@ -2548,12 +3315,32 @@ class CatheterControlNode(Node):
         if tracking_log_message is not None:
             self.get_logger().info(tracking_log_message)
 
+    def _gc_maintenance_tick(self):
+        # Output teardown precedes reservation. Arming cannot race a reserved
+        # collection; planner/estimator admission is closed until restoration.
+        with self._lock:
+            reason = self._task_gc.guard_reason()
+            if reason:
+                self._fault_locked(reason)
+            collect = (not self.armed and not self.mode_claimed
+                       and self._task_gc.reserve_collection())
+        if collect:
+            self._task_gc.collect_reserved()
+
     def shutdown(self):
         with self._lock:
+            self._shutting_down = True
             self._release_locked()
             self.armed = False
+            self._task_gc.stop()
             self.state = ControllerState.DISARMED
             self.state_reason = "shutdown"
+        if isinstance(self.planner, ProcessPlanner):
+            self.planner.close()
+
+    def restore_gc_after_executor_shutdown(self):
+        if self._task_gc.reserve_collection():
+            self._task_gc.collect_reserved()
 
 
 def main(args=None):
@@ -2569,13 +3356,19 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        if node is not None:
-            node.shutdown()
-            executor.remove_node(node)
-            node.destroy_node()
-        executor.shutdown()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if node is not None:
+                node.shutdown()
+                executor.remove_node(node)
+        finally:
+            # Wait for recurrent callbacks before final policy restoration,
+            # even if closing the planner transport raised during teardown.
+            executor.shutdown()
+            if node is not None:
+                node.restore_gc_after_executor_shutdown()
+                node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -16,10 +16,14 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from control_interface_py.encoder_coordinates import (
+    DEGREES_PER_COUNT, UNITS_PER_COUNT, UNITS_PER_SECOND_PER_RPM,
+    motor_to_logical, logical_to_motor,
+)
 
 
 N_AXES = 6
-ENCODER_DEGREES_PER_COUNT = 0.045
+ENCODER_DEGREES_PER_COUNT = DEGREES_PER_COUNT
 ENCODER_RADIANS_PER_COUNT = np.deg2rad(ENCODER_DEGREES_PER_COUNT)
 MAX_MOTOR_RPM = 250
 
@@ -28,22 +32,22 @@ _LINEAR_RATE_MM_PER_REV = 67.319841 / 20.0
 _ROTATION_RATE_REV_PER_REV = 0.375 / 5.0
 _CATHETER_BEND_RATE_MM_PER_REV = -1.190625
 _SHEATH_BEND_RATE_REV_PER_REV = 0.375 / 5.0
-MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM = np.asarray([
-    _LINEAR_RATE_MM_PER_REV / 60.0,
-    _ROTATION_RATE_REV_PER_REV / 60.0 * 360.0,
-    _CATHETER_BEND_RATE_MM_PER_REV / 60.0,
-    _LINEAR_RATE_MM_PER_REV / 60.0,
-    _ROTATION_RATE_REV_PER_REV / 60.0 * 360.0,
-    _SHEATH_BEND_RATE_REV_PER_REV / 60.0 * 360.0,
-], dtype=np.float64)
-MOTOR_AXIS_UNITS_PER_ENCODER_COUNT = np.asarray([
-    _LINEAR_RATE_MM_PER_REV / 360.0,
-    _ROTATION_RATE_REV_PER_REV,
-    _CATHETER_BEND_RATE_MM_PER_REV / 360.0,
-    _LINEAR_RATE_MM_PER_REV / 360.0,
-    _ROTATION_RATE_REV_PER_REV,
-    _SHEATH_BEND_RATE_REV_PER_REV,
-], dtype=np.float64) * ENCODER_DEGREES_PER_COUNT
+MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM = UNITS_PER_SECOND_PER_RPM
+MOTOR_AXIS_UNITS_PER_ENCODER_COUNT = UNITS_PER_COUNT
+
+
+def knob_interface_translation_m(knob_angle_rad: float) -> np.ndarray:
+    """Direct knob translation along registered robot-base insertion (+Z).
+
+    Use physical shaft radians and the fixed firmware lead/sign, not tendon
+    engagement or the fitted interface Jacobian. This is a displacement map,
+    not an encoder-zero correction.
+    """
+    angle = float(knob_angle_rad)
+    if not np.isfinite(angle):
+        raise ValueError("knob angle must be finite")
+    mm_per_rad = MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM[2] / (2.0*np.pi/60.0)
+    return np.array([0.0, 0.0, angle*mm_per_rad*1e-3])
 
 
 def _vector(name: str, value, *, nonnegative: bool = False) -> np.ndarray:
@@ -89,8 +93,11 @@ class HardwareContract:
     model_encoder_count_upper: np.ndarray | None = None
     model_encoder_count_margin: np.ndarray | None = None
     feedback_limit_tolerance: np.ndarray | None = None
+    synchronized_sheath_rotation: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.synchronized_sheath_rotation, bool):
+            raise ValueError("synchronized_sheath_rotation must be boolean")
         lower = _vector("position_lower", self.position_lower)
         upper = _vector("position_upper", self.position_upper)
         minimum = _vector("velocity_min", self.velocity_min, nonnegative=True)
@@ -254,18 +261,17 @@ class HardwareContract:
     def encoder_counts_to_logical_position(cls, encoder_counts) -> np.ndarray:
         """Mirror the six-axis POS frame reconstructed by the firmware."""
         motor = cls.encoder_counts_to_motor_axis_position(encoder_counts)
-        logical = motor.copy()
-        logical[0] += logical[2]
-        logical[5] -= logical[4]
-        return logical
+        return cls.motor_axis_position_to_logical_position(motor)
+
+    @staticmethod
+    def motor_axis_position_to_logical_position(motor_position) -> np.ndarray:
+        """Forward physical-position coupling, without an encoder roundtrip."""
+        return motor_to_logical(_vectors("motor_position", motor_position))
 
     @staticmethod
     def logical_position_to_motor_axis_position(logical_position) -> np.ndarray:
         """Invert the firmware position coupling before count conversion."""
-        motor = _vectors("logical_position", logical_position).copy()
-        motor[..., 0] -= motor[..., 2]
-        motor[..., 5] += motor[..., 4]
-        return motor
+        return logical_to_motor(_vectors("logical_position", logical_position))
 
     def _guard_model_encoder_velocity(
             self, motor_velocity, joint_position) -> np.ndarray:
@@ -355,24 +361,81 @@ class HardwareContract:
             requested_rpm = np.where(
                 above, np.minimum(0.0, requested_rpm), requested_rpm)
             signed_rpm[..., :3] = requested_rpm
+        if self.synchronized_sheath_rotation:
+            # Encoder guards can reduce catheter rotation independently. Share
+            # the most restrictive realized rate, including rounding headroom.
+            sign = np.sign(signed_rpm[..., 1])
+            common = np.minimum(np.abs(signed_rpm[..., 1]),
+                                np.abs(signed_rpm[..., 4]))
+            common = np.where(sign == np.sign(signed_rpm[..., 4]), common, 0.)
+            position = np.broadcast_to(np.asarray(joint_position), guarded.shape)
+            for axis, direction in ((1, sign), (4, sign), (5, -sign)):
+                room = np.where(direction > 0,
+                                self.control_position_upper[axis]-position[..., axis],
+                                position[..., axis]-self.control_position_lower[axis])
+                cap = np.minimum(self.velocity_max[axis],
+                                 np.maximum(0., room)/self.position_guard_horizon_s)
+                common = np.minimum(common, np.floor(
+                    cap/MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM[1]+1e-10))
+            rate = common*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM[1]
+            common = np.where(rate >= np.max(self.velocity_min[[1, 4, 5]]),
+                              sign*common, 0.)
+            signed_rpm[..., 1] = signed_rpm[..., 4] = common
+            signed_rpm[..., 5] = 0.
+            guarded[..., 1] = guarded[..., 4] = (
+                common*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM[1])
+            guarded[..., 5] = 0.
         radians_per_second = signed_rpm*(2.0*np.pi/60.0)
         realized = signed_rpm*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM
         return guarded, signed_rpm, radians_per_second, realized
 
+    def bound_logical_velocity(self, requested) -> np.ndarray:
+        """Apply manager rate bounds/floors before physical coupling.
+
+        Position, encoder guards and RPM realization remain in projection.
+        Supports the scalar command and broadcast candidate batches alike.
+        """
+        request = _vectors("requested velocity", requested).copy()
+        if self.synchronized_sheath_rotation:
+            request[..., 4] = request[..., 1]
+            request[..., 5] = -request[..., 1]
+        logical = np.clip(request,
+                          -self.velocity_max, self.velocity_max).copy()
+        below_floor = ((np.abs(logical) > 0.0)
+                       & (np.abs(logical) < self.velocity_min))
+        logical = np.where(below_floor,
+                           np.copysign(self.velocity_min, logical), logical)
+        return self._synchronize_rotation(logical)
+
+    def _synchronize_rotation(self, logical):
+        """Common feasible angular rate; cancel sheath rotation/bend coupling.
+
+        Called after logical bounds and after position guards, for scalar and
+        batched candidates alike. A stopped/rejected member stops the pair.
+        Units are deg/s; no downstream unscored command is added.
+        """
+        if not self.synchronized_sheath_rotation:
+            return logical
+        logical = logical.copy()
+        rates = np.stack((logical[..., 1], logical[..., 4], -logical[..., 5]), axis=-1)
+        sign = np.sign(rates[..., 0])
+        consistent = np.all(np.sign(rates) == sign[..., None], axis=-1)
+        magnitude = np.min(np.abs(rates), axis=-1)
+        minimum = np.max(self.velocity_min[[1, 4, 5]])
+        common = np.where(consistent & (magnitude >= minimum), sign*magnitude, 0.)
+        logical[..., 1] = logical[..., 4] = common
+        logical[..., 5] = -common
+        return logical
+
     def project_logical_velocity(
             self, requested, joint_position) -> np.ndarray:
         """Mirror `ControlManager._clamp_command` for velocity commands."""
-        velocity = _vector("requested velocity", requested).copy()
+        velocity = self.bound_logical_velocity(
+            _vector("requested velocity", requested))
         position = _vector("joint_position", joint_position)
         lower = self.control_position_lower
         upper = self.control_position_upper
         for axis in range(N_AXES):
-            velocity[axis] = np.clip(
-                velocity[axis], -self.velocity_max[axis],
-                self.velocity_max[axis])
-            if 0.0 < abs(velocity[axis]) < self.velocity_min[axis]:
-                velocity[axis] = np.copysign(
-                    self.velocity_min[axis], velocity[axis])
             if position[axis] < lower[axis]:
                 velocity[axis] = max(0.0, velocity[axis])
             elif position[axis] > upper[axis]:
@@ -385,23 +448,17 @@ class HardwareContract:
                 velocity[axis] = np.clip(velocity[axis], minimum, maximum)
             if 0.0 < abs(velocity[axis]) < self.velocity_min[axis]:
                 velocity[axis] = 0.0
-        return velocity
+        return self._synchronize_rotation(velocity)
 
     @staticmethod
     def logical_to_motor_axis_velocity(logical_velocity) -> np.ndarray:
         """Apply the coupling transforms used by the Teensy VEL parser."""
-        motor = _vector("logical_velocity", logical_velocity).copy()
-        motor[0] -= motor[2]
-        motor[5] += motor[4]
-        return motor
+        return logical_to_motor(_vector("logical_velocity", logical_velocity))
 
     @staticmethod
     def motor_axis_to_logical_velocity(motor_axis_velocity) -> np.ndarray:
         """Invert the firmware coupling after integer-RPM realization."""
-        logical = _vector("motor_axis_velocity", motor_axis_velocity).copy()
-        logical[0] += logical[2]
-        logical[5] -= logical[4]
-        return logical
+        return motor_to_logical(_vector("motor_axis_velocity", motor_axis_velocity))
 
     @staticmethod
     def motor_radians_per_second_to_motor_axis_velocity(rates) -> np.ndarray:
@@ -494,12 +551,7 @@ class HardwareContract:
         velocity, position = np.broadcast_arrays(
             _vectors("requested velocity", requested),
             _vectors("joint_position", joint_position))
-        logical = np.clip(
-            velocity, -self.velocity_max, self.velocity_max).copy()
-        below_floor = ((np.abs(logical) > 0.0)
-                       & (np.abs(logical) < self.velocity_min))
-        logical = np.where(
-            below_floor, np.copysign(self.velocity_min, logical), logical)
+        logical = self.bound_logical_velocity(velocity)
 
         lower = self.control_position_lower
         upper = self.control_position_upper
@@ -517,20 +569,15 @@ class HardwareContract:
         logical = np.where(
             ((np.abs(logical) > 0.0)
              & (np.abs(logical) < self.velocity_min)), 0.0, logical)
+        logical = self._synchronize_rotation(logical)
 
-        motor_requested = logical.copy()
-        motor_requested[..., 0] -= motor_requested[..., 2]
-        motor_requested[..., 5] += motor_requested[..., 4]
+        motor_requested = logical_to_motor(logical)
         motor_requested, signed_rpm, radians_per_second, realized = (
             self._quantize_guarded_motor_velocity(
                 motor_requested, position))
-        logical = motor_requested.copy()
-        logical[..., 0] += logical[..., 2]
-        logical[..., 5] -= logical[..., 4]
+        logical = motor_to_logical(motor_requested)
         rpm = np.abs(signed_rpm).astype(np.int64)
-        realized_logical = realized.copy()
-        realized_logical[..., 0] += realized_logical[..., 2]
-        realized_logical[..., 5] -= realized_logical[..., 4]
+        realized_logical = motor_to_logical(realized)
         return ProjectedVelocity(
             logical_velocity=logical,
             requested_motor_axis_velocity=motor_requested,

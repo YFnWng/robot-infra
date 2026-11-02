@@ -8,6 +8,8 @@ from time import monotonic
 import copy
 import numpy as np
 
+from ..safety.hardware_contract import (
+    MOTOR_AXIS_UNITS_PER_ENCODER_COUNT, knob_interface_translation_m)
 from .engaged_gain import (
     EngagedGainConfig, EngagedGainEstimator, EngagedGainSnapshot)
 
@@ -24,8 +26,8 @@ def _vector(name, value, size=CONTROL_AXES, *, nonnegative=False):
     return result
 
 
-def _se3_log(transform):
-    """Return [rotation, translation] logarithm for one SE(3) transform."""
+def _se3_log_components(transform):
+    """Return rotation logarithm and its translation linear map."""
     value = np.asarray(transform, dtype=np.float64)
     if value.shape != (4, 4) or not np.isfinite(value).all():
         raise ValueError("interface pose must be a finite 4x4 transform")
@@ -45,6 +47,12 @@ def _se3_log(transform):
             1.0/theta**2
             - (1.0+np.cos(theta))/(2.0*theta*np.sin(theta)))
         v_inverse = np.eye(3)-0.5*omega_hat+coefficient*(omega_hat@omega_hat)
+    return omega, v_inverse, translation
+
+
+def _se3_log(transform):
+    """Return [rotation, translation] logarithm for one SE(3) transform."""
+    omega, v_inverse, translation = _se3_log_components(transform)
     return np.r_[omega, v_inverse@translation]
 
 
@@ -59,24 +67,39 @@ class BacklashConfig:
     # Retained for launch/profile compatibility. Joint response attribution
     # supersedes the former dominant-axis purity gate.
     directional_purity: float = 0.90
+    # Retained for configuration compatibility, not engagement decisions.
     response_direction_cosine: float = 0.50
     minimum_response_evidence: float = 0.50
-    # The v171 distal posterior has one gauge-fixed bending coordinate.  A
-    # change along that mode is the primary tendon-engagement observation:
-    # tendon motion can bend the exposed distal catheter while producing very
-    # little interface-body motion when the proximal segment is retracted.
+    # Raw marker-0 *difference* covariance in robot-base coordinates, m^2.
+    # Qualified from 703 stationary source pairs (20260919 causal_proximal);
+    # same-session post-fault directional noise agrees with this scale.
+    # This is not UKF R or posterior covariance. See the path-commit audit.
+    marker_increment_covariance_m2: tuple[float, ...] = (
+        2.246433668e-9, -8.407024420e-10, -2.010902684e-10,
+        -8.407024420e-10, 8.844941085e-9, 1.152412296e-10,
+        -2.010902684e-10, 1.152412296e-10, 8.245305540e-10)
+    # Raw four-marker distance deformation is the production tendon evidence.
+    # The strain threshold is retained for strain-only research/test callers.
     tendon_axis: int = 2
     minimum_distal_bending_increment: float = 0.05
-    # Distal bending proves transmission through the v171 tendon branch, but
-    # it does not prove that the independently modeled v175 interface-knob
-    # play has engaged. Disable this when the estimator state represents that
-    # interface-only play rather than tendon take-up.
+    minimum_distal_marker_deformation_mm: float = 0.3
+    # Unitless persistence/onset ratio. Applied only after credible raw onset;
+    # 1.0 restores the strict single-floor policy. No additional state owner.
+    distal_confirmation_release_ratio: float = 0.75
+    # Distal bending proves tendon transmission, not chassis insertion.
+    # Disable this for an interface-only observer rather than tendon take-up.
+    # The knob's direct interface translation is independent of this flag.
     distal_confirmation_enabled: bool = True
     width_learning_rate: float = 0.05
     minimum_width_gain: float = 0.50
     maximum_width_gain: float = 1.50
+    # Explicit experimental travel authority, not a learned width. Zero keeps
+    # the established prior-derived budget. Supplied from joint span by ROS.
+    tendon_unconfirmed_travel_limit_rad: float = 0.0
     engagement_confirmation_observations: int = 1
     provisional_rejection_observations: int = 2
+    response_window_max_s: float = 1.0
+    minimum_interface_rotation_rad: float = np.deg2rad(.1)
 
     def __post_init__(self):
         _vector("width_rad", self.width_rad, nonnegative=True)
@@ -106,8 +129,22 @@ class BacklashConfig:
             raise ValueError("response_direction_cosine must be in [-1,1]")
         if not 0.0 <= self.minimum_response_evidence <= 1.0:
             raise ValueError("minimum_response_evidence must be in [0,1]")
+        covariance = np.asarray(self.marker_increment_covariance_m2)
+        if (covariance.shape != (9,) or not np.isfinite(covariance).all()
+                or not np.allclose(covariance.reshape(3, 3),
+                                   covariance.reshape(3, 3).T, rtol=1e-8, atol=1e-18)
+                or np.min(np.linalg.eigvalsh(covariance.reshape(3, 3))) <= 0.0):
+            raise ValueError("marker_increment_covariance_m2 must be symmetric positive definite 3x3")
         if not 0 <= self.tendon_axis < CONTROL_AXES:
             raise ValueError("tendon_axis must select a controlled shaft")
+        if not np.isfinite(self.minimum_interface_rotation_rad) or self.minimum_interface_rotation_rad <= 0:
+            raise ValueError("minimum_interface_rotation_rad must be positive")
+        if (not np.isfinite(self.minimum_distal_marker_deformation_mm)
+                or self.minimum_distal_marker_deformation_mm <= 0.0):
+            raise ValueError("minimum_distal_marker_deformation_mm must be positive")
+        if (not np.isfinite(self.distal_confirmation_release_ratio)
+                or not 0.0 < self.distal_confirmation_release_ratio <= 1.0):
+            raise ValueError("distal_confirmation_release_ratio must be in (0,1]")
         if (not np.isfinite(self.minimum_distal_bending_increment)
                 or self.minimum_distal_bending_increment <= 0.0):
             raise ValueError(
@@ -117,12 +154,34 @@ class BacklashConfig:
         if (self.minimum_width_gain <= 0.0
                 or self.maximum_width_gain < self.minimum_width_gain):
             raise ValueError("invalid backlash width bounds")
+        if (not np.isfinite(self.tendon_unconfirmed_travel_limit_rad)
+                or self.tendon_unconfirmed_travel_limit_rad < 0.0):
+            raise ValueError("tendon_unconfirmed_travel_limit_rad must be finite and nonnegative")
         if self.engagement_confirmation_observations < 1:
             raise ValueError(
                 "engagement_confirmation_observations must be positive")
         if self.provisional_rejection_observations < 1:
             raise ValueError(
                 "provisional_rejection_observations must be positive")
+        if (not np.isfinite(self.response_window_max_s)
+                or self.response_window_max_s <= 0):
+            raise ValueError("response_window_max_s must be positive")
+
+    def unconfirmed_travel_limit_rad(self, prior_width_rad, *, axis=None):
+        """Baseline hard travel budget, distinct from a belief quantile.
+
+        Callers supply a fixed directional prior in shaft radians, never an
+        observation-updated width. An explicit tendon-only experimental
+        authority may substitute the fixed joint-span budget. Neither budget
+        grows during take-up; projection independently enforces headroom.
+        """
+        width = float(prior_width_rad)
+        if not np.isfinite(width) or width < 0.0:
+            raise ValueError("prior take-up width must be finite and nonnegative")
+        if (axis == self.tendon_axis
+                and self.tendon_unconfirmed_travel_limit_rad > 0.0):
+            return self.tendon_unconfirmed_travel_limit_rad
+        return self.maximum_width_gain * width
 
 
 @dataclass(frozen=True)
@@ -173,6 +232,15 @@ class BacklashSnapshot:
     last_evidence_timestamp_ns: np.ndarray = field(
         default_factory=lambda: np.zeros(CONTROL_AXES, dtype=np.int64))
     engaged_gain: EngagedGainSnapshot | None = None
+    # Noise-qualified early response: stops geometric take-up, never grants
+    # engagement or changes the stronger confirmation predicate.
+    tendon_response_onset: bool = False
+    tendon_response_noise_mm: float = float('nan')
+    tendon_response_onset_floor_mm: float = float('nan')
+    tendon_response_deformation_mm: float = 0.0
+    tendon_response_chord_support_mm: float = 0.0
+    tendon_response_timestamp_ns: int = 0
+    tendon_response_encoder_quiet: bool = False
 
     @property
     def taking_up(self):
@@ -414,10 +482,11 @@ class BacklashStateEstimator:
         self.confidence = np.zeros(CONTROL_AXES)
         self.confirmation_count = np.zeros(CONTROL_AXES, dtype=np.int32)
         self.confirmation_direction = np.zeros(CONTROL_AXES, dtype=np.int8)
-        self.confirmation_previous_motor = np.full(CONTROL_AXES, np.nan)
         self.provisional_rejection_count = np.zeros(
             CONTROL_AXES, dtype=np.int32)
         self.phase = ["UNKNOWN"]*CONTROL_AXES
+        self.external_motion = False
+        self.track_external_response = False
         self.accumulated_since_reversal = np.zeros(CONTROL_AXES)
         self.reversal_start_motor = np.full(CONTROL_AXES, np.nan)
         self.engagement_anchor_motor = np.full(CONTROL_AXES, np.nan)
@@ -430,6 +499,27 @@ class BacklashStateEstimator:
         self.previous_response_motor = None
         self.previous_pose = None
         self.previous_strain = None
+        self.distal_marker_anchor = None
+        self.distal_marker_history = []
+        self.distal_marker_motor = None
+        self.distal_marker_direction = 0
+        self.distal_marker_timestamp_ns = None
+        self.distal_response_encoder_quiet = False
+        self.distal_marker_motor_anchor = None
+        self.distal_quiet_history = []
+        self.distal_onset_noise = None
+        self.distal_noise_observation_timestamp_ns = None
+        self.distal_response_deformation_mm = 0.0
+        self.distal_response_chord_support_mm = 0.0
+        self.tendon_response_onset = False
+        self.response_window_timestamp_ns = None
+        self.response_observation_timestamp_ns = None
+        self.response_sample_motor = None
+        self.response_sample_pose = None
+        self.response_sample_strain = None
+        self.marker_anchor_history = []
+        self.marker_response_anchor = None
+        self.measured_response_direction = np.zeros((CONTROL_AXES, 3))
         self.response_window_reset_required = False
         self.inferred_transmitted_increment = np.zeros(CONTROL_AXES)
         self.response_evidence = np.zeros(CONTROL_AXES)
@@ -439,16 +529,140 @@ class BacklashStateEstimator:
         self.tendon_distal_response_confirmed = False
         self.response_classification = ["NOT_EVALUATED"]*CONTROL_AXES
 
-    def reset_observation_history(self):
-        """Forget visual response history without resetting transmission."""
+    def reset_observation_history(self, *, preserve_noise_calibration=False):
+        """Reset transaction evidence; sensor invalidation also resets noise.
+
+        Homing/command ownership is not a camera calibration change. Only
+        those callers preserve the already-qualified noise scale, never the
+        old direction, response anchor, or pending confirmation evidence.
+        """
+        noise = self.distal_onset_noise if preserve_noise_calibration else None
+        noise_timestamp = (self.distal_noise_observation_timestamp_ns
+                           if preserve_noise_calibration else None)
         self.previous_response_motor = None
         self.previous_pose = None
         self.previous_strain = None
+        self.distal_marker_anchor = None
+        self.distal_marker_history = []
+        self.distal_marker_motor = None
+        self.distal_marker_direction = 0
+        self.distal_marker_timestamp_ns = None
+        self.distal_response_encoder_quiet = False
+        self.distal_marker_motor_anchor = None
+        self.distal_quiet_history = []
+        self.distal_onset_noise = noise
+        self.distal_noise_observation_timestamp_ns = noise_timestamp
+        self.distal_response_deformation_mm = 0.0
+        self.distal_response_chord_support_mm = 0.0
+        self.tendon_response_onset = False
+        self.response_window_timestamp_ns = None
+        self.response_observation_timestamp_ns = None
+        self.response_sample_motor = None
+        self.response_sample_pose = None
+        self.response_sample_strain = None
+        self.marker_anchor_history = []
+        self.marker_response_anchor = None
         self.response_window_reset_required = False
+        self.measured_response_direction = np.zeros((CONTROL_AXES, 3))
 
     def clone_state(self):
         """Deep-copy the belief for timestamp-aligned rewind/replay."""
         return copy.deepcopy(self.__dict__)
+
+    def _observe_distal_descriptor(self, descriptor, motor, timestamp_ns):
+        """Bounded causal raw geometry, owned by the tendon transaction.
+
+        Proximal window rebases and other shaft reversals cannot erase tendon
+        evidence. Three current frames reject isolated spikes. A new direction
+        anchors at its first source-time image/motor pair, never a median of
+        pre-reversal motion. Up to five past frames smooth same-direction roots.
+        """
+        axis = self.config.tendon_axis
+        direction = int(self.motion_direction[axis])
+        previous_stamp = self.distal_marker_timestamp_ns
+        gap = (timestamp_ns is not None and previous_stamp is not None
+               and (timestamp_ns < previous_stamp or
+                    timestamp_ns-previous_stamp >= self.config.response_window_max_s*1e9))
+        changed = direction != self.distal_marker_direction
+        pending = self.phase[axis] in ("TAKEUP", "PROVISIONAL")
+        noise_stamp = self.distal_noise_observation_timestamp_ns
+        noise_gap = (timestamp_ns is not None and noise_stamp is not None
+                     and (timestamp_ns < noise_stamp or timestamp_ns-noise_stamp
+                          >= self.config.response_window_max_s*1e9))
+        if gap or noise_gap:
+            self.distal_quiet_history = []
+            self.distal_onset_noise = None
+        self.distal_noise_observation_timestamp_ns = timestamp_ns
+        if changed or gap or not pending:
+            self.tendon_response_onset = False
+        # Estimate raw distance noise only while the encoder is quiet. Freeze
+        # it at a reversal; moving deformation must not inflate its own gate.
+        quiet = (self.distal_marker_motor is not None and
+                 abs(float(motor[axis])-self.distal_marker_motor)
+                 < self.config.minimum_motor_increment_rad)
+        self.distal_response_encoder_quiet = bool(quiet)
+        if quiet and not pending and timestamp_ns is not None:
+            self.distal_quiet_history.append((timestamp_ns, descriptor.copy()))
+            self.distal_quiet_history = self.distal_quiet_history[-12:]
+            history = self.distal_quiet_history
+            if (len(history) >= 8
+                    and history[-1][0]-history[0][0] >= 0.2e9):
+                times = np.array([t for t, _ in history], dtype=np.int64)
+                seconds = (times-times[0])*1e-9
+                values = np.array([v for _, v in history])
+                smooth = np.array([np.median(values[k-2:k+1], axis=0)
+                                   for k in range(2, len(values))])
+                centered = seconds[2:]-seconds[2:].mean()
+                slope = centered@smooth/(centered@centered)
+                # An encoder hold is not necessarily a shape hold. Qualify
+                # only windows with drift smaller than the existing onset
+                # resolution, and estimate scatter after removing that drift.
+                # Resolved settling must neither qualify nor inflate measurement
+                # noise. No model prediction or Jacobian enters this test.
+                drift = np.max(np.abs(slope))*(seconds[-1]-seconds[0])
+                if drift <= self.config.minimum_distal_marker_deformation_mm/3.:
+                    residual = smooth-centered[:, None]*slope[None, :]
+                    self.distal_onset_noise = float(np.max(np.std(residual, axis=0)))
+        elif not quiet:
+            self.distal_quiet_history = []
+        if changed:
+            self.distal_quiet_history = []
+        # External homing can traverse slack during a marker gap. Preserve
+        # only its same-direction transaction reference, not stale response
+        # samples or confirmation counts. Ownership/reversal resets still
+        # invalidate the reference, and rewinds never bridge a gap.
+        retain_external_anchor = (
+            gap and timestamp_ns > previous_stamp and self.external_motion
+            and pending and not changed and direction != 0
+            and self.distal_marker_anchor is not None
+            and self.distal_marker_motor is not None
+            and direction*(float(motor[axis])-self.distal_marker_motor)
+                >= self.config.minimum_motor_increment_rad)
+        if gap:
+            self.distal_marker_history = []
+            if not retain_external_anchor:
+                self.distal_marker_anchor = None
+                self.distal_marker_motor_anchor = None
+                self.distal_marker_motor = None
+            self.confirmation_count[axis] = 0
+        if self.distal_marker_anchor is None or changed or not pending:
+            self.distal_marker_anchor = (
+                np.median(self.distal_marker_history, axis=0)
+                if self.distal_marker_history and not changed else descriptor.copy())
+            self.distal_marker_motor_anchor = (
+                float(motor[axis]) if self.distal_marker_motor is None or changed
+                else self.distal_marker_motor)
+        if changed:
+            self.distal_marker_history = []
+        self.distal_marker_history.append(descriptor.copy())
+        self.distal_marker_history = self.distal_marker_history[-5:]
+        self.distal_marker_direction = direction
+        self.distal_marker_motor = float(motor[axis])
+        self.distal_marker_timestamp_ns = timestamp_ns
+        deformation = (0.0 if len(self.distal_marker_history) < 3 else
+            float(np.sqrt(np.mean((np.median(self.distal_marker_history[-3:], axis=0)
+                                   - self.distal_marker_anchor)**2))))
+        return deformation, float(motor[axis])-self.distal_marker_motor_anchor
 
     def restore_state(self, checkpoint):
         """Restore a checkpoint produced by clone_state."""
@@ -458,6 +672,75 @@ class BacklashStateEstimator:
         self.__dict__.clear()
         self.__dict__.update(copy.deepcopy(checkpoint))
         self.config = config
+
+    def _raw_tendon_evidence(self, deformation, motor_delta):
+        """One raw-geometry predicate for stop previews and full confirmation."""
+        axis = self.config.tendon_axis
+        floor = self.config.minimum_distal_marker_deformation_mm
+        pending = self.phase[axis] in ("TAKEUP", "PROVISIONAL")
+        moving = abs(motor_delta) >= self.config.minimum_motor_increment_rad
+        persistence = (self.phase[axis] == "PROVISIONAL"
+                       and self.confirmation_count[axis] > 0
+                       and self.confirmation_direction[axis] == self.motion_direction[axis])
+        confirmation_floor = floor*self.config.distal_confirmation_release_ratio if persistence else floor
+        chord_delta = (0.0 if len(self.distal_marker_history) < 3 else
+            float(np.median(self.distal_marker_history[-3:], axis=0)[2]
+                  - self.distal_marker_anchor[2]))
+        chord_support = (-np.sign(MOTOR_AXIS_UNITS_PER_ENCODER_COUNT[axis])
+                         * self.motion_direction[axis] * chord_delta)
+        self.distal_response_deformation_mm = float(deformation)
+        self.distal_response_chord_support_mm = float(chord_support)
+        if self.distal_onset_noise is not None:
+            early_floor = max(floor/3., 3.*self.distal_onset_noise)
+            self.tendon_response_onset |= bool(
+                self.config.distal_confirmation_enabled and pending and moving
+                and deformation >= early_floor and chord_support >= early_floor)
+        return bool(self.config.distal_confirmation_enabled and pending and moving
+                    and deformation >= confirmation_floor and chord_support >= confirmation_floor)
+
+    @staticmethod
+    def _source_motor(history, timestamp_ns, control_owned):
+        entries = list(history)
+        index = next((i for i in range(len(entries)-1, -1, -1)
+                      if entries[i][0] <= int(timestamp_ns)), None)
+        if index is None or bool(control_owned) != bool(entries[index][3]):
+            return None
+        motor = entries[index][1]
+        if entries[index][0] != int(timestamp_ns):
+            if index+1 >= len(entries):
+                return None
+            following = entries[index+1]
+            span = following[0]-entries[index][0]
+            if bool(following[3]) != bool(entries[index][3]) or not 0 < span <= 250_000_000:
+                return None
+            fraction = (int(timestamp_ns)-entries[index][0])/span
+            motor = motor+fraction*(following[1]-motor)
+        return entries, index, motor
+
+    def preview_tendon_onset(self, history, timestamp_ns, points, *, control_owned):
+        """Stop-only evidence on an isolated source checkpoint; never confirm.
+
+        Invoked by the sole estimator owner before expensive shape correction.
+        The live belief and replay history are untouched, including noise and
+        persistence counts. Full correction consumes the observation once.
+        """
+        aligned = BacklashStateEstimator._source_motor(history, timestamp_ns, control_owned)
+        if aligned is None:
+            return None
+        entries, index, motor = aligned
+        scratch = copy.copy(self)
+        scratch.restore_state(entries[index][2])
+        if (scratch.distal_marker_timestamp_ns is not None
+                and timestamp_ns <= scratch.distal_marker_timestamp_ns):
+            return None
+        points = np.asarray(points, dtype=np.float64)
+        if points.shape != (4, 3) or not np.isfinite(points).all():
+            return None
+        descriptor = np.array([np.linalg.norm(points[i]-points[j])*1000.
+                               for i in range(4) for j in range(i+1, 4)])
+        deformation, delta = scratch._observe_distal_descriptor(descriptor, motor, timestamp_ns)
+        scratch._raw_tendon_evidence(deformation, delta)
+        return scratch.snapshot()
 
     def snapshot(self):
         active_width = np.where(
@@ -489,7 +772,17 @@ class BacklashStateEstimator:
              self.effective_motor.copy()),
             0.5*np.maximum(0.0, self.remaining_upper-self.remaining_lower),
             self.last_evidence_timestamp_ns.copy(),
-            self.engaged_gain_estimator.snapshot())
+            self.engaged_gain_estimator.snapshot(),
+            bool(self.tendon_response_onset),
+            (float('nan') if self.distal_onset_noise is None else
+             float(self.distal_onset_noise)),
+            (float('nan') if self.distal_onset_noise is None else
+             max(self.config.minimum_distal_marker_deformation_mm/3.,
+                 3.*self.distal_onset_noise)),
+            float(self.distal_response_deformation_mm),
+            float(self.distal_response_chord_support_mm),
+            int(self.distal_marker_timestamp_ns or 0),
+            bool(getattr(self, 'distal_response_encoder_quiet', False)))
 
     def _width_for_direction(self, axis, direction, *, prior=False):
         if direction > 0:
@@ -504,6 +797,8 @@ class BacklashStateEstimator:
         return (self.width_negative_lower, self.width_negative_upper, axis)
 
     def _start_takeup(self, axis, direction, motor_position):
+        if axis == self.config.tendon_axis:
+            self.tendon_response_onset = False
         widths, index = self._width_for_direction(axis, direction)
         lower, upper, _ = self._width_interval_for_direction(axis, direction)
         self.remaining[axis] = widths[index]
@@ -512,14 +807,45 @@ class BacklashStateEstimator:
         self.accumulated_since_reversal[axis] = 0.0
         self.reversal_start_motor[axis] = float(motor_position)
         self.engagement_anchor_motor[axis] = np.nan
-        self.confirmation_previous_motor[axis] = np.nan
         self.phase[axis] = "TAKEUP"
         self.confirmation_count[axis] = 0
         self.confirmation_direction[axis] = 0
         self.provisional_rejection_count[axis] = 0
         self.engaged_gain_estimator.start_takeup(axis, direction)
 
-    def advance_motor(self, motor_angle_rad):
+    def _learn_confirmed_boundary(self, axis):
+        """Use confirmed first-response travel as an upper bound on the gap.
+
+        Distal response need not move the interface. Neither response source
+        identifies how much of the travel was already transmitted, so retain
+        the full travel to the first response rather than subtracting an
+        unrelated interface fit. Commit only on confirmed real reversals;
+        startup direction selection does not identify a full directional gap.
+        """
+        rate = self.config.width_learning_rate
+        start = self.reversal_start_motor[axis]
+        anchor = self.engagement_anchor_motor[axis]
+        if (not self.reversal_observed[axis] or rate == 0.0
+                or not np.isfinite(start) or not np.isfinite(anchor)):
+            return
+        direction = int(self.confirmation_direction[axis])
+        travel = direction*(anchor-start)
+        if direction == 0 or travel < self.config.minimum_motor_increment_rad:
+            return
+        widths, index = self._width_for_direction(axis, direction)
+        lower, upper, _ = self._width_interval_for_direction(axis, direction)
+        # A prior floor must not override a confirmed smaller boundary. Slow
+        # blending remains appropriate for increases, but a gap cannot exceed
+        # the travel at which this same belief confirmed transmission.
+        widths[index] = min((1.0-rate)*widths[index]+rate*travel, travel)
+        slack = self.config.minimum_motor_increment_rad
+        lower[index] = min(widths[index],
+            (1.0-rate)*lower[index]+rate*max(0.0, travel-slack))
+        upper[index] = max(widths[index], min(
+            (1.0-rate)*upper[index]+rate*(travel+slack), travel+slack))
+
+    def advance_motor(self, motor_angle_rad, *, external_motion=False,
+                      track_external_response=False):
         """Advance raw shaft state and return estimated transmitted angles.
 
         The learned runtime must not integrate motion that is still consuming
@@ -528,6 +854,28 @@ class BacklashStateEstimator:
         motor angle supplied to the learned proximal/distal model.
         """
         motor = _vector("motor_angle_rad", motor_angle_rad)
+        if track_external_response and not external_motion:
+            raise ValueError("external response tracking requires external motion ownership")
+        ownership_changed = bool(external_motion) != self.external_motion
+        tracking_changed = bool(track_external_response) != getattr(self, "track_external_response", False)
+        if ownership_changed or tracking_changed:
+            # Start a fresh evidence window at either ownership boundary.
+            # Physical homing evidence conditions inference, but never hands
+            # an external transaction to the MPPI arbiter.
+            axes = (0, self.config.tendon_axis)
+            for axis in axes:
+                if self.phase[axis] == "FAILED":
+                    continue  # Explicit calibration cannot clear a failure.
+                self.phase[axis] = "UNKNOWN"
+                self.motion_direction[axis] = self.engaged_direction[axis] = 0
+                self.confirmation_count[axis] = self.confirmation_direction[axis] = 0
+                self.last_evidence_timestamp_ns[axis] = 0
+                self.engagement_anchor_motor[axis] = np.nan
+                self.reversal_start_motor[axis] = np.nan
+                self.confidence[axis] = 0.
+            self.reset_observation_history(preserve_noise_calibration=True)
+        self.external_motion = bool(external_motion)
+        self.track_external_response = bool(track_external_response)
         if self.previous_raw_motor is None:
             self.previous_raw_motor = motor.copy()
             self.effective_motor = motor.copy()
@@ -541,10 +889,58 @@ class BacklashStateEstimator:
                 continue
             self.pending_raw_delta[axis] = 0.0
             direction = int(np.sign(delta))
+            if external_motion:
+                if axis == self.config.tendon_axis or (self.track_external_response and axis == 0):
+                    if self.track_external_response and self.phase[axis] == "FAILED":
+                        self.effective_motor[axis] += delta
+                        continue
+                    # Reuse signed distal confirmation during homing; explicit
+                    # compensated calibration also tracks chassis response.
+                    # TAKEUP here means unconfirmed physical transmission, not
+                    # an MPPI-owned command transaction or travel budget.
+                    if ownership_changed or tracking_changed or direction != self.motion_direction[axis]:
+                        self._start_takeup(axis, direction, motor[axis]-delta)
+                        self.reset_observation_history(preserve_noise_calibration=True)
+                    self.motion_direction[axis] = direction
+                    self.accumulated_since_reversal[axis] += abs(delta)
+                    self.effective_motor[axis] += delta
+                    self.remaining[axis] = self.remaining_lower[axis] = 0.
+                    self.remaining_upper[axis] = 0.
+                    continue
+                # Externally owned position moves (homing) are not bounded
+                # MPPI take-up transactions. Preserve coordinates and learned
+                # widths, but do not carry transaction evidence into control.
+                self.effective_motor[axis] += delta
+                self.motion_direction[axis] = 0
+                self.engaged_direction[axis] = 0
+                self.phase[axis] = "UNKNOWN"
+                self.confidence[axis] = 0.0
+                self.confirmation_count[axis] = 0
+                self.confirmation_direction[axis] = 0
+                self.provisional_rejection_count[axis] = 0
+                self.accumulated_since_reversal[axis] = 0.0
+                self.reversal_start_motor[axis] = np.nan
+                self.engagement_anchor_motor[axis] = np.nan
+                self.last_evidence_timestamp_ns[axis] = 0
+                self.reversal_observed[axis] = False
+                self.inferred_transmitted_increment[axis] = 0.0
+                self.response_evidence[axis] = 0.0
+                self.remaining[axis] = 0.0
+                self.remaining_lower[axis] = 0.0
+                self.remaining_upper[axis] = max(
+                    self.width_positive_upper[axis],
+                    self.width_negative_upper[axis])
+                self.response_classification[axis] = "NOT_EVALUATED"
+                if ownership_changed:
+                    self.reset_observation_history(preserve_noise_calibration=True)
+                self.engaged_gain_estimator.start_takeup(axis, direction)
+                continue
+            # Zero prior chassis width is not proof of transmission after an
+            # ownership handoff. The arbiter needs fresh directional response.
             if (self.motion_direction[axis] == 0
                     and self.engaged_direction[axis] == 0
-                    and self._width_for_direction(
-                        axis, direction)[0][axis] > 0.0):
+                    and (self._width_for_direction(
+                        axis, direction)[0][axis] > 0.0 or axis == 0)):
                 self._start_takeup(axis, direction, motor[axis]-delta)
             elif (self.motion_direction[axis] != 0
                   and direction != self.motion_direction[axis]):
@@ -634,24 +1030,68 @@ class BacklashStateEstimator:
                 -improvement/max(2.0*noise[local_axis]**2, 1e-18))
         return inferred, evidence, residual_norm
 
+    def interface_motor_angles(self, raw_motor_angle_rad):
+        """Separate direct knob/interface drive from distal tendon take-up.
+
+        Chassis and rotation retain their estimated transmitted coordinates.
+        Shaft2's tendon state must not suppress the near-backlash-free knob
+        contribution to interface motion. Raw tendon history is unchanged.
+        """
+        raw = _vector("raw_motor_angle_rad", raw_motor_angle_rad)
+        if self.effective_motor is None:
+            raise RuntimeError("advance motor before requesting interface coordinates")
+        interface = self.effective_motor.copy()
+        interface[2] = raw[2]
+        return interface
+
     def observe_response(self, raw_motor_angle_rad, interface_pose,
                          jacobian, state_scale, distal_strain=None,
                          distal_bending_mode=None, timestamp_ns=None,
                          nominal_distal_lambda=None,
-                         observed_distal_lambda=None):
-        """Use corrected interface motion to infer shaft engagement jointly.
+                         observed_distal_lambda=None, *,
+                         observed_interface_position_m=None,
+                         observed_marker_points_m=None):
+        """Confirm engagement from measured response, independently of J.
 
         ``raw_motor_angle_rad`` must be the physical encoder sample paired to
         the camera timestamp. Nominal widths predict virtual transmission in
-        :meth:`advance_motor`; only observed interface response confirms it.
+        :meth:`advance_motor`; observed interface or distal response confirms it.
+        When supplied, the measured interface-origin marker replaces fitted
+        translation for response evidence only. Fitted orientation is retained.
+        This does not modify the filter posterior or its planning state.
+        Jacobian-derived coefficients/evidence are diagnostics only. Interface
+        evidence uses interface-minus-direct-knob translation for chassis.
+        Insertion/rotation simultaneity remains inconclusive. Tendon evidence
+        requires distal bending independently of direct knob translation.
+        Both ROS routes supply raw four-marker points; their six-distance RMS
+        uses a millimeter threshold instead of model-dependent strain units.
+        On the supported ordinary-bending branch, the interface-tip chord must
+        also change in the physical pull/release direction before confirmation.
         """
         motor = _vector(
             "raw_motor_angle_rad", raw_motor_angle_rad)
+        descriptor = None
+        if observed_marker_points_m is not None:
+            points = np.asarray(observed_marker_points_m, dtype=np.float64)
+            if points.shape != (4, 3) or not np.all(np.isfinite(points)):
+                raise ValueError("observed_marker_points_m must be finite 4x3 markers")
+            descriptor = np.array([
+                np.linalg.norm(points[i]-points[j])*1000.0
+                for i in range(4) for j in range(i+1, 4)])
         pose = np.asarray(interface_pose, dtype=np.float64)
         matrix = np.asarray(jacobian, dtype=np.float64)
         scale = np.asarray(state_scale, dtype=np.float64)
         if pose.shape != (4, 4) or not np.all(np.isfinite(pose)):
             raise ValueError("interface_pose must be a finite 4x4 transform")
+        if observed_interface_position_m is not None:
+            position = _vector(
+                "observed_interface_position_m", observed_interface_position_m)
+            # Marker 0 is at the modeled interface origin. A posterior origin
+            # residual must not masquerade as transmitted translation. Use
+            # the same measured position in cumulative and incremental windows,
+            # including provisional persistence, rewind and clone/restore.
+            pose = pose.copy()
+            pose[:3, 3] = position
         if matrix.shape != (6, CONTROL_AXES):
             raise ValueError("jacobian must be 6x3")
         if scale.shape != (6,) or np.any(scale <= 0.0):
@@ -680,7 +1120,7 @@ class BacklashStateEstimator:
                 raise ValueError("distal bending mode must be nonzero")
             bending_mode = bending_mode/mode_norm
         def observe_engaged_gain():
-            if nominal_distal_lambda is None:
+            if nominal_distal_lambda is None or self.external_motion:
                 return
             axis = self.config.tendon_axis
             direction = int(self.engaged_direction[axis])
@@ -689,21 +1129,87 @@ class BacklashStateEstimator:
             self.engaged_gain_estimator.observe(
                 axis, direction, nominal_distal_lambda,
                 observed_distal_lambda, timestamp_ns,
-                engaged=self.phase[axis] == "ENGAGED")
+                engaged=(self.phase[axis] == "ENGAGED"
+                         and not np.isin(self.phase, ["TAKEUP", "PROVISIONAL"]).any()),
+                motor_position=motor[axis],
+                minimum_motor_travel=self.config.minimum_transmitted_increment_rad)
 
         self.response_classification = ["NOT_EVALUATED"]*CONTROL_AXES
+        if (timestamp_ns is not None
+                and self.response_observation_timestamp_ns is not None
+                and timestamp_ns == self.response_observation_timestamp_ns):
+            return self.snapshot()
+        raw_deformation, raw_tendon_delta = (0.0, 0.0)
+        if descriptor is not None:
+            raw_deformation, raw_tendon_delta = self._observe_distal_descriptor(
+                descriptor, motor, timestamp_ns)
+        # The age cap bounds the search for a first response, not the atomic
+        # confirmation hold. Rebasing a provisional shaft onto its stopped
+        # motor erases the very displacement whose persistence we must test.
+        # The arbiter's existing confirmation timeout bounds that hold instead.
+        rewound = (timestamp_ns is not None
+                   and self.response_observation_timestamp_ns is not None
+                   and timestamp_ns < self.response_observation_timestamp_ns)
+        expired = (timestamp_ns is not None
+                   and self.response_window_timestamp_ns is not None
+                   and timestamp_ns-self.response_window_timestamp_ns
+                   >= self.config.response_window_max_s*1e9
+                   and "PROVISIONAL" not in self.phase)
+        # Bound the anchor history, not the observations themselves. Only a
+        # timed search rebase uses the five-frame median: never carry earlier
+        # motion across a reversal, invalidation or clock rewind, or smooth
+        # the current response / filter posterior. A provisional anchor stays
+        # frozen through confirmation, exactly as before.
         if (self.previous_response_motor is None
-                or self.response_window_reset_required):
+                or self.response_window_reset_required or rewound):
+            self.marker_anchor_history = []
+        # Opposing knob/chassis travel can cancel at a static interface.
+        # Subtract the fixed direct drive before accumulating robust anchors;
+        # raw pose remains intact for rotation and filter diagnostics.
+        chassis_position = pose[:3, 3]-knob_interface_translation_m(motor[2])
+        self.marker_anchor_history.append(chassis_position.copy())
+        self.marker_anchor_history = self.marker_anchor_history[-5:]
+        if (self.previous_response_motor is None
+                or self.response_window_reset_required or expired or rewound):
+            if expired or rewound:
+                for axis, phase in enumerate(self.phase):
+                    if phase == "PROVISIONAL":
+                        self.confirmation_count[axis] = 1
             self.previous_response_motor = motor.copy()
             self.previous_pose = pose.copy()
+            self.marker_response_anchor = (
+                np.median(self.marker_anchor_history, axis=0)
+                if expired and len(self.marker_anchor_history) == 5
+                else chassis_position.copy())
             self.previous_strain = (
                 None if strain is None else strain.copy())
             self.response_window_reset_required = False
+            self.response_window_timestamp_ns = timestamp_ns
+            self.response_observation_timestamp_ns = timestamp_ns
+            self.response_sample_motor = motor.copy()
+            self.response_sample_pose = pose.copy()
+            self.response_sample_strain = None if strain is None else strain.copy()
+            self.measured_response_direction = np.zeros((CONTROL_AXES, 3))
             self.distal_bending_increment = 0.0
             self.tendon_distal_response_evidence = 0.0
             self.tendon_distal_response_confirmed = False
             observe_engaged_gain()
-            return self.snapshot()
+            if (descriptor is None or self.phase[self.config.tendon_axis]
+                    not in ("TAKEUP", "PROVISIONAL")
+                    or abs(raw_tendon_delta) < self.config.minimum_motor_increment_rad):
+                return self.snapshot()
+        self.response_observation_timestamp_ns = timestamp_ns
+        sample_delta = motor-self.response_sample_motor
+        sample_pose_anchor = self.response_sample_pose
+        sample_relative = np.linalg.inv(sample_pose_anchor)@pose
+        sample_response = _se3_log(
+            sample_relative)/scale
+        sample_distal = (0.0 if strain is None
+                         or self.response_sample_strain is None else
+                         float((strain-self.response_sample_strain)@bending_mode))
+        self.response_sample_motor = motor.copy()
+        self.response_sample_pose = pose.copy()
+        self.response_sample_strain = None if strain is None else strain.copy()
 
         # Response evidence is intentionally accumulated across camera frames.
         # A per-frame shaft increment can be smaller than the response floor
@@ -713,42 +1219,20 @@ class BacklashStateEstimator:
         # increment large enough. Keep a common SE(3) window until at least
         # one pending shaft has enough causal evidence to be observable.
         delta = motor-self.previous_response_motor
+        if descriptor is not None:
+            delta[self.config.tendon_axis] = raw_tendon_delta
         relative = np.linalg.inv(self.previous_pose)@pose
         response = _se3_log(relative)
         moving = np.abs(delta) >= self.config.minimum_motor_increment_rad
+        interface_moving = moving.copy()
+        interface_moving[self.config.tendon_axis] = False
+        isolated = np.count_nonzero(interface_moving) == 1
         pending = np.asarray(
             [phase in ("TAKEUP", "PROVISIONAL")
              for phase in self.phase], dtype=bool)
-        # During an atomic confirmation hold no further probe travel is
-        # allowed. Confirm stationarity from consecutive accepted encoder
-        # samples, not from distance to the first-response anchor. A motor can
-        # coast once after the command becomes zero and then settle at a new
-        # position; comparing every later sample with the original anchor
-        # would leave PROVISIONAL engagement latched forever. The anchor is
-        # retained separately as the learned engagement boundary.
-        for axis in np.flatnonzero(np.asarray(self.phase) == "PROVISIONAL"):
-            previous = self.confirmation_previous_motor[axis]
-            held = (np.isfinite(previous)
-                    and abs(motor[axis]-previous)
-                    < self.config.minimum_motor_increment_rad)
-            self.confirmation_previous_motor[axis] = motor[axis]
-            if not held:
-                continue
-            self.confirmation_count[axis] += 1
-            self.response_classification[axis] = "CONFIRMED_PERSISTENT"
-            if (self.confirmation_count[axis]
-                    >= self.config.engagement_confirmation_observations):
-                self.phase[axis] = "ENGAGED"
-                self.remaining[axis] = 0.0
-                self.remaining_lower[axis] = 0.0
-                self.remaining_upper[axis] = 0.0
-                self.confidence[axis] = min(
-                    1.0, self.confidence[axis]+0.2)
-                if timestamp_ns is not None:
-                    self.last_evidence_timestamp_ns[axis] = int(timestamp_ns)
-        pending = np.asarray(
-            [phase in ("TAKEUP", "PROVISIONAL")
-             for phase in self.phase], dtype=bool)
+        # Retain the pre-response anchor during confirmation hold: each new
+        # shape must still support the observed displacement. Stationary
+        # encoders alone cannot turn a transient shape spike into engagement.
 
         distal_increment = 0.0
         distal_evidence = 0.0
@@ -769,12 +1253,28 @@ class BacklashStateEstimator:
         self.distal_bending_increment = distal_increment
         self.tendon_distal_response_evidence = distal_evidence
         self.tendon_distal_response_confirmed = distal_confirmed
+        # Raw geometry is the production evidence, independent of fitted
+        # strain and J. Six distances remove rigid insertion/rotation. Keep
+        # the pre-response anchor through PROVISIONAL: confirmation asks for
+        # persistent deformation, not another full threshold per frame.
+        # Strain-only callers retain the historical research/test contract.
+        if descriptor is not None:
+            deformation = raw_deformation
+            floor = self.config.minimum_distal_marker_deformation_mm
+            # RMS deformation alone has no sign: continued relaxation after a
+            # pull reversal can exceed the floor without transmitting the new
+            # pull. On the supported ordinary-bending branch, pull shortens
+            # the measured interface-tip chord and release lengthens it. Use
+            # the fixed physical motor sign, never J or predicted strain.
+            # A stopped PROVISIONAL hold retains the acquisition direction.
+            distal_confirmed = self._raw_tendon_evidence(deformation, raw_tendon_delta)
+            # Evidence magnitude retains the onset scale for diagnostic replay.
+            # Only classification uses the lower, already-onset persistence floor.
+            self.tendon_distal_response_evidence = float(np.clip(deformation/floor, 0., 1.))
+            self.tendon_distal_response_confirmed = distal_confirmed
 
-        # Readiness is per shaft. Subthreshold pending shafts stay out of this
-        # fit instead of blocking every other shaft through a shared `any`
-        # gate. Engaged shafts that moved in the same window remain nuisance
-        # columns so their interface response cannot be attributed to a ready
-        # pending shaft.
+        # Encoder readiness is per shaft; it is not proof of engagement.
+        # The diagnostic fit retains nuisance columns for moving shafts.
         pending_ready = pending & moving & (
             np.abs(delta)
             >= self.config.minimum_transmitted_increment_rad)
@@ -787,17 +1287,24 @@ class BacklashStateEstimator:
             self.response_evidence[:] = 0.0
             self.joint_response_residual = float(
                 np.linalg.norm(response/scale))
+            if np.count_nonzero(interface_moving) > 1 and "PROVISIONAL" not in self.phase:
+                self.previous_response_motor = motor.copy()
+                self.previous_pose = pose.copy()
+                self.marker_response_anchor = chassis_position.copy()
+                self.marker_anchor_history = [chassis_position.copy()]
+                self.previous_strain = None if strain is None else strain.copy()
+                self.response_window_timestamp_ns = timestamp_ns
+                self.measured_response_direction[:] = 0.0
             observe_engaged_gain()
             return self.snapshot()
 
         eligible = moving & (~pending | pending_ready)
 
-        self.previous_response_motor = motor.copy()
-        self.previous_pose = pose.copy()
-        self.previous_strain = None if strain is None else strain.copy()
         directions = np.sign(delta).astype(np.int8)
         measured = response/scale
         columns = matrix/scale[:, np.newaxis]
+        # The joint fit is a metric diagnostic only. Neither its coefficients,
+        # evidence nor predicted direction may decide engagement or widths.
         transmitted, evidence, residual = self._bounded_joint_fit(
             columns, measured, delta, eligible,
             self.config.minimum_transmitted_increment_rad)
@@ -808,48 +1315,84 @@ class BacklashStateEstimator:
         self.response_evidence = evidence
         self.joint_response_residual = residual
 
+        covariance = np.asarray(self.config.marker_increment_covariance_m2).reshape(3, 3)
+        marker_noise_factor = np.linalg.cholesky(covariance)
+        marker_delta = chassis_position-self.marker_response_anchor
+        # A single current-frame spike can otherwise stop take-up indefinitely:
+        # PROVISIONAL hands ownership to the zero-command confirmation hold.
+        # For measured marker translation require the same resolved onset in
+        # the causal three-frame median as well. This affects evidence only,
+        # not the UKF observation, motor bookkeeping, or confirmation policy.
+        marker_onset = marker_delta
+        if observed_interface_position_m is not None:
+            # A reversal resets this window. Never let its first post-anchor
+            # sample bypass the robust onset test and stop take-up on noise.
+            # With two post-anchor samples, the actual anchor is the third
+            # median member; both responses must support the displacement.
+            # Mature windows use the last three post-anchor samples as before.
+            marker_onset = (
+                np.median(self.marker_anchor_history[-3:], axis=0)
+                -self.marker_response_anchor
+                if len(self.marker_anchor_history) >= 3
+                else np.zeros(3))
+        marker_sample = (pose[:3, 3]-sample_pose_anchor[:3, 3]
+                         -knob_interface_translation_m(sample_delta[2]))
+        # A Cartesian offset alone cannot distinguish insertion and rotation.
+        # Do not use a model to resolve that ambiguity. Clear an ambiguous
+        # pre-handoff window once the other motion stops before accumulating
+        # evidence for the remaining isolated shaft.
+        def measured_support(axis):
+            if axis == self.config.tendon_axis or not isolated:
+                return False, False
+            # Shaft 1 is rotation; all other interface evidence is Cartesian
+            # translation. Never mix fitted rotation into insertion evidence.
+            rotational = axis == 1
+            # Store the measured direction in whitened Cartesian coordinates.
+            # Onset and persistence must use the same noise metric: mixing a
+            # Mahalanobis onset with Euclidean projection can reject even an
+            # identical repeated observation under anisotropic covariance.
+            offset = (response[:3] if rotational else
+                      np.linalg.solve(marker_noise_factor, marker_delta))
+            fresh = (sample_response[:3]*scale[:3] if rotational else
+                     np.linalg.solve(marker_noise_factor, marker_sample))
+            direction = self.measured_response_direction[axis]
+            if np.linalg.norm(direction) <= 1e-12:
+                if rotational:
+                    resolved = np.linalg.norm(offset) >= self.config.minimum_interface_rotation_rad
+                else:
+                    # Four increment sigmas in 3D, not a single-axis 3-sigma
+                    # test after selecting a favorable direction from noise.
+                    resolved = offset@offset > 16.0
+                    robust_offset = np.linalg.solve(
+                        marker_noise_factor, marker_onset)
+                    resolved = resolved and robust_offset@robust_offset > 16.0
+                if resolved:
+                    self.measured_response_direction[axis] = offset/np.linalg.norm(offset)
+                return bool(resolved), False
+            floor = (self.config.minimum_interface_rotation_rad if rotational
+                     else 3.0)
+            support = float(offset@direction)
+            confirmed = support > floor
+            if (self.phase[axis] == "PROVISIONAL"
+                    and abs(sample_delta[axis]) >= self.config.minimum_motor_increment_rad):
+                confirmed = confirmed and float(fresh@direction) > floor
+            return bool(confirmed), bool(support < -floor)
+
         for axis in np.flatnonzero(eligible):
-            column = columns[:, axis]
-            contribution = column*transmitted[axis]
-            unexplained = measured-(columns@transmitted-contribution)
-            response_norm = float(np.linalg.norm(unexplained))
-            contribution_norm = float(np.linalg.norm(contribution))
-            cosine = (
-                0.0 if response_norm <= 1e-12
-                or contribution_norm <= 1e-12 else
-                float(unexplained@contribution
-                      / (response_norm*contribution_norm)))
-            interface_confirmed = (
-                abs(transmitted[axis])
-                >= self.config.minimum_transmitted_increment_rad
-                and np.sign(transmitted[axis]) == directions[axis]
-                and cosine >= self.config.response_direction_cosine
-                and evidence[axis]
-                >= self.config.minimum_response_evidence)
-            confirmed = interface_confirmed or (
-                axis == self.config.tendon_axis and distal_confirmed)
-            signed_column = column*directions[axis]
-            signed_column_norm = float(np.linalg.norm(signed_column))
-            directional_cosine = (
-                0.0 if response_norm <= 1e-12
-                or signed_column_norm <= 1e-12 else
-                float(unexplained@signed_column
-                      / (response_norm*signed_column_norm)))
-            # Failure to prove transmission is not evidence that transmission
-            # stopped. In particular, accepted-noop corrections and
-            # same-direction responses below the inference floor are common
-            # after the full-rate take-up command has handed control back to
-            # MPPI. Only a resolved response of sufficient magnitude in the
-            # *opposite* modeled direction contradicts provisional engagement.
-            contradictory = bool(
-                not confirmed
-                and abs(delta[axis])
-                >= self.config.minimum_transmitted_increment_rad
-                and response_norm >= (
-                    self.config.minimum_transmitted_increment_rad
-                    * signed_column_norm)
-                and directional_cosine
-                <= -abs(self.config.response_direction_cosine))
+            interface_confirmed, contradictory = measured_support(axis)
+            confirmed = (distal_confirmed if axis == self.config.tendon_axis
+                         else interface_confirmed)
+            if (self.phase[axis] == "PROVISIONAL"
+                    and not (axis == self.config.tendon_axis and descriptor is not None)
+                    and abs(sample_delta[axis])
+                    >= self.config.minimum_motor_increment_rad):
+                confirmed = confirmed and (
+                    interface_confirmed
+                    or (axis == self.config.tendon_axis
+                        and self.config.distal_confirmation_enabled
+                        and abs(sample_distal)
+                        >= self.config.minimum_distal_bending_increment))
+            contradictory = contradictory and not confirmed
             classification = (
                 "CONFIRMED" if confirmed else
                 "CONTRADICTORY" if contradictory else "INCONCLUSIVE")
@@ -864,8 +1407,11 @@ class BacklashStateEstimator:
                 confirmation_complete = (
                     self.confirmation_count[axis]
                     >= self.config.engagement_confirmation_observations)
+                if (self.phase[axis] in ("TAKEUP", "PROVISIONAL")
+                        and not np.isfinite(self.engagement_anchor_motor[axis])):
+                    self.engagement_anchor_motor[axis] = motor[axis]
                 # Actuation handoff and statistical confirmation are separate
-                # decisions. The first strongly attributed response proves
+                # decisions. The first noise-resolved measured response proves
                 # that full-rate geometric take-up must stop immediately, but
                 # repeated samples are still required before width learning
                 # and persistent ENGAGED state are committed.
@@ -874,50 +1420,21 @@ class BacklashStateEstimator:
                     self.engaged_direction[axis] = directions[axis]
                     self.phase[axis] = "PROVISIONAL"
                     self.engagement_anchor_motor[axis] = motor[axis]
-                    self.confirmation_previous_motor[axis] = motor[axis]
                     if timestamp_ns is not None:
                         self.last_evidence_timestamp_ns[axis] = int(
                             timestamp_ns)
-                if (confirmation_complete and interface_confirmed
-                        and self.phase[axis] in ("TAKEUP", "PROVISIONAL")
-                        and self.reversal_observed[axis]):
-                    observed_width = max(
-                        0.0, self.accumulated_since_reversal[axis]
-                        - abs(transmitted[axis]))
-                    widths, index = self._width_for_direction(
-                        axis, directions[axis])
-                    priors, _ = self._width_for_direction(
-                        axis, directions[axis], prior=True)
-                    lower = self.config.minimum_width_gain*priors[index]
-                    upper = self.config.maximum_width_gain*priors[index]
-                    observed_width = float(np.clip(
-                        observed_width, lower, upper))
-                    rate = self.config.width_learning_rate
-                    widths[index] = (
-                        (1.0-rate)*widths[index]+rate*observed_width)
-                    lower_widths, upper_widths, _ = (
-                        self._width_interval_for_direction(
-                            axis, directions[axis]))
-                    measurement_slack = max(
-                        self.config.minimum_motor_increment_rad,
-                        0.05*max(priors[index], 1e-12))
-                    observed_lower = max(
-                        lower, observed_width-measurement_slack)
-                    observed_upper = min(
-                        upper, observed_width+measurement_slack)
-                    lower_widths[index] = (
-                        (1.0-rate)*lower_widths[index]
-                        + rate*observed_lower)
-                    upper_widths[index] = max(
-                        lower_widths[index],
-                        (1.0-rate)*upper_widths[index]
-                        + rate*observed_upper)
+                if (confirmation_complete
+                        and not self.external_motion
+                        and self.phase[axis] in ("TAKEUP", "PROVISIONAL")):
+                    # Cartesian evidence identifies an observed onset, not a
+                    # transmitted motor increment. Do not subtract a Jacobian
+                    # fit to learn a gap width from this observation.
+                    self._learn_confirmed_boundary(axis)
                 if confirmation_complete:
                     self.remaining[axis] = 0.0
                     self.remaining_lower[axis] = 0.0
                     self.remaining_upper[axis] = 0.0
                     self.engaged_direction[axis] = directions[axis]
-                    self.engagement_anchor_motor[axis] = motor[axis]
                     if timestamp_ns is not None:
                         self.last_evidence_timestamp_ns[axis] = int(
                             timestamp_ns)
@@ -925,7 +1442,12 @@ class BacklashStateEstimator:
                     self.confidence[axis] = min(
                         1.0, self.confidence[axis]+0.2)
             elif self.phase[axis] == "PROVISIONAL":
-                if contradictory:
+                # Loss below the persistence floor clears support. A later
+                # observation must meet the full onset floor before hysteresis
+                # can be used again. Preserve the anchor and zero ownership.
+                self.confirmation_count[axis] = (
+                    0 if axis == self.config.tendon_axis and descriptor is not None else 1)
+                if contradictory and not self.external_motion:
                     self.provisional_rejection_count[axis] += 1
                     if (self.provisional_rejection_count[axis]
                             >= self.config.provisional_rejection_observations):
@@ -934,8 +1456,8 @@ class BacklashStateEstimator:
                     else:
                         self.confidence[axis] = max(
                             0.0, self.confidence[axis]-0.02)
-                # INCONCLUSIVE deliberately preserves PROVISIONAL, its
-                # confirmation count, and the first-response engagement
+                # INCONCLUSIVE deliberately preserves PROVISIONAL and the
+                # first-response engagement
                 # boundary. It must not re-enable a geometric take-up burst.
             elif self.phase[axis] == "TAKEUP":
                 self.confirmation_count[axis] = 0
@@ -946,14 +1468,59 @@ class BacklashStateEstimator:
                 # credible response. A provisional response changes the
                 # epistemic problem from "gap not exhausted" to "awaiting
                 # confirmation" and is handled above without more take-up.
-                limit = (self.config.maximum_width_gain
-                         * self._width_for_direction(
-                             axis, directions[axis], prior=True)[0][axis])
-                if (limit > 0.0
+                limit = self.config.unconfirmed_travel_limit_rad(
+                    self._width_for_direction(
+                        axis, directions[axis], prior=True)[0][axis], axis=axis)
+                if (not self.external_motion and limit > 0.0
                         and self.accumulated_since_reversal[axis] > limit):
                     self.phase[axis] = "FAILED"
+        # A ready raw motor is not a resolved visual response. Preserve the
+        # common pose/motor/strain window while an isolated shaft awaits
+        # confirmation. Rebase ambiguous windows rather than attributing them
+        # through a Jacobian prediction.
+        if (not any(phase in ("TAKEUP", "PROVISIONAL") for phase in self.phase)
+                or (np.count_nonzero(interface_moving) > 1
+                    and "PROVISIONAL" not in self.phase)):
+            self.previous_response_motor = motor.copy()
+            self.previous_pose = pose.copy()
+            self.marker_response_anchor = chassis_position.copy()
+            self.marker_anchor_history = [chassis_position.copy()]
+            self.previous_strain = None if strain is None else strain.copy()
+            self.response_window_timestamp_ns = timestamp_ns
+            self.measured_response_direction[:] = 0.0
         observe_engaged_gain()
         return self.snapshot()
+
+    def observe_at_timestamp(self, history, timestamp_ns, interface_pose, model, *,
+                             control_owned, observed_interface_position_m, **response_options):
+        """Correct the existing observation owner at source time and replay.
+
+        History entries are [source_ns, raw shaft radians, checkpoint, owned].
+        ROS composition and offline qualification share this one implementation.
+        """
+        if not history:
+            return self.snapshot(), history
+        aligned = BacklashStateEstimator._source_motor(history, timestamp_ns, control_owned)
+        if aligned is None:
+            # A delayed observation from externally owned homing must not
+            # create a transaction failure or confirm engagement after arming.
+            return self.snapshot(), history
+        entries, index, response_motor = aligned
+        self.restore_state(entries[index][2])
+        self.observe_response(
+            response_motor, interface_pose, model.jacobian,
+            model.state_scale, timestamp_ns=int(timestamp_ns),
+            observed_interface_position_m=observed_interface_position_m,
+            **response_options)
+        entries[index][2] = self.clone_state()
+        for replay_index in range(index+1, len(entries)):
+            self.advance_motor(
+                entries[replay_index][1],
+                external_motion=not entries[replay_index][3],
+                track_external_response=entries[replay_index][2].get("track_external_response", False))
+            entries[replay_index][2] = (
+                self.clone_state())
+        return self.snapshot(), entries
 
     def observe(self, motor_angle_rad, interface_pose, jacobian,
                 state_scale):
@@ -972,9 +1539,20 @@ class BacklashFeedforwardCompensator:
             "takeup_velocity", config.takeup_velocity, nonnegative=True)
 
     def motor_radians_per_second(self, contract):
-        """Return the quantized physical shaft rates used during take-up."""
+        """Return physical take-up rates compatible with manager speed floors.
+
+        Subfloor chassis/knob requests can both round to the same logical
+        velocity, cancelling chassis motion after coupling. Apply the shared
+        contract bounds before RPM quantization; final coupled projection
+        remains authoritative for limits, direction and unintended leakage.
+        """
         motor = np.zeros(6, dtype=np.float64)
-        motor[:CONTROL_AXES] = self.takeup_velocity
+        motor[:CONTROL_AXES] = np.where(
+            self.takeup_velocity > 0.,
+            np.clip(self.takeup_velocity,
+                    contract.velocity_min[:CONTROL_AXES],
+                    contract.velocity_max[:CONTROL_AXES]),
+            0.)
         _, rates, _ = contract.quantize_motor_velocity(motor)
         return np.abs(rates[:CONTROL_AXES])
 
@@ -1129,6 +1707,7 @@ class TakeupTransactionArbiter:
     READY_TO_PLAN = "READY_TO_PLAN"
     TAKEUP_ACTIVE = "TAKEUP_ACTIVE"
     CONFIRMATION_HOLD = "CONFIRMATION_HOLD"
+    RESPONSE_HOLD = "RESPONSE_HOLD"
     REPLAN_REQUIRED = "REPLAN_REQUIRED"
     SATURATED_REPLAN = "SATURATED_REPLAN"
     FAILED = "FAILED"
@@ -1161,6 +1740,46 @@ class TakeupTransactionArbiter:
         self.requested_motor_radians_per_second = np.zeros(CONTROL_AXES)
         self.realized_motor_radians_per_second = np.zeros(CONTROL_AXES)
         self.confirmation_hold_started_s = None
+        self.response_hold_started_s = None
+        self.response_onset_seen = False
+        self.response_stop_source_ns = None
+        self.response_evidence_source_ns = 0
+        self.response_post_stop_observations = 0
+        self.response_burst_started_s = None
+        self.response_last_published_moving = False
+        self.response_onset_source_ns = 0
+        self.response_transaction_source_floor_ns = 0
+
+    def note_tendon_onset(self, snapshot):
+        """Latch a stop request only, without changing belief or readiness."""
+        if (self.state not in (self.TAKEUP_ACTIVE, self.RESPONSE_HOLD)
+                or not self.pending_mask[2] or not snapshot.tendon_response_onset
+                or snapshot.phase[2] not in ("TAKEUP", "PROVISIONAL")
+                or snapshot.motion_direction[2] != self.direction[2]
+                or (snapshot.tendon_response_timestamp_ns
+                    and snapshot.tendon_response_timestamp_ns <= self.response_transaction_source_floor_ns)
+                or self.response_onset_seen):
+            return False
+        self.response_onset_seen = True
+        self.response_onset_source_ns = snapshot.tendon_response_timestamp_ns
+        self.response_hold_started_s = self._clock()
+        self.response_stop_source_ns = None
+        self.response_post_stop_observations = 0
+        return True
+
+    def note_command_publication(self, timestamp_ns, tendon_moving):
+        """Source-clock zero barrier for subsequent camera evidence.
+
+        Publication is not a firmware acknowledgement. Three distinct images
+        after this barrier replace timer-only permission to add travel.
+        """
+        if (self.response_onset_seen and not tendon_moving
+                and (self.response_last_published_moving
+                     or self.response_stop_source_ns is None)):
+            self.response_stop_source_ns = int(timestamp_ns)
+            self.response_post_stop_observations = 0
+            self.response_hold_started_s = self._clock()
+        self.response_last_published_moving = bool(tendon_moving)
 
     @staticmethod
     def _zero():
@@ -1281,7 +1900,7 @@ class TakeupTransactionArbiter:
         return self._decision(command, reason="takeup_active")
 
     def begin(self, desired_logical_velocity, joint_position, contract,
-              snapshot: BacklashSnapshot):
+              snapshot: BacklashSnapshot, *, physical_direction=None):
         """Accept a fresh MPPI result or start a bounded take-up transaction."""
         if self.state != self.READY_TO_PLAN:
             raise RuntimeError(
@@ -1291,6 +1910,12 @@ class TakeupTransactionArbiter:
         projected = contract.project_velocity(desired, joint_position)
         motor = projected.motor_radians_per_second[:CONTROL_AXES]
         self.direction = np.sign(motor).astype(np.int8)
+        if physical_direction is not None:
+            direction = _vector('endpoint physical direction', physical_direction,
+                                size=CONTROL_AXES)
+            if not np.all(np.isin(direction, [-1, 0, 1])):
+                raise ValueError('endpoint physical direction must contain signs')
+            self.direction = direction.astype(np.int8)
         # Every commanded shaft must be observation-confirmed before the
         # post-engagement MPPI action can execute.
         self.active_mask = self.direction != 0
@@ -1312,6 +1937,14 @@ class TakeupTransactionArbiter:
                 reason="post_takeup_command_ready")
 
         self.generation += 1
+        self.response_hold_started_s = None
+        self.response_onset_seen = False
+        self.response_stop_source_ns = None
+        self.response_evidence_source_ns = 0
+        self.response_post_stop_observations = 0
+        self.response_burst_started_s = None
+        self.response_onset_source_ns = 0
+        self.response_transaction_source_floor_ns = snapshot.tendon_response_timestamp_ns
         self.state = self.TAKEUP_ACTIVE
         return self._takeup_decision(joint_position, contract)
 
@@ -1326,7 +1959,8 @@ class TakeupTransactionArbiter:
         if self.state == self.FAILED:
             return self._decision(
                 self._zero(), reason="takeup_estimator_failed")
-        if self.state not in (self.TAKEUP_ACTIVE, self.CONFIRMATION_HOLD):
+        if self.state not in (self.TAKEUP_ACTIVE, self.CONFIRMATION_HOLD,
+                              self.RESPONSE_HOLD):
             return self._decision(self._zero())
 
         ready, failed = self._readiness(snapshot)
@@ -1356,6 +1990,45 @@ class TakeupTransactionArbiter:
             self.state = self.CONFIRMATION_HOLD
             return self._decision(
                 self._zero(), reason="takeup_confirmation_hold")
+        # Early response does not make a shaft ready. Retain ownership and
+        # allow observations to settle before adding more physical travel.
+        # Thereafter use minimum-speed-compliant bursts: a continuous scaled
+        # rate would be raised back to the hardware floor by projection.
+        self.note_tendon_onset(snapshot)
+        if self.response_onset_seen and self.pending_mask[2]:
+            now = self._clock()
+            if self.response_burst_started_s is not None:
+                if now-self.response_burst_started_s < 1./15.:
+                    self.state = self.TAKEUP_ACTIVE
+                    return self._takeup_decision(joint_position, contract)
+                self.response_burst_started_s = None
+                self.response_stop_source_ns = None
+                self.response_post_stop_observations = 0
+                self.response_hold_started_s = now
+            else:
+                stamp = snapshot.tendon_response_timestamp_ns
+                if (self.response_stop_source_ns is not None
+                        and stamp > self.response_stop_source_ns
+                        and stamp > self.response_evidence_source_ns
+                        and snapshot.motion_direction[2] == self.direction[2]):
+                    self.response_evidence_source_ns = stamp
+                    if snapshot.tendon_response_encoder_quiet:
+                        self.response_post_stop_observations += 1
+                    else:
+                        self.response_post_stop_observations = 0
+                if (self.response_post_stop_observations >= 3
+                        and not snapshot.tendon_distal_response_confirmed):
+                    self.response_burst_started_s = now
+                    self.response_post_stop_observations = 0
+                    self.state = self.TAKEUP_ACTIVE
+                    return self._takeup_decision(joint_position, contract)
+            if now-self.response_hold_started_s >= self.confirmation_hold_timeout_s:
+                self.state = self.FAILED
+                return self._decision(self._zero(), reason="takeup_response_evidence_timeout")
+            self.state = self.RESPONSE_HOLD
+            self.requested_motor_radians_per_second.fill(0.)
+            self.realized_motor_radians_per_second.fill(0.)
+            return self._decision(self._zero(), reason="takeup_response_hold")
         self.state = self.TAKEUP_ACTIVE
         return self._takeup_decision(joint_position, contract)
 

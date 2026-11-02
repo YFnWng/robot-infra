@@ -27,6 +27,8 @@ setup(
             "session_recording = experiments.session_recording:main",
             "reaching_session = experiments.reaching_session:main",
             "reaching_analysis = experiments.reaching_analysis:main",
+            "path_session = experiments.path_session:main",
+            "path_analysis = experiments.path_analysis:main",
         ],
     },
 )

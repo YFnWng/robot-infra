@@ -1,0 +1,10 @@
+schema_version: 1
+name: hardware.path.grouped_takeup.synchronized_rotation.circle
+node_name: catheter_mppi
+description: Baseline grouped MPPI YZ circle with matched catheter/sheath rotation.
+layers:
+  controller: [controller/base.yaml, controller/modes/grouped_fixed_gain.yaml]
+  platform: platform/hardware_synchronized_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: continuous_circle_hardware.yaml
+compatibility_aliases: []

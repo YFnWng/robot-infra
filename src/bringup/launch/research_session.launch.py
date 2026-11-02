@@ -25,13 +25,20 @@ def _setup(context):
 
     video = _boolean(value("video"))
     output_enabled = _boolean(value("command_output_enabled"))
+    planner_process = value("planner_process_enabled")
+    if planner_process:
+        _boolean(planner_process)
     camera_config = Path(value("camera_config")).expanduser().resolve()
     registration = Path(value("registration_file")).expanduser().resolve()
+    registration_config = Path(value("registration_config")).expanduser().resolve()
+    registration_frames = int(value("registration_frames"))
+    if not registration_config.is_file() or registration_frames < 10:
+        raise ValueError("existing registration_config and >=10 registration_frames are required")
     # Preserve the venv entry path: resolving its symlink would select system
     # Python and lose the installed camera SDK/site-packages.
     camera_python = Path(value("camera_python")).expanduser().absolute()
-    if not camera_config.is_file() or not registration.is_file():
-        raise ValueError("existing camera_config and registration_file are required")
+    if not camera_config.is_file():
+        raise ValueError("existing camera_config is required")
     if not camera_python.is_file():
         raise ValueError("camera_python must be the interpreter with the ZED SDK")
     if not value("stack_config"):
@@ -45,11 +52,27 @@ def _setup(context):
     camera_command = [
         str(camera_python), "-m", "perception.marker_tracking", "--ros-args",
         "-p", f"camera_config:={camera_config}",
-        "-p", f"registration_file:={registration}",
+        "-p", "registration_refresh_enabled:=true",
+        "-p", f"registration_config:={registration_config}",
+        "-p", f"registration_frames:={registration_frames}",
         "-p", f"shape_tracking_root:={value('shape_tracking_root')}",
         "-p", "rig_ids:=['primary','oblique']",
         "-p", f"recording_enabled:={str(video).lower()}",
         "-p", f"recording_session_dir:={video_dir}"]
+    estimator_arguments = [
+        f"{name}:={value(name)}"
+        for name in ("estimator_device", "estimator_dtype", "mppi_temperature")
+        if value(name)]
+    if planner_process:
+        estimator_arguments.append(f"planner_process_enabled:={planner_process}")
+    if value('model_manifest'):
+        estimator_arguments.append(f"model_manifest:={value('model_manifest')}")
+    if value('path_prediction_grid'):
+        estimator_arguments.append(f"path_prediction_grid:={value('path_prediction_grid')}")
+    if value('point_rollout_step_override_s'):
+        estimator_arguments.append(f"point_rollout_step_override_s:={value('point_rollout_step_override_s')}")
+    if value('horizon_steps_override'):
+        estimator_arguments.append(f"horizon_steps_override:={value('horizon_steps_override')}")
     commands = {
         "camera": camera_command,
         "bag": ["ros2", "bag", "record", "--include-hidden-topics",
@@ -57,7 +80,9 @@ def _setup(context):
         "controller": [
             "ros2", "launch", "bringup", "control.launch.py",
             f"stack_config:={value('stack_config')}", "record:=false",
+            *estimator_arguments,
             f"recording_manifest_path:={session / 'controller_manifest.json'}",
+            f"adapj_initialization_dir:={session / 'adapj_initialization'}",
             f"command_output_enabled:={str(output_enabled).lower()}"]}
     manifest = {
         "schema_version": 1, "session_id": session.name,
@@ -65,7 +90,18 @@ def _setup(context):
         "state": "allocated", "video_enabled": video,
         "video_directory": str(video_dir), "bag_directory": str(session / "robot_bag"),
         "stack_config": value("stack_config"), "camera_config": str(camera_config),
+        "model_manifest": value('model_manifest'),
+        "estimator_device": value("estimator_device"),
+        "estimator_dtype": value("estimator_dtype"),
+        "mppi_temperature": value("mppi_temperature"),
+        "path_prediction_grid": value("path_prediction_grid"),
+        "point_rollout_step_override_s": value("point_rollout_step_override_s"),
+        "horizon_steps_override": value("horizon_steps_override"),
+        "planner_process_enabled": planner_process,
         "registration_file": str(registration),
+        "registration_config": str(registration_config),
+        "registration_frames": registration_frames,
+        "registration_policy": "session_charuco_independent_per_rig",
         "camera_python": str(camera_python),
         "command_output_enabled": output_enabled,
         "startup_timeout_s": timeout, "commands": commands,
@@ -91,8 +127,28 @@ def generate_launch_description():
         DeclareLaunchArgument("session_label", description=(
             "Required semantic experiment/task/controller/budget/repeat label.")),
         DeclareLaunchArgument("stack_config", description="Reviewed semantic stack."),
+        DeclareLaunchArgument("model_manifest", default_value="",
+                             description="Explicit parallel model bundle; empty retains baseline."),
+        DeclareLaunchArgument("estimator_device", default_value="",
+                             description="Opt-in estimator device; empty inherits planner."),
+        DeclareLaunchArgument("estimator_dtype", default_value="",
+                             description="Opt-in estimator precision; empty preserves default."),
+        DeclareLaunchArgument("mppi_temperature", default_value="",
+                             description="Positive dimensionless MPPI temperature; empty preserves default."),
+        DeclareLaunchArgument("path_prediction_grid", default_value="",
+                             description="Opt-in point-reaching time grid for path rollouts; empty preserves stack."),
+        DeclareLaunchArgument("point_rollout_step_override_s", default_value="",
+                             description="Explicit point prediction step override in seconds; empty preserves stack."),
+        DeclareLaunchArgument("horizon_steps_override", default_value="",
+                             description="Explicit sampled horizon length in steps; empty preserves stack."),
+        DeclareLaunchArgument("planner_process_enabled", default_value="",
+                             description="Opt-in isolated planner process; empty preserves stack setting."),
         DeclareLaunchArgument("registration_file", default_value=os.environ.get(
-            "CATHETER_REGISTRATION_FILE", "")),
+            "CATHETER_REGISTRATION_FILE", ""),
+            description="Legacy argument; fresh per-session registration does not use it."),
+        DeclareLaunchArgument("registration_config", default_value=str(
+            Path(shape) / "registration_config.yaml")),
+        DeclareLaunchArgument("registration_frames", default_value="20"),
         DeclareLaunchArgument("shape_tracking_root", default_value=shape),
         DeclareLaunchArgument("camera_python", default_value=str(Path(
             os.environ.get("CR_VENV", "/home/chen-lab/Yifan/cr-venv")) / "bin/python"),

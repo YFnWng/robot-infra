@@ -14,11 +14,41 @@ def compute_profile():
     return run_in_venv("runtime_supervision.compute_profile")
 
 
+def compare_compute():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.compare_compute")
+
+
+def replay_takeup_startup():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.replay_takeup_startup")
+
+
+def qualify_live_compute():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.qualify_live_compute")
+
+
+def qualify_recovery():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.qualify_recovery")
+
+
 def benchmark_accelerator():
     """Explicit offline accelerator qualification in the model environment."""
     from catheter_control.bootstrap import run_in_venv
 
     return run_in_venv("runtime_supervision.benchmark_accelerator")
+
+
+def engagement_g4():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.engagement_g4")
+
+
+def engagement_shadow():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.engagement_shadow")
 
 
 def runtime_identity():

@@ -13,3 +13,6 @@ float64 nominal_speed_m_s
 bool final_hold
 bool progress_paused
 float64 expiry_s
+bool x_only
+# Hold the supplied Z while tracking X; ignore Y.
+bool xz_only

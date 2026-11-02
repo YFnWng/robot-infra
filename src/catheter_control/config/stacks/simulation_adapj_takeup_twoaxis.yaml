@@ -1,0 +1,12 @@
+schema_version: 1
+name: simulation.adapj.takeup.twoaxis
+node_name: sim_catheter_mppi
+description: Measured-tip AdapJ with shared takeup transactions and frozen takeup updates.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/adapj_with_takeup.yaml
+  platform: platform/simulation_adapj_twoaxis.yaml
+  performance: performance/adapj_cpu.yaml
+  experiment: experiments/sparse_points/adapj_takeup_twoaxis_sim.yaml
+  visualization: rviz/simulation.rviz

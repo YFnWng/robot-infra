@@ -59,6 +59,24 @@ operation, first follow
 the passing JSON report with the registration session. An HD1080 registration
 is intentionally rejected when the cameras open at HD720.
 
+Marker processing is frame-driven: capture workers signal a ROS guard
+condition after publishing their latest owned image. The executor runs the
+existing pairing/detection callback; camera threads never run vision or ROS
+publication. `process_rate_hz` now sets the fallback polling/preview-pump rate,
+not a hard cap on frame-driven processing. Effective work is bounded by camera
+cadence and each frame sequence is consumed at most once. Pairing, quality
+gates, acquisition timestamps and coordinated SVO recording remain unchanged.
+
+Per-rig marker diagnostics expose `image_to_grab_return_ms`,
+`image_to_retrieval_complete_ms` (SDK IMAGE timestamp versus host wall clock),
+and `ready_to_pair_selection_ms` (monotonic clock). Negative source ages are
+preserved to reveal clock disagreement; unavailable stages report `unknown`.
+Do not use the older `frame_age_ms` as acquisition latency: it starts when the
+ROS processing callback first notices the frame. Deploy the updated
+`shape_tracking.multi_camera` and `zed_capture` in the actual camera interpreter
+along with the rebuilt `perception` package; a ROS build alone does not update
+a separately installed shape-tracking wheel.
+
 For initial timing and robustness qualification, use one physical ZED:
 
 ```bash

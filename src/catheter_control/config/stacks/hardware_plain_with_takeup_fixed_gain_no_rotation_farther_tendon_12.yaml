@@ -1,0 +1,12 @@
+schema_version: 1
+name: hardware.plain_with_takeup_fixed_gain.no_rotation.farther_tendon_12
+node_name: catheter_mppi
+description: Diagnostic plain MPPI with take-up compensation and fixed nominal gain.
+layers:
+  controller:
+    - controller/base.yaml
+    - controller/modes/plain_with_takeup_fixed_gain.yaml
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512.yaml
+  experiment: experiments/sparse_points/farther_tendon_12_plain_with_takeup_fixed_gain.yaml
+compatibility_aliases: []

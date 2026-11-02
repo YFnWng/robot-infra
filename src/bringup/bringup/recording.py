@@ -1,7 +1,7 @@
 """Canonical topics for hardware controller recording."""
 
 RECORD_TOPICS = [
-    "/teleop/control", "/teleop/event", "/manager/control", "/manager/event",
+    "/teleop/control", "/teleop/position_control", "/teleop/event", "/manager/control", "/manager/event",
     "/manager/safety_status", "/manager/state", "/device/state", "/device/event",
     "/device/command_tx", "/device/transport_status", "/shape_tracking/markers",
     "/shape_tracking/marker_status", "/collection/events",
@@ -9,6 +9,7 @@ RECORD_TOPICS = [
     "/catheter_mppi/reference_path", "/catheter_mppi/path_reference_point",
     "/catheter_mppi/path_tracking_trace", "/catheter_mppi/planned_control",
     "/catheter_mppi/predicted_tip", "/catheter_mppi/response_trace",
+    "/catheter_mppi/aligned_response_trace",
     "/catheter_mppi/estimator_trace", "/catheter_mppi/control_cycle_timing",
     "/catheter_mppi/status", "/catheter_mppi/shadow_request",
     "/catheter_mppi/shadow_decision", "/catheter_mppi/shadow_timing",

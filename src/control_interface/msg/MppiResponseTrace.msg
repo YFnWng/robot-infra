@@ -1,5 +1,6 @@
 # One causal comparison between the first executable MPPI action and the
-# first accepted camera observation at or after that action's prediction time.
+# camera positions interpolated at the estimator root and forecast endpoint.
+# Invalid rows are diagnostic only; raw fallback values may be retained.
 # Length units are metres unless the field name explicitly ends in _mm.
 
 std_msgs/Header header

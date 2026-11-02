@@ -1,4 +1,4 @@
-"""Bounded non-actuating O2 replay: evolving CPU64 snapshots and paced GPU32 MPPI.
+"""Bounded non-actuating O2 replay: evolving estimator snapshots and paced GPU32 MPPI.
 
 Recorded receipt-time pacing is not a ROS executor or closed-loop plant replay.
 Recorded gain posteriors are workload inputs, not re-estimated online beliefs.
@@ -81,7 +81,12 @@ def run_case(bundle, planner_bundle, contract, config, events, targets, start, e
     def solve(snapshot):
         root, receipt, pos, goal, transmission, tip = snapshot
         started = time.perf_counter()
-        root = root.clone_to(planner_bundle.runtime.device, dtype=planner_bundle.runtime.dtype)
+        # Same-device snapshots also work with the historical runtime, which
+        # predates clone_to. Never silently substitute a mixed-device transfer.
+        if runtime.device == planner_bundle.runtime.device and runtime.dtype == planner_bundle.runtime.dtype:
+            root = root.clone()
+        else:
+            root = root.clone_to(planner_bundle.runtime.device, dtype=planner_bundle.runtime.dtype)
         transfer_ms = 1000*(time.perf_counter()-started)
         plan = planner.plan(root, pos, goal, transmission_state=transmission,
                             observed_tip_base_m=tip, deadline_started_s=started)
@@ -193,6 +198,8 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--start-offset-s", type=float, default=40.)
     parser.add_argument("--duration-s", type=float, default=10.)
+    parser.add_argument("--estimator-device", choices=("cpu", "cuda:0"), default="cpu")
+    parser.add_argument("--estimator-dtype", choices=("float32", "float64"), default="float64")
     args = parser.parse_args(argv)
     if not np.isfinite([args.start_offset_s, args.duration_s]).all() or args.start_offset_s < 0 or not 0 < args.duration_s <= 30:
         parser.error("finite nonnegative offset and duration in (0,30] required")
@@ -223,21 +230,24 @@ def main(argv=None):
         raise ValueError("recorded velocity cap exceeds hardware limits")
     contract = replace(contract, velocity_max=upper, velocity_min=np.minimum(contract.velocity_min, upper))
     cases = {}
-    for name, concurrent in (("cpu64_reference", False), ("cpu64_gpu32_paced", True)):
-        estimator, planner = load_runtime_pair(args.model_manifest, estimator_device="cpu",
-                                              planner_device="cuda:0", estimator_dtype="float64",
+    reference_name = "cpu64_reference" if args.estimator_device == "cpu" and args.estimator_dtype == "float64" else "estimator_reference"
+    paced_name = "cpu64_gpu32_paced" if reference_name == "cpu64_reference" else "estimator_gpu32_paced"
+    for name, concurrent in ((reference_name, False), (paced_name, True)):
+        estimator, planner = load_runtime_pair(args.model_manifest, estimator_device=args.estimator_device,
+                                              planner_device="cuda:0", estimator_dtype=args.estimator_dtype,
                                               options={"marker_estimator": "ukf", "adaptation_enabled": False})
         cases[name] = run_case(estimator, planner, contract, config, events, targets, start, end,
                               rate, concurrent)
         print("completed "+name, flush=True)
-    mismatches = differences(cases["cpu64_reference"]["final_state"], cases["cpu64_gpu32_paced"]["final_state"])
+    mismatches = differences(cases[reference_name]["final_state"], cases[paced_name]["final_state"])
     decisions = lambda case: [(row["source_ns"], row["accepted"], row["reason"], row["observable_rank"])
                              for row in case["marker_updates"]]
-    paced = cases["cpu64_gpu32_paced"]
-    decisions_equal = decisions(cases["cpu64_reference"]) == decisions(paced)
+    paced = cases[paced_name]
+    decisions_equal = decisions(cases[reference_name]) == decisions(paced)
     report = {"scope": __doc__, "session": str(args.session),
               "window": {"start_ns": start, "end_ns": end},
               "manifest_sha256": estimator.identity.manifest_sha256,
+              "estimator_device": args.estimator_device, "estimator_dtype": args.estimator_dtype,
               "config": asdict(config), "rate_hz": parameters["plan_rate_hz"], "cases": cases,
               "state_differences": mismatches,
               "marker_decisions_equal": decisions_equal,

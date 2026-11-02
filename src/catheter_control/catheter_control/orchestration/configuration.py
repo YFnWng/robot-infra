@@ -3,7 +3,23 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+import numpy as np
 import yaml
+
+
+def validate_experimental_composition(runtime, planner, arbiter, *, isolated,
+                                      planner_device, marker_estimator,
+                                      gain_enabled, scheduler_enabled):
+    """Validate supported experimental features, not task/startup policy."""
+    config = planner.config
+    if (not isolated or planner_device.type != 'cuda' or runtime.device.type != 'cpu'
+            or marker_estimator != 'ukf' or gain_enabled or scheduler_enabled
+            or config.engaged_gain_scenarios or config.transmission_aware_rollout
+            or planner.contract.velocity_max[1] != 0
+            or runtime.proximal is None or runtime.proximal.adaptation_enabled
+            or np.any(arbiter.compensator.takeup_velocity > np.array([1., 10., .5]))):
+        raise ValueError('experimental runtime requires isolated CUDA / CPU UKF, '
+                         'fixed profile/J, slow takeup, no rotation/gain scenarios/scheduler')
 
 
 SCHEMA_VERSION = 1
@@ -15,6 +31,12 @@ ALLOWED_STACK_KEYS = {
 }
 FORBIDDEN_PARAMETERS = {"command_output_enabled"}
 ACTIVE_CONTROLLER_PARAMETERS = frozenset({
+    "mppi_execution_mode",
+    "synchronized_sheath_rotation",
+    "control_method", "adapj_initialization_dir", "adapj_reference_step_mm",
+    "engagement_control_enabled",
+    "planner_process_enabled",
+    "task_gc_enabled", "task_gc_maximum_s", "task_gc_growth_mb",
     "estimator_device",
     "estimator_dtype",
     "adaptation_enabled",
@@ -22,9 +44,13 @@ ACTIVE_CONTROLLER_PARAMETERS = frozenset({
     "backlash_width_positive_rad",
     "backlash_width_negative_rad",
     "backlash_takeup_velocity",
+    "backlash_tendon_takeup_joint_range_enabled",
     "backlash_engagement_confirmation_observations",
     "backlash_provisional_rejection_observations",
+    "backlash_response_window_max_s",
     "backlash_minimum_distal_bending_increment",
+    "backlash_minimum_distal_marker_deformation_mm",
+    "backlash_distal_confirmation_release_ratio",
     "engaged_gain_minimum",
     "engaged_gain_maximum",
     "engaged_gain_prior_mean",
@@ -48,6 +74,7 @@ ACTIVE_CONTROLLER_PARAMETERS = frozenset({
     "rollout_step_s",
     "mppi_point_rollout_step_s",
     "mppi_point_rollout_coarse_steps",
+    "mppi_path_rollout_coarse_steps",
     "mppi_point_prediction_tail_steps",
     "mppi_point_prediction_tail_step_s",
     "mppi_engaged_gain_risk_beta",
@@ -82,6 +109,7 @@ ACTIVE_CONTROLLER_PARAMETERS = frozenset({
     "controller_velocity_max",
     "device",
     "samples",
+    "mppi_temperature",
     "planning_deadline_s",
     "estimator_catchup_timeout_s",
     "plan_rate_hz",

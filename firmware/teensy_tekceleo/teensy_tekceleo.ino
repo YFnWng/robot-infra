@@ -2,7 +2,9 @@
 #include <Encoder.h>
 #include "coordinated_start.h"
 #include "driver_ack.h"
+#include "native_position_command.h"
 #include "driver_ack_retry.h"
+#include "driver_evidence.h"
 #include "encoder_integrity_guard.h"
 #include "encoder_recovery_config.h"
 #include "motion_watchdog.h"
@@ -10,6 +12,31 @@
 #include "position_move_tracker.h"
 #include "stall_detector.h"
 #include "stall_retry.h"
+#ifndef TKCTL_STREAMED_POSITION_ENABLED
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+#define TKCTL_STREAMED_POSITION_ENABLED 0
+#else
+#define TKCTL_STREAMED_POSITION_ENABLED 1
+#endif
+#endif
+#ifndef TKCTL_NATIVE_LIVE_PROBE_ENABLED
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+#define TKCTL_NATIVE_LIVE_PROBE_ENABLED 0
+#else
+#define TKCTL_NATIVE_LIVE_PROBE_ENABLED 1
+#endif
+#endif
+DriverEvidence::Buffer driverEvidence;
+#if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+#error "Streamed position control is forbidden in the incident recovery image"
+#endif
+#if TKCTL_STREAMED_POSITION_ENABLED
+#include "streamed_position_session.h"
+#endif
+// Arduino inserts generated prototypes before the first function definition.
+// Keep all conditional types/includes above that point and declare this helper
+// explicitly; its body belongs with the UART implementation below.
+static void captureDriverEvidence(uint8_t axis, uint8_t phase, const void* bytes, size_t size);
 
 // Teensy 4.0 pin functionalities
 // Serial RX: 0, 7, 15, 16, 21, 25, 28
@@ -70,6 +97,10 @@ constexpr uint8_t SET_VEL = 'F';
 constexpr uint8_t DEBUG = 'D';
 constexpr uint8_t DRIVER_DIAGNOSTIC = 'H';
 constexpr uint8_t CONNECT = 'C';
+constexpr uint8_t STREAM_SESSION = 'J';
+constexpr uint8_t NATIVE_LIVE_UPDATE = 'X';
+constexpr uint8_t STREAM_POSITION = 'Y';
+constexpr uint8_t STREAM_STATUS = 'U';
 constexpr uint8_t CALIBRATION = 'K';
 constexpr uint8_t LIMIT = 'L';
 constexpr uint8_t STALL = 'T';
@@ -158,6 +189,35 @@ StallDetector motionMonitors[numHWSerials];
 StallRetryBudget stallRetryBudgets[numHWSerials];
 uint32_t stallRetryBlockedUntilMs[numHWSerials] = {0};
 PositionMoveTracker positionMoveTracker;
+#if TKCTL_STREAMED_POSITION_ENABLED
+static StreamedPosition::Executor::Config streamConfig() {
+  StreamedPosition::Executor::Config config;
+  config.native_position = true;
+  config.direction_settle_us = 100000; // qualified stop-confirm-replace dwell
+  for (uint8_t a = 0; a < numHWSerials; ++a) {
+    config.lower_counts[a] = INT32_MIN;
+    config.upper_counts[a] = INT32_MAX;
+    config.maximum_step_counts[a] = 8334; // 250 RPM * 250 ms / encoder resolution
+    config.tolerance_counts[a] = 67; // existing three motor-degree endpoint tolerance
+    config.minimum_rpm[a] = 1;
+    config.maximum_rpm[a] = maxRPM;
+  }
+  config.lower_counts[2] = static_cast<int32_t>(catheterBendUB/(EncRes*jointPRate[2]));
+  config.upper_counts[2] = 0;
+  return config;
+}
+StreamedPosition::Session positionStream(streamConfig());
+bool streamActive = false;
+bool liveProbeActive = false;
+bool liveProbeEligible = false;
+int32_t liveProbeAnchor[6] = {};
+uint32_t streamStationarySinceMs = 0;
+int32_t streamStationaryAnchor[numHWSerials] = {};
+uint32_t lastStreamReportMs = 0;
+uint8_t lastStreamStatus = 255;
+uint32_t lastStreamCommand = 0;
+void reportPositionStream(uint8_t status, uint32_t command_id, uint8_t flags);
+#endif
 uint16_t motionFaultSequence = 0;
 bool encoderIntegrityLatched = false;
 uint32_t lastEncoderReadMs = 0;
@@ -178,10 +238,18 @@ constexpr uint32_t FIRMWARE_STATUS_PERIOD_MS = 500;
 constexpr uint8_t FIRMWARE_STATUS_SCHEMA = 1;
 #if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
 constexpr char FIRMWARE_BUILD_ID[] =
-    "tkctl:recovery-exact-frame-v1|" __DATE__ "T" __TIME__;
+    TKCTL_ENCODER_RECOVERY_IDENTITY __DATE__ "T" __TIME__;
 #else
 constexpr char FIRMWARE_BUILD_ID[] =
-    "tkctl:boot-v1|" __DATE__ "T" __TIME__;
+    "tkctl:boot-v1|"
+#if TKCTL_STREAMED_POSITION_ENABLED
+    "encoder_target_native_position_v1|"
+#if TKCTL_NATIVE_LIVE_PROBE_ENABLED
+    "native_live_update_bracket_probe_v1|"
+    "driver_native_evidence_v1|"
+#endif
+#endif
+    __DATE__ "T" __TIME__;
 #endif
 bool preconnectLedState = false;
 constexpr uint16_t DRIVER_DELAY_us = 1000;  // delay serial write for the next command to register
@@ -208,7 +276,8 @@ void handleDriverDiagnosticCommand();
 void reportFirmwareStatus();
 void enforceImmediateMotionStop();
 void enforceMotionWatchdog();
-void writeEncoderHardwareCounts(const int32_t counts[numHWSerials]);
+void writeEncoderHardwareCounts(const int32_t* counts);
+void readRawEncoderCounts(int32_t* counts);
 void updateEncoderDerivedState(bool resetVelocity);
 bool anyMotorAxisEnabled();
 
@@ -313,10 +382,30 @@ void loop() {
         updateMotionMonitors();
       }
       checkLimitSwitches();
+#if TKCTL_STREAMED_POSITION_ENABLED
+      updatePositionStream();
+#endif
       sendMotorCmds();
     }
 
     enforceMotionWatchdog();
+    // Drain evidence only while disabled, never add USB writes to moving UART
+    // transactions. Each frame is bounded; overflow is reported explicitly.
+    if (pc_connected && !anyMotorAxisEnabled() && !motionWatchdog.armed()) {
+      DriverEvidence::Record r;
+      for (uint8_t n=0; n<4 && driverEvidence.pop(r); ++n) {
+        uint8_t frame[41]; uint8_t* p=frame;
+        *p++='W'; *p++=1;
+        const uint32_t integers[3]={r.sequence, r.time_us, r.dropped};
+        for (uint8_t i=0;i<3;++i) {
+          const uint32_t v=integers[i]; for (uint8_t j=0;j<4;++j) *p++=(v>>(8*j))&0xff;
+        }
+        *p++=r.axis; *p++=r.phase; *p++=r.length;
+        memcpy(p,r.bytes,r.length); p+=r.length;
+        Serial.write(&PCStartMarker,1); Serial.write(static_cast<uint8_t>(p-frame));
+        Serial.write(frame,p-frame); Serial.write(&PCEndMarker,1);
+      }
+    }
 }
 
 void recvHWSerials() {
@@ -340,6 +429,7 @@ void recvHWSerials() {
               else {
                   // receivedHWBytes[i][ndx[i]] = '\0'; // terminate the string
                   HWBytes_len[i] = hwRecvIndex[i];
+                  captureDriverEvidence(i,1,receivedHWBytes[i],HWBytes_len[i]);
                   hwRecvInProgress[i] = false;
                   hwRecvIndex[i] = 0;
                   newHWMsg[i] = true;
@@ -442,7 +532,7 @@ void recvPCSerial() {
 // }
 
 static inline bool hasUUID(uint8_t cmd) {
-  return (cmd != VEL && cmd != POS && cmd != CONNECT && cmd != DEBUG);
+  return (cmd != VEL && cmd != POS && cmd != STREAM_POSITION && cmd != NATIVE_LIVE_UPDATE && cmd != CONNECT && cmd != DEBUG);
 }
 
 // bool registerPendingAck(uint8_t prefix, const uint8_t* uuid) {
@@ -506,7 +596,117 @@ void procPCBytes() {
 
       switch (cmd) {
 
+        case STREAM_SESSION: {
+#if TKCTL_STREAMED_POSITION_ENABLED
+          bool stopped = pc_connected && !encoderIntegrityLatched &&
+              !motionWatchdog.armed() && !positionMoveTracker.running() &&
+              millis()-streamStationarySinceMs >= 500 &&
+              millis()-lastEncoderReadMs <= 30 && PCBytes_len == 1+REQ_ID_LEN+4;
+          for (uint8_t a = 0; a < numHWSerials; ++a)
+            stopped = stopped && !motorEnabled[a] && !motionMonitors[a].latched();
+          const uint32_t nonce = PCBytes_len == 1+REQ_ID_LEN+4
+              ? StreamedPosition::read32(receivedPCBytes+1+REQ_ID_LEN) : 0;
+          const uint32_t session = nonce != 0 ? positionStream.open(stopped, nonce) : 0;
+          if (session == 0) { sendAckIfPending("ERR_STREAM_NOT_STATIONARY_READY"); break; }
+          streamActive = false;
+          liveProbeActive = false;
+          liveProbeEligible = false;
+          char response[48];
+          snprintf(response, sizeof(response), "STREAM_SESSION:%lu", static_cast<unsigned long>(session));
+          sendAckIfPending(response);
+#else
+          sendAckIfPending("ERR_STREAM_DISABLED");
+#endif
+          break;
+        }
+        case STREAM_POSITION: {
+#if TKCTL_STREAMED_POSITION_ENABLED
+          StreamedPosition::Envelope envelope;
+          if (!StreamedPosition::decodeEnvelope(receivedPCBytes+1, PCBytes_len-1, envelope)) {
+            enforceImmediateMotionStop(); break;
+          }
+          if (envelope.session_id != positionStream.id()) break;
+          if (liveProbeActive && envelope.command.id != lastStreamCommand) {
+            enforceImmediateMotionStop(); break;
+          }
+          uint8_t allowed = pc_connected && !encoderIntegrityLatched ? 0x3f : 0;
+          for (uint8_t a = 0; a < numHWSerials; ++a) {
+            targetPos[a] = envelope.command.target_counts[a]*EncRes*jointPRate[a];
+            if (!isPosCmdValid(a) || motionMonitors[a].latched()) allowed &= ~(1U << a);
+          }
+          StreamedPosition::Executor::Admission admission;
+          if (!positionStream.submit(envelope, micros(), EncCounts,
+                  millis()-lastEncoderReadMs <= 30, allowed, admission)) break;
+          if (admission == StreamedPosition::Executor::Admission::ACCEPTED) {
+            memcpy(liveProbeAnchor, EncCounts, sizeof(liveProbeAnchor));
+            liveProbeEligible = envelope.command.active_mask == 1 && envelope.command.speed_rpm[0] == 36 &&
+                static_cast<int64_t>(envelope.command.target_counts[0])-EncCounts[0] == 400;
+            if (streamActive && (lastStreamStatus == 1 || lastStreamStatus == 11) && lastStreamCommand != 0)
+              reportPositionStream(10, lastStreamCommand, 0);
+            if (positionMoveTracker.running()) cancelPositionMove(true);
+            newJointPosCmd = false;
+            positionCorrectionMask = 0;
+            requestedPositionValid = false;
+            setPositionMonitorCommands(0x3f); // retire any prior velocity expectation
+            streamActive = true;
+            motionWatchdogExpiredLatched = false;
+            motionWatchdog.refresh(millis());
+            reportPositionStream(11, envelope.command.id, 0);
+          } else if (admission == StreamedPosition::Executor::Admission::HEARTBEAT) {
+            if (streamActive && motionWatchdog.armed()) motionWatchdog.refresh(millis());
+          } else if (admission != StreamedPosition::Executor::Admission::STALE_ID &&
+                     admission != StreamedPosition::Executor::Admission::REJECTED_REPLAY) {
+            enforceImmediateMotionStop();
+          }
+#endif
+          break;
+        }
+
+        case NATIVE_LIVE_UPDATE: {
+#if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_NATIVE_LIVE_PROBE_ENABLED
+          bool valid = PCBytes_len == 11 && streamActive && liveProbeEligible && !liveProbeActive &&
+              pc_connected && !encoderIntegrityLatched && millis()-lastEncoderReadMs <= 30 &&
+              motionWatchdog.armed() && !positionStream.expired(micros()) && motorEnabled[0] &&
+              currentDir[0] == '1' && currentRPM[0] == 36;
+          for (uint8_t a=0; a<numHWSerials; ++a)
+            valid = valid && !motionMonitors[a].latched() && (a == 0 || !motorEnabled[a]);
+          const auto limits = streamConfig();
+          valid = valid && static_cast<int64_t>(liveProbeAnchor[0])+667 <= limits.upper_counts[0] &&
+              static_cast<int64_t>(liveProbeAnchor[0])-2 >= limits.lower_counts[0];
+          if (!valid || StreamedPosition::read32(receivedPCBytes+1) != positionStream.id() ||
+              StreamedPosition::read32(receivedPCBytes+5) != lastStreamCommand ||
+              ((receivedPCBytes[9] != 45 && receivedPCBytes[9] != 0) || receivedPCBytes[10] != 0) ||
+              !positionStream.diagnosticLiveUpdate(lastStreamCommand)) {
+            enforceImmediateMotionStop(); break;
+          }
+          liveProbeActive = true;
+          liveProbeEligible = false;
+          const uint8_t angle = receivedPCBytes[9];
+          // Matched control enters identical lease supervision but sends no A.
+          if (angle == 0) {
+            if (!readEncoders() || !streamActive) { enforceImmediateMotionStop(); break; }
+            const int64_t travel = static_cast<int64_t>(EncCounts[0])-liveProbeAnchor[0];
+            if (travel < 5 || travel >= 300) { enforceImmediateMotionStop(); break; }
+            reportPositionStream(14, lastStreamCommand, 0);
+            reportPositionStream(15, lastStreamCommand, 0);
+          }
+          // Exactly one A4.5; no O0, S, C, L or O1 and no deadline refresh.
+          if ((angle == 0 || configureNativeMotorPosition(0, 45)) && streamActive)
+            reportPositionStream(13, lastStreamCommand, angle);
+          else enforceImmediateMotionStop();
+#else
+          enforceImmediateMotionStop();
+#endif
+          break;
+        }
+
         case VEL: {// 'V'
+#if TKCTL_STREAMED_POSITION_ENABLED
+          positionStream.cancel();
+          streamActive = false;
+          liveProbeActive = false;
+          liveProbeEligible = false;
+#endif
           // digitalWrite(LED_BUILTIN, HIGH);
           if (PCBytes_len != 1 + 6 * sizeof(float)) break;
           cancelPositionMove(true);
@@ -569,6 +769,12 @@ void procPCBytes() {
         }
 
         case POS: {// 'P'
+#if TKCTL_STREAMED_POSITION_ENABLED
+          positionStream.cancel();
+          streamActive = false;
+          liveProbeActive = false;
+          liveProbeEligible = false;
+#endif
           // Atomic position transaction: six absolute logical joint targets
           // followed by six physical motor-axis speed magnitudes.
           if (PCBytes_len != 1 + 12 * sizeof(float)) {
@@ -594,6 +800,15 @@ void procPCBytes() {
           targetPos[5] += targetPos[4]; // decouple rot and bend for sheath
           float positionSpeed[numHWSerials];
           memcpy(positionSpeed, receivedPCBytes + 1 + 24, 24);
+#if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+          // This incident verifies chassis insertion only. Never enable another
+          // shaft or let an ordinary multi-axis home profile execute here.
+          if (!EncoderRecoveryConfig::validPositionSpeeds(positionSpeed)) {
+            reportPositionStatus(POSITION_REJECTED, 0x3F);
+            enforceImmediateMotionStop();
+            break;
+          }
+#endif
 
           bool finitePosition = true;
           for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
@@ -786,8 +1001,11 @@ void procPCBytes() {
           const uint8_t* payload = receivedPCBytes + 2 + 0;
           size_t payload_len = PCBytes_len - 2 - 0;
           HWSerials[axis]->write(&startMarker, 1);
+          captureDriverEvidence(axis,0,&startMarker,1);
           HWSerials[axis]->write(payload, payload_len);
+          captureDriverEvidence(axis,0,payload,payload_len);
           HWSerials[axis]->write(&endMarker, 1);
+          captureDriverEvidence(axis,0,&endMarker,1);
           
           break;
         }
@@ -926,7 +1144,7 @@ void procHWBytes() {
   // }
 }
 
-void writeEncoderHardwareCounts(const int32_t counts[numHWSerials]) {
+void writeEncoderHardwareCounts(const int32_t* counts) {
   Enc0.write(counts[0]);
   Enc1.write(static_cast<uint32_t>(counts[1]));
   Enc2.write(static_cast<uint32_t>(counts[2]));
@@ -955,7 +1173,7 @@ void updateEncoderDerivedState(bool resetVelocity) {
   currentSheathBendPos = currentPos[5] - currentPos[4];
 }
 
-void readRawEncoderCounts(int32_t counts[numHWSerials]) {
+void readRawEncoderCounts(int32_t* counts) {
   counts[0] = Enc0.read();
   counts[1] = Enc1.read();
   counts[2] = Enc2.read();
@@ -1372,6 +1590,8 @@ void reportFaultStatusEvents() {
 void confirmDriverCommunicationFault(
     uint8_t axis, uint8_t stage,
     const DriverAck::Result* diagnostics) {
+  if (diagnostics != nullptr && diagnostics->failure == DriverAck::AUTHORITY_CANCELLED)
+    return; // The authority guard already stopped motors; no driver fault/retry.
   if (motionMonitors[axis].latched()) return;
   cancelPositionMove(true);
   StallDetector::Event event;
@@ -1441,23 +1661,46 @@ void updateMotionMonitors() {
   }
 }
 
+static void captureDriverEvidence(uint8_t axis, uint8_t phase, const void* bytes, size_t size) {
+#if TKCTL_NATIVE_LIVE_PROBE_ENABLED
+  driverEvidence.capture(micros(), axis, phase, bytes, size);
+#else
+  (void)axis; (void)phase; (void)bytes; (void)size;
+#endif
+}
+
 static inline void writeMotorCommand(
     uint8_t axis, const char* command, size_t length) {
-  HWSerials[axis]->write(command, length);
+  const uint32_t started=micros();
+  const size_t written=HWSerials[axis]->write(command, length);
+#if TKCTL_NATIVE_LIVE_PROBE_ENABLED
+  driverEvidence.capture(started, axis, 0, command, written);
+#else
+  (void)started; (void)written;
+#endif
   HWSerials[axis]->flush();
   delayMicroseconds(DRIVER_DELAY_us);
 }
 
 static inline void writeMotorCommandNoDelay(
     uint8_t axis, const char* command, size_t length) {
-  HWSerials[axis]->write(command, length);
+  const uint32_t started=micros();
+  const size_t written=HWSerials[axis]->write(command, length);
+#if TKCTL_NATIVE_LIVE_PROBE_ENABLED
+  driverEvidence.capture(started, axis, 0, command, written);
+#else
+  (void)started; (void)written;
+#endif
   HWSerials[axis]->flush();
 }
 
 static inline void drainMotorResponses(uint8_t axis) {
+  uint8_t discarded[24]; uint8_t size=0;
   while (HWSerials[axis]->available() > 0) {
-    HWSerials[axis]->read();
+    discarded[size++]=HWSerials[axis]->read();
+    if (size==sizeof(discarded)) { captureDriverEvidence(axis,2,discarded,size); size=0; }
   }
+  captureDriverEvidence(axis,2,discarded,size);
   hwRecvInProgress[axis] = false;
   hwRecvIndex[axis] = 0;
   HWBytes_len[axis] = 0;
@@ -1473,6 +1716,7 @@ static void recoverMotorUart(uint8_t axis) {
   HWSerials[axis]->begin(115200);
   delay(MOTOR_UART_RECOVERY_MS);
   HWSerials[axis]->write(&endMarker, 1);
+  captureDriverEvidence(axis,0,&endMarker,1);
   HWSerials[axis]->flush();
   delayMicroseconds(DRIVER_DELAY_us);
   drainMotorResponses(axis);
@@ -1488,9 +1732,16 @@ static DriverAck::Result waitForMotorAck(uint8_t axis) {
   bool inFrame = false;
   bool overflow = false;
   while (millis() - start < MOTOR_ACK_TIMEOUT_MS) {
+#if TKCTL_STREAMED_POSITION_ENABLED
+    if (streamActive && positionStream.expired(micros())) {
+      enforceMotionWatchdog();
+      result.failure = DriverAck::AUTHORITY_CANCELLED;
+      return result;
+    }
+#endif
     if (motionWatchdog.expired(millis())) {
-      enforceImmediateMotionStop();
-      result.failure = DriverAck::TIMEOUT;
+      enforceMotionWatchdog(); // preserve watchdog-stop reporting/latching
+      result.failure = DriverAck::AUTHORITY_CANCELLED;
       return result;
     }
     while (HWSerials[axis]->available() > 0) {
@@ -1502,8 +1753,9 @@ static DriverAck::Result waitForMotorAck(uint8_t axis) {
           result.response_length = 1;
         }
       } else if (value == endMarker) {
+        captureDriverEvidence(axis,1,result.response,result.response_length);
         if (requiresMotionAuthority && !motionWatchdog.armed()) {
-          result.failure = DriverAck::TIMEOUT;
+          result.failure = DriverAck::AUTHORITY_CANCELLED;
           return result;
         }
         result.failure = overflow
@@ -1520,6 +1772,7 @@ static DriverAck::Result waitForMotorAck(uint8_t axis) {
     }
   }
   result.failure = inFrame ? DriverAck::PARTIAL_FRAME : DriverAck::TIMEOUT;
+  captureDriverEvidence(axis,3,result.response,result.response_length);
   return result;
 }
 
@@ -1529,18 +1782,51 @@ static bool writeMotorCommandWithAck(
   DriverAck::Result best;
   DriverAck::Result current;
   uint8_t attempts = 0;
+  bool cancelled = false;
+  const bool liveAngle = axis == 0 && command[0] == '$' && command[1] == 'A' &&
+#if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_NATIVE_LIVE_PROBE_ENABLED
+      liveProbeActive;
+#else
+      false;
+#endif
   const bool requiresMotionAuthority = motionWatchdog.armed();
   const bool success = DriverAckRetry::run(
-      MOTOR_ACK_ATTEMPTS,
+      liveAngle ? 1 : MOTOR_ACK_ATTEMPTS,
       [&]() {
         if (requiresMotionAuthority && !motionWatchdog.armed()) {
-          current.failure = DriverAck::TIMEOUT;
+          current.failure = DriverAck::AUTHORITY_CANCELLED;
+          best = current;
+          cancelled = true;
           return false;
         }
         drainMotorResponses(axis);
+#if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_NATIVE_LIVE_PROBE_ENABLED
+        if (liveAngle) {
+          if (!readEncoders() || !streamActive || positionStream.expired(micros())) {
+            enforceImmediateMotionStop();
+            current.failure = DriverAck::AUTHORITY_CANCELLED;
+            best = current; cancelled = true; return false;
+          }
+          const int64_t travel = static_cast<int64_t>(EncCounts[0])-liveProbeAnchor[0];
+          if (travel < 5 || travel >= 300) {
+            enforceImmediateMotionStop(); current.failure = DriverAck::AUTHORITY_CANCELLED;
+            best = current; cancelled = true; return false;
+          }
+          reportPositionStream(14, lastStreamCommand, 45);
+        }
+#endif
         writeMotorCommand(axis, command, length);
         current = waitForMotorAck(axis);
-        if (current.success || current.response_length > 0 ||
+#if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_NATIVE_LIVE_PROBE_ENABLED
+        if (liveAngle && current.success) {
+          if (!readEncoders() || !streamActive) {
+            enforceImmediateMotionStop(); current.success = false;
+            current.failure = DriverAck::AUTHORITY_CANCELLED;
+          } else reportPositionStream(15, lastStreamCommand, 45);
+        }
+#endif
+        cancelled = current.failure == DriverAck::AUTHORITY_CANCELLED;
+        if (cancelled || current.success || current.response_length > 0 ||
             best.response_length == 0) {
           best = current;
         }
@@ -1557,7 +1843,7 @@ static bool writeMotorCommandWithAck(
           delay(MOTOR_ACK_RETRY_DELAY_MS);
         }
       },
-      &attempts);
+      &attempts, &cancelled);
   best.success = success;
   best.attempts = attempts;
   if (diagnostics != nullptr) {
@@ -1579,6 +1865,12 @@ static inline void stopMotorAxis(uint8_t axis, bool force) {
 }
 
 void enforceImmediateMotionStop() {
+#if TKCTL_STREAMED_POSITION_ENABLED
+  positionStream.cancel();
+  streamActive = false;
+  liveProbeActive = false;
+  liveProbeEligible = false;
+#endif
   // Put O0 on every independent driver UART before doing any potentially
   // blocking acknowledgement work. This is the firmware's final stop layer.
   for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
@@ -1606,6 +1898,13 @@ void enforceImmediateMotionStop() {
 }
 
 void enforceMotionWatchdog() {
+#if TKCTL_STREAMED_POSITION_ENABLED
+  if (streamActive && positionStream.expired(micros())) {
+    reportPositionStream(3, lastStreamCommand, 0);
+    enforceImmediateMotionStop();
+    return;
+  }
+#endif
   if (motionWatchdog.expired(millis())) {
     motionWatchdogExpiredLatched = true;
     enforceImmediateMotionStop();
@@ -1707,6 +2006,18 @@ static bool configureMotorPosition(uint8_t axis) {
   return true;
 }
 
+static bool configureNativeMotorPosition(uint8_t axis, uint32_t deci_degrees) {
+  const size_t length = NativePositionCommand::format(
+      sendingHWChars[axis], sizeof(sendingHWChars[axis]), deci_degrees);
+  if (!length) return false;
+  DriverAck::Result acknowledgement;
+  if (!writeMotorCommandWithAck(axis, sendingHWChars[axis], length, &acknowledgement)) {
+    confirmDriverCommunicationFault(axis, 'A', &acknowledgement);
+    return false;
+  }
+  return true;
+}
+
 static void stopMotorMask(uint8_t mask, bool force) {
   for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
     if ((mask & (1U << axis)) != 0) {
@@ -1740,7 +2051,11 @@ static bool coordinatedEnableMask(uint8_t mask) {
   // before waiting for acknowledgements. Healthy axes therefore start within
   // the short six-command transmit burst rather than one full ACK transaction
   // apart.
-  if (!motionWatchdog.armed() || motionWatchdog.expired(millis())) {
+  if (!motionWatchdog.armed() || motionWatchdog.expired(millis())
+#if TKCTL_STREAMED_POSITION_ENABLED
+      || (streamActive && positionStream.expired(micros()))
+#endif
+      ) {
     enforceMotionWatchdog();
     return false;
   }
@@ -1802,6 +2117,32 @@ static void sendDriverDiagnosticResult(
 }
 
 void handleDriverDiagnosticCommand() {
+#if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_NATIVE_LIVE_PROBE_ENABLED
+  if (PCBytes_len == 1+REQ_ID_LEN+2 && receivedPCBytes[1+REQ_ID_LEN]=='r' &&
+      receivedPCBytes[2+REQ_ID_LEN]=='0') {
+    bool stopped = pc_connected && !encoderIntegrityLatched && !motionWatchdog.armed() &&
+        !positionMoveTracker.running() && millis()-streamStationarySinceMs >= 500;
+    for (uint8_t a=0; a<numHWSerials; ++a) stopped=stopped && !motorEnabled[a] && !motionMonitors[a].latched();
+    if (!stopped || !readEncoders()) { sendAckIfPending("ERR_DRIVER_STATE_NOT_STOPPED"); return; }
+    char angle[25]={}, speed[25]={};
+    const uint32_t begin=micros();
+    if (!readNativeDriverLine("$DA\n", "Angle:", angle, sizeof(angle)) ||
+        !readNativeDriverLine("$DS\n", "speed:", speed, sizeof(speed))) {
+      sendAckIfPending("ERR_DRIVER_STATE_REPLY"); return;
+    }
+    const uint32_t end=micros();
+    if (!readEncoders() || anyMotorAxisEnabled() || motionWatchdog.armed()) {
+      sendAckIfPending("ERR_DRIVER_STATE_CHANGED"); return;
+    }
+    char response[224];
+    int used=snprintf(response,sizeof(response),"OK_DRIVER_STATE,V1,A=0,ENC=%ld,T0=%lu,T1=%lu,DA=",
+        static_cast<long>(EncCounts[0]),static_cast<unsigned long>(begin),static_cast<unsigned long>(end));
+    for (size_t i=0;i<strlen(angle);++i) used+=snprintf(response+used,sizeof(response)-used,"%02X",static_cast<uint8_t>(angle[i]));
+    used+=snprintf(response+used,sizeof(response)-used,",DS=");
+    for (size_t i=0;i<strlen(speed);++i) used+=snprintf(response+used,sizeof(response)-used,"%02X",static_cast<uint8_t>(speed[i]));
+    sendAckIfPending(response); return;
+  }
+#endif
   constexpr size_t kExpectedLength = 1 + REQ_ID_LEN + 1;
   if (PCBytes_len != kExpectedLength) {
     sendAckIfPending("ERR_AXIS_REQUIRED");
@@ -1831,6 +2172,24 @@ void handleDriverDiagnosticCommand() {
   }
   controlModeValid[axis] = true;
   sendDriverDiagnosticResult(axis, 'K', acknowledgement);
+}
+
+bool readNativeDriverLine(const char* query, const char* prefix, char* output, size_t capacity) {
+  drainMotorResponses(0);
+  writeMotorCommand(0, query, 4);
+  const uint32_t start=millis(); size_t size=0;
+  while (millis()-start < 50) {
+    if (anyMotorAxisEnabled() || motionWatchdog.armed()) return false;
+    if (!HWSerials[0]->available()) continue;
+    const char ch=HWSerials[0]->read();
+    if (ch=='\n') {
+      output[size]=0; captureDriverEvidence(0,1,output,size);
+      if (DriverEvidence::validReadback(output,prefix)) return true;
+      size=0; // Ignore bare ACK/other lines; no numeric payload is an ACK.
+    } else if (size+1 < capacity) output[size++]=ch;
+    else { captureDriverEvidence(0,3,output,size); return false; }
+  }
+  captureDriverEvidence(0,3,output,size); return false;
 }
 
 static void setStoppedMonitorCommands(uint8_t activeMask) {
@@ -2000,6 +2359,101 @@ void sendMotorCmds() {
     }
   }
 }
+
+#if TKCTL_STREAMED_POSITION_ENABLED
+void updatePositionStream() {
+  if (liveProbeActive) {
+    bool inside = static_cast<int64_t>(EncCounts[0])-liveProbeAnchor[0] >= -2 &&
+        static_cast<int64_t>(EncCounts[0])-liveProbeAnchor[0] <= 667;
+    for (uint8_t a=1; a<numHWSerials; ++a) {
+      const int64_t difference = static_cast<int64_t>(EncCounts[a])-liveProbeAnchor[a];
+      inside = inside && difference >= -2 && difference <= 2;
+    }
+    if (!inside) { enforceImmediateMotionStop(); return; }
+  }
+  const uint32_t now_ms = millis();
+  for (uint8_t a = 0; a < numHWSerials; ++a) {
+    const int64_t movement = static_cast<int64_t>(EncCounts[a])-streamStationaryAnchor[a];
+    if (movement >= 2 || movement <= -2) {
+      memcpy(streamStationaryAnchor, EncCounts, sizeof(streamStationaryAnchor));
+      streamStationarySinceMs = now_ms;
+      break;
+    }
+  }
+  int16_t applied[numHWSerials];
+  uint8_t allowed = pc_connected && !encoderIntegrityLatched ? 0x3f : 0;
+  for (uint8_t a = 0; a < numHWSerials; ++a) {
+    applied[a] = motorEnabled[a] ? static_cast<int16_t>(currentRPM[a])*(currentDir[a]=='1' ? 1 : -1) : 0;
+    if (motionMonitors[a].latched() || !isVelCmdValid(a)) allowed &= ~(1U << a);
+  }
+  const auto update = positionStream.update(micros(), EncCounts, applied,
+                                           now_ms-lastEncoderReadMs <= 30, allowed);
+  if (!streamActive) return;
+  for (uint8_t a = 0; a < numHWSerials; ++a) {
+    targetRPM[a] = static_cast<uint16_t>(abs(update.requested_rpm[a]));
+    targetDir[a] = update.requested_rpm[a] >= 0 ? '1' : '0';
+    targetVel[a] = update.requested_rpm[a]*jointVRate[a];
+  }
+  // Driver-native A owns endpoint motion. Never feed this stream through the
+  // velocity executor; Teensy only stops on deadline/fault or verified settle.
+  stopMotorMask(update.stop_mask, false);
+  if (update.status == StreamedPosition::Executor::Status::RUNNING && update.native_start_mask) {
+    const uint8_t mask = update.native_start_mask;
+    stopMotorMask(mask, true);
+    delay(MOTOR_DIRECTION_SETTLE_MS);
+    const bool success = CoordinatedStart::run(
+        mask, numHWSerials,
+        [&](uint8_t a) {
+          return initializeMotorDriver(a) && configureMotorDirection(a, true) &&
+                 configureMotorSpeed(a) && configureNativeMotorPosition(a, update.native_deci_degrees[a]);
+        },
+        [&](uint8_t enabled) { return coordinatedEnableMask(enabled); },
+        [&](uint8_t stopped) { stopMotorMask(stopped, true); });
+    // ACK waits can expire the immutable lease and cancel the stream. Do not
+    // overwrite that terminal status with this pre-start RUNNING snapshot.
+    if (!streamActive) return;
+    if (success) {
+      positionStream.nativeStarted(mask);
+      setPositionMonitorCommands(mask); // Native deceleration is not a velocity stall.
+      reportPositionStream(12, update.command_id, 0); // ACK-qualified native enable
+    }
+  }
+  newJointVelCmd = false;
+  newJointPosCmd = false;
+  if (update.status != StreamedPosition::Executor::Status::RUNNING)
+    motionWatchdog.disarm();
+  const uint8_t status = static_cast<uint8_t>(update.status);
+  if (status != lastStreamStatus || update.command_id != lastStreamCommand ||
+      now_ms-lastStreamReportMs >= 50) {
+    reportPositionStream(status, update.command_id, update.reversal_wait_mask | update.overshoot_mask);
+  }
+}
+
+void reportPositionStream(uint8_t status, uint32_t command_id, uint8_t flags) {
+    uint8_t* p = sendingPCBytes;
+    *p++ = STREAM_STATUS;
+    StreamedPosition::write32(p, positionStream.id()); p += 4;
+    StreamedPosition::write32(p, command_id); p += 4;
+    StreamedPosition::write32(p, micros()); p += 4;
+    StreamedPosition::write32(p, lastEncoderReadMs*1000U); p += 4;
+    *p++ = status;
+    *p++ = flags;
+    for (uint8_t a = 0; a < numHWSerials; ++a) {
+      uint32_t bits; memcpy(&bits, &EncCounts[a], sizeof(bits));
+      StreamedPosition::write32(p, bits); p += 4;
+    }
+    for (uint8_t a = 0; a < numHWSerials; ++a) {
+      const int16_t applied = motorEnabled[a] ? static_cast<int16_t>(currentRPM[a])*(currentDir[a]=='1' ? 1 : -1) : 0;
+      const uint16_t bits = static_cast<uint16_t>(applied);
+      *p++ = bits & 0xff; *p++ = bits >> 8;
+    }
+    Serial.write(&PCStartMarker, 1);
+    Serial.write(static_cast<uint8_t>(p-sendingPCBytes));
+    Serial.write(sendingPCBytes, p-sendingPCBytes);
+    Serial.write(&PCEndMarker, 1);
+    lastStreamStatus = status; lastStreamCommand = command_id; lastStreamReportMs = millis();
+}
+#endif
 
 static inline char* write_uint16(char *p, uint16_t v) {
     char tmp[5];

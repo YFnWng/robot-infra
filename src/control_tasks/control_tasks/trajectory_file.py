@@ -1,6 +1,8 @@
 """Load a tip trajectory from YAML and submit it to the ROS action server."""
 from __future__ import annotations
 
+from .task_outcomes import TaskFailure
+
 import argparse
 from dataclasses import dataclass
 import math
@@ -51,7 +53,8 @@ def _circle_waypoints(generator, current_tip_m):
             "current measured tip must contain three finite values")
     generator_type = generator.get("type")
     if generator_type not in (
-            "circle_xy_from_current_tip", "circle_yz_from_current_tip"):
+            "circle_xy_from_current_tip", "circle_yz_from_current_tip",
+            "circle_plane_from_current_tip"):
         raise ValueError(f"unsupported generator type: {generator_type}")
     count = int(generator.get("waypoint_count", 24))
     if count < 3 or count > 100:
@@ -61,7 +64,19 @@ def _circle_waypoints(generator, current_tip_m):
         raise ValueError("direction must be 'ccw' or 'cw'")
     sign = 1.0 if direction == "ccw" else -1.0
     close_circle = bool(generator.get("close_circle", True))
-    if generator_type == "circle_xy_from_current_tip":
+    if generator_type == "circle_plane_from_current_tip":
+        basis = np.asarray(generator.get("plane_basis"), dtype=np.float64)
+        if (basis.shape != (2, 3) or not np.all(np.isfinite(basis))
+                or not np.allclose(basis @ basis.T, np.eye(2), atol=1e-6)):
+            raise ValueError("plane_basis must contain two orthonormal XYZ vectors")
+        radius_m = 1e-3*_positive_float(generator, "radius_mm")
+        angles = sign*np.linspace(0.0, 2.0*math.pi, count,
+                                  endpoint=close_circle)
+        # Start on the circle at the measured tip; its centre lies along
+        # the positive bending basis, avoiding an initial reference jump.
+        waypoints = (tip + radius_m*(1.0-np.cos(angles))[:, None]*basis[0]
+                     + radius_m*np.sin(angles)[:, None]*basis[1])
+    elif generator_type == "circle_xy_from_current_tip":
         offset_mm = float(generator.get("radius_offset_mm", 3.0))
         if not math.isfinite(offset_mm):
             raise ValueError("radius_offset_mm must be finite")
@@ -290,8 +305,13 @@ def main(args=None):
                 result.message, result.reached_waypoints,
                 result.timed_out_waypoints, result.final_error_mm))
         if not result.success:
-            raise RuntimeError(
-                f"trajectory did not complete: {result.message}")
+            raise TaskFailure(
+                f"trajectory did not complete: {result.message}",
+                fault_reason=result.fault_reason,
+                fault_snapshot_json=result.fault_snapshot_json)
+    except TaskFailure as error:
+        node.get_logger().error(str(error))
+        return 2
     except KeyboardInterrupt:
         if goal_handle is not None:
             cancel = goal_handle.cancel_goal_async()
@@ -305,4 +325,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
