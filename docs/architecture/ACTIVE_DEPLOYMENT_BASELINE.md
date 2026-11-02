@@ -86,9 +86,9 @@ and `command_output_enabled` remains an explicit launch-only interlock. See
 
 ## Qualification evidence
 
-- [P5.6 cross-repository conformance](../../audits/ros-realtime/phase5-cross-repository-conformance-20261002.md)
-- [Clean-source cross-repository gate](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)
-- [Historical active runtime closure](ACTIVE_RUNTIME_CLOSURE_20260929.md)
+- [P5.6 cross-repository conformance](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/phase5-cross-repository-conformance-20261002.md)
+- [Clean-source cross-repository gate](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)
+- [Historical active runtime closure](../../../repository_archives/cleanup_20261102/files/robot-infra/docs/architecture/ACTIVE_RUNTIME_CLOSURE_20260929.md)
 - [Machine-readable historical session baseline](production_baselines/20260929_175554_grouped_no_rotation.json)
 - `cr_meta_lnn/artifacts/manifests/20260929_175554_grouped_no_rotation_v2.json`
 

@@ -113,12 +113,12 @@ full-load p99/p99.9 and maximum latencies on the generic and RT kernels.
 
 ## Artifact map
 
-- [findings.md](findings.md): prioritized defects, consequences, fixes, tests
-- [evidence.md](evidence.md): source and runtime evidence index
-- [workspace.md](workspace.md): scope and repository/process inventory
+- [findings.md](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/findings.md): prioritized defects, consequences, fixes, tests
+- [evidence.md](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/evidence.md): source and runtime evidence index
+- [workspace.md](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/workspace.md): scope and repository/process inventory
 - [architecture.yaml](architecture.yaml): machine-readable architecture
-- [control-sequence.md](control-sequence.md): causal sequence and timestamps
-- [runtime-snapshot.md](runtime-snapshot.md): host and ROS graph state
+- [control-sequence.md](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/control-sequence.md): causal sequence and timestamps
+- [runtime-snapshot.md](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/runtime-snapshot.md): host and ROS graph state
 - [timing-summary.csv](timing-summary.csv): configured budgets and unknowns
 - `ros-topology.svg`: ROS/interface graph
 - `execution-topology.svg`: executors, thread pools, and shared locks

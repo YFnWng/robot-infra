@@ -378,7 +378,7 @@ Python/C++ on identical recordings, and qualify timing. Python retains command
 authority until C++ shadow conformance passes and a separate authority change is
 explicitly reviewed. The implementation sequence and qualification gates are
 defined in the
-[Phase 4 C++ ROS shell plan](PHASE4_CPP_ROS_SHELL_PLAN.md).
+[Phase 4 C++ ROS shell plan](../../../repository_archives/cleanup_20261102/files/robot-infra/docs/architecture/PHASE4_CPP_ROS_SHELL_PLAN.md).
 
 Status: the non-commanding shell, versioned worker contract, Python reference
 adapter, opt-in launch surface, shared cross-language fixtures, and static audit
@@ -397,7 +397,7 @@ existing non-commanding shell is retained; deferred gates are not passed gates.
 Narrow and version the deployment API, add artifact manifests and hashes,
 package reusable code, and isolate legacy deployment/research pipelines. The
 staged implementation and acceptance gates are defined in the
-[Phase 5 model deployment stabilization plan](PHASE5_MODEL_DEPLOYMENT_STABILIZATION_PLAN.md).
+[Phase 5 model deployment stabilization plan](../../../repository_archives/cleanup_20261102/files/robot-infra/docs/architecture/PHASE5_MODEL_DEPLOYMENT_STABILIZATION_PLAN.md).
 
 Status: P5.0-P5.6 complete. API, manifest verification, clean wheel packaging,
 consumer migration, legacy isolation, and cross-repository conformance are
@@ -422,7 +422,7 @@ loader shims are removed, their sole remaining source caller is migrated, and
 tests enforce canonical imports. The Phase 5 tag preserves the retired files;
 the research archive branch and unrelated local research remain untouched.
 Supported aliases and reproduction paths remain where consumers still exist.
-See the [Phase 7 retirement ledger](PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md)
+See the [Phase 7 retirement ledger](../../../repository_archives/cleanup_20261102/files/robot-infra/docs/architecture/PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md)
 for the deliberately bounded scope and verification evidence.
 
 ## 11. Characterization and conformance gates
@@ -465,6 +465,243 @@ callback scheduling, QoS, ROS interface semantics, or manager/firmware safety.
 - [x] Commit untracked production files in logical repository-specific groups.
 - [x] Establish and tag the reproducible pre-cleanup baseline as
   `catheter-stack-pre-cleanup-20261001` (see the
-  [clean-source gate report](../../audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)).
+  [clean-source gate report](../../../repository_archives/cleanup_20261102/files/robot-infra/audits/ros-realtime/cross-repository-clean-source-gate-20261001.md)).
 - [x] Relocate qualified artifacts after checksum and consumer review; retain
   manifest-declared compatibility aliases.
+
+## Current research cleanup — 2026-11-01
+
+This phase supersedes no deployed baseline or earlier qualification. Start with
+the [short research status](../../audits/ros-realtime/GATE3_FILTER_STATUS.md).
+No numerical source,configuration,artifact,entry point or test was moved or
+deleted in the inventory/document-navigation step.
+
+### Inventory boundary
+
+Existing read-only `generate_repository_inventory.py`,1MiB hash limit:
+
+| Repository | HEAD at inventory | Tracked | Nonignored untracked | Modified tracked |
+| --- | --- | ---: | ---: | ---: |
+| `robot-infra` | `28ff41a8a0264a4bc005e48bb9d8e131a31c98fb` | 464 | 506 | 86 |
+| `cr_meta_lnn` | `99bbbf40cf39d0685f9d8b299e70225e267aa019` | 481 | 1768 | 14 |
+
+These describe dirty working trees,not reproducible clean release commits.
+The inventory precedes this new status page and documentation edits.
+
+Static local-import protection roots are deployed-model API/loaders,scalar
+native-memory replay/readout,and array candidate/retained-state/benchmark plus
+regression entry points. Including package initializers,the conservative
+closures contain36/121/162 Python modules respectively,including3/83/124
+untracked files. All are protected pending deeper review. Counts overlap.
+This scan includes inactive syntax branches;it does NOT establish actual live
+execution,dynamic imports,ROS/config/shell consumers or pickle compatibility.
+Modules outside these closures are unresolved,NOT retirement-approved.
+All3 selected deployment artifacts match manifest hashes and byte sizes.
+
+Recoverable pre-edit baseline saved under the external session root as
+`repository_cleanup_baseline_20261101.tar.xz` (6755808 bytes),SHA-256
+`ce345908428faf0261fede1caa75dfdf901bfe76dac9466a6508816be62fce5c`.
+It contains the complete inventory/summary,protected dependency graph and its
+scan script,and an inner `source_snapshot.tar.xz` with3181 nonignored
+source/config/document/test/other files. All3181 archive member paths match
+the selection;3176 available inventory content hashes verify. Source files
+were captured BEFORE the navigation edits in this phase. Git objects,ignored
+files,large generated data and deployment artifact bytes are NOT a full-disk
+backup;do not delete them on the strength of this archive. Symlinks remain
+symlinks. The inventory hash limit is not a cleanup deletion criterion.
+CSV and full intermediate analysis remain temporary duplicates;the external
+JSON inventory and compact protected graph retain the classification evidence.
+External free space after saving:402665472 bytes,above the384MiB reserve but
+with only12288 bytes of headroom. Do not launch another artifact-writing run
+before separately reviewing disk recovery.
+
+Classification:manifest artifacts and the reviewed closures are protected;
+cache files are candidates only;all remaining files await consumer review.
+Robot ROS source,firmware,safety,launch/config and qualification tooling remain
+protected areas;the model-only import scan cannot classify their retirement.
+Generated-artifact classification is lexical:it must not override a selected
+artifact manifest,fixture use or explicitly protected external evidence.
+
+### Documentation disposition (no bulk movement yet)
+
+| Existing document | Disposition |
+| --- | --- |
+| `GATE3_FILTER_STATUS.md` | New short current status/navigation; no experiment diary |
+| `GATE3_FILTER_PIPELINE_REFERENCE.md` (4832 lines before cleanup) | Replaced with current-only math/flow/owners;full original archived outside repos |
+| `GATE3_KNOB_SCALE_INTERFACE_PLAN.md` (11136 lines) | Full historical evidence archived;old path is a pointer |
+| `GATE3_JACOBIAN_REINTEGRATION_PLAN.md` (11913 lines) | Full historical evidence archived;old path is a pointer |
+| `GATE3_OBSERVATION_GROUNDED_J_AUDIT.md` (6196 lines) | Full diagnosis archived;old path is a pointer |
+| `GATE3_DISTAL_FINAL_SESSION_TEST_PLAN.md` (3021 lines) | Full settled-distal evidence archived;old path is a pointer |
+| `GATE3_ARRAY_NATIVE_IMAGE_STEP_PLAN.md` (666 lines) | Active incomplete work; retain latest contract/results, later separate implementation diary |
+| Deployment baseline,ownership,package layout,maintained/legacy index | Remain authoritative for their declared deployment/ownership scope; research status does not replace them |
+
+Current-reference extraction is now complete for the architecture/math summary.
+Do NOT move a module merely because a historical document mentions it.
+Script/test archival and code movement remain separate,reviewed batches.
+
+### External archival and current-reference extraction
+
+User-authorized persistent location (workspace filesystem,not the nearly-full
+session disk):`/home/chen-lab/Yifan/repository_archives/cleanup_20261101/`.
+All2275 nonignored untracked source/doc/config files selected by the archival
+scan are copied into `untracked_source_docs.tar.gz`,6913737 bytes,SHA-256
+`43dd50af991a76ba6d4b40225c86a8f4202b59a0b5bb6d27d67e16e5d86aa35d`.
+Every archived file/symlink was verified against its source before editing.
+There were no skipped nonignored untracked paths in this scan.
+
+The archive also preserves445 neighboring audit Markdown files byte-for-byte,
+with individual hashes,original paths and repository HEAD/status in
+`manifest.json`. This includes the full pre-extraction reference and six plans:
+knob/interface,Jacobian reintegration,observation-grounded audit,distal final
+test,value-local gain,and batched conditional shadow. Existing six plan paths
+are short external-archive pointers;the reference now contains current state,
+math,flow and owners instead of historical experiment narratives. The active
+array-native work plan remains in place.
+
+Active untracked numerical code/tests remain at their existing paths:archival
+copies do not justify breaking imports,pickle class paths or source identities.
+No algorithm,settings,artifact,entry point,ROS source or test changed. This
+batch does not promote the array candidate or claim a new numerical result.
+Only documentation content was replaced after hash-verified preservation.
+Recovery is described in the external archive README;never extract over a
+dirty worktree blindly. No numerical replay or build was needed or launched.
+
+Verification:all445 archived document hashes and the untracked archive digest
+match;1565 archived untracked Python sources and1976 inventoried Python files
+remain unchanged. All24 local links in the current reference/status/pointers
+resolve;math-block and code-fence delimiters balance;`git diff --check` passes.
+Reference reduced to260 lines;six historical plan pointers are10 lines each.
+This is documentation/source-preservation verification,not estimator testing.
+
+### Script archival batch1
+
+Moved8 untracked standalone shell wrappers to the external archive's
+`relocated/cr_meta_lnn/scripts/`:convex-material21,memory-ablation23,
+diagonal-passive33,scalar-relaxation35,effective-cascade36,
+effective-plasticity43,effective-force50 and valley-relaxation-force53.
+Selection was based on inspected historical experiment bodies and absent
+filename/stem consumers,not version numbers alone. A five-repository search
+covered source,docs,tests,configs and build metadata;these wrappers are not
+deployment wheel packages/entry points. Dynamic/external callers cannot be
+universally excluded. Numerical Python owners,artifacts and tests stay put.
+
+The external `script_archival_batch1.json` records exact paths,SHA-256 and
+executable modes. All8 moved files match their previously archived originals
+and pass `bash -n` without execution. All1976 previously inventoried Python
+sources remain unchanged. Historical execution requires restoring original
+relative locations because the wrappers derive repository roots from their
+own filename. No compatibility wrappers or alternate algorithms were added.
+Focused real-comparison-harness suite:10 tests pass in5.12s,with2 existing
+SLSQP clipping warnings. No numerical replay,ROS build or hardware run was
+required. `git diff --check` passes in both repositories.
+
+### Script archival batch2
+
+Moved20 additional reviewed nominal-v15 bending/force/memory shell recipes to
+the same external archive (28 total). Exact candidates,hashes,executable modes
+and five-repository reference-scan scope/result are recorded in
+`script_archival_batch2.json`;no literal filename/stem callers were found.
+All20 match the original preservation archive and pass `bash -n`.
+Numerical Python modules,model artifacts,current tools and tests remain in
+place. The original-path restoration requirement and external/dynamic-caller
+limitations of batch1 still apply. No replay,training or hardware command ran.
+Verification:all28 relocated hashes/modes match,1976 inventoried Python files
+are unchanged,and10 comparison-harness tests pass in4.99s (2 existing SLSQP
+clipping warnings). Diff whitespace checks pass in both repos.
+
+### Python archival batch3
+
+Moved6 historical CLI modules as a closed consumer group:scalar mechanical-
+memory training,scalar play-remanence training/profiling,and remanent/gated-
+peak/valley-relaxation force evaluators. The only two remaining literal import
+callers were inside this same group;the earlier shell callers are archived.
+No external consumers appeared in the searched five-repository source/docs/
+configuration/build scope. The archive's `script_archival_batch3.json` records
+exact paths,hashes,modes,internal imports and known limitations.
+
+Kept the effective-force evaluator,scalar-GRU/distributed-memory/tendon-GRU
+trainers and distributed-memory evaluator because they supply helpers to
+retained tools or tests. Do not remove these by treating all scripts as CLIs.
+No model/filter/test/artifact movement or helper extraction was bundled in.
+
+All1970 inventoried retained Python files remain byte-identical;the6 relocated
+Python files match their original hashes/modes. Total relocated files:34
+(28 shell,6 Python). Current comparison plus retained tendon-history and
+distributed-evaluator tests:19 pass in5.60s,with2 existing SLSQP clipping
+warnings. No training,replay,hardware run or source-fingerprint migration.
+
+### Documentation classification pass
+
+External `documentation_review_map.json` inventories575 Markdown files:
+28 current reference/navigation,2 active plan,122 protected technical/safety
+evidence,6 existing pointers,18 reviewed historical candidates,and399 unresolved.
+It records hashes,classification basis,incoming document mentions,source/policy
+mentions and existing archival matches. Candidate bodies/status summaries
+identify earlier experiments/proposals rather than current authoritative
+filter behavior;all18 match already-preserved evidence. No source/policy
+mentions were found for these candidates in the static scan,but16 have inbound
+documentation mentions. Reconcile those references before moving them.
+
+This is not exhaustive semantic review:unresolved documents remain untouched,
+and tracked technical evidence is conservatively protected rather than declared
+current. Existing architecture README now provides one current reading index
+and the map link. No document/code moves or numerical tests in this pass.
+
+### Historical document archival batch4
+
+Reconciled26 links/citations in17 referring documents,then moved the18 reviewed
+historical documents out of both repos. No source/config/policy consumers
+appeared in the repeated five-repository scan. Original document bytes and
+modes match the preserved archive;all new links address immutable reading
+copies and retain existing section fragments. Pre-edit referring-doc backups
+and the exact link patch are retained externally. No historical numerical
+claims,model settings or algorithms changed. No new pointer files were added.
+
+The external `document_archival_batch4.json` is the path/hash/recovery ledger;
+`relocated/` stores moved originals and `history/` the reading copies. The
+architecture README is the single maintained reading index. The original575-
+document classification snapshot now corresponds to557 in-repo documents and
+18 archived documents. The399 unresolved items were not reclassified or moved.
+No numerical replay,training,ROS build or hardware operation was required.
+Verification:all18 archived originals/reading copies match hashes,all26 new
+references resolve,both retained section anchors match actual headings,and no
+Markdown link in the557 remaining docs targets a removed path. All2582
+inventoried source/test/configuration hashes are unchanged (including original
+bytes for previously archived scripts). Whitespace checks pass in both repos.
+
+## Retention cleanup — 2026-11-02
+
+At the user's direction, the repositories now keep only three code paths: the
+October engagement-filter/MPPI hardware pipeline that recorded the October real
+sessions, the scalar research estimator as a reference, and the reduced
+real-time estimator with its ROS shadow observer. Most documents were archived,
+except the main references, unfinished plans and unresolved issues.
+
+The October pipeline exists only as working-tree changes made on 2026-10-04..14,
+on top of HEAD `28ff41a`. It is kept as it is and committed as a snapshot. No
+ROS source, firmware, launch file, configuration or safety test was moved.
+
+1,790 files moved to
+[`repository_archives/cleanup_20261102/`](../../../repository_archives/cleanup_20261102/README.md):
+
+- from `cr_meta_lnn`: 1,270 untracked modules, scripts, tests and configs, and
+  53 documents;
+- from `robot-infra`: 467 documents, 116 of them previously committed.
+
+The array-native candidate and its plan are included: the reduced filter
+superseded them. Code selection uses the static import closure of the three
+retained paths, plus every module that `robot-infra/src` imports. The archive
+README records the rules, the restored tests and the limits.
+
+Verification:
+
+- every archived hash matched before removal;
+- test collection is identical to before, minus the archived tests, for 2,554
+  retained `cr_meta_lnn` tests and all `robot-infra` packages;
+- focused real-time, scalar, deployment and engagement suites pass: 79, 153
+  and 157 tests;
+- the one `robot-infra` failure is a recorded-bag `TipReferenceHorizon`
+  deserialization mismatch that predates the cleanup;
+- all links in the kept documents resolve.
+
+No ROS build was needed, because no ROS source changed.

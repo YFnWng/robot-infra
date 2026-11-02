@@ -68,6 +68,9 @@ become a runtime default.
 
 ## Compatibility-only surfaces
 
+- `cr_meta_lnn.training.hybrid.engagement_rollout_check` re-exports the packaged
+  `deployment.experimental.engagement_rollout_check` for its existing research
+  test consumer. ROS qualification imports only the packaged implementation.
 - Legacy checkpoint locations under `cr_meta_lnn/checkpoints` and
   `cr_meta_lnn/evaluation` are compatibility symlinks declared by the selected
   artifact manifest; maintained runtime consumers use canonical bundle paths.
@@ -92,9 +95,18 @@ become a runtime default.
   `cr_meta_lnn.deployment.legacy.streaming_runtime` import. The three root
   checkpoint-loader aliases were retired in Phase 7; research callers use
   `cr_meta_lnn.deployment.experimental`. See the
-  [retirement ledger](PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md).
+  [retirement ledger](../../../repository_archives/cleanup_20261102/files/robot-infra/docs/architecture/PHASE7_ARCHIVAL_AND_RETIREMENT_20261002.md).
 
 ## Research history
+
+2026-11-01 research cleanup:current math/flow is maintained in
+[`GATE3_FILTER_PIPELINE_REFERENCE.md`](../../audits/ros-realtime/GATE3_FILTER_PIPELINE_REFERENCE.md),
+with a separate short status page. Original long audits and all2275 scanned
+nonignored untracked source/doc/config files are preserved outside both repos
+at `/home/chen-lab/Yifan/repository_archives/cleanup_20261101/`;the manifest
+records hashes and recovery paths. Six historical plan filenames are navigation
+pointers. Active untracked code/tests remain in place;the archive is NOT a
+retirement declaration. See the current-research phase in the cleanup plan.
 
 The large uncommitted `cr_meta_lnn` research tree is preserved by branch
 `archive/pre-cleanup-research-20261001`. Older model families, broad
