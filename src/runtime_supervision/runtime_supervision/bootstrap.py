@@ -51,6 +51,16 @@ def engagement_shadow():
     return run_in_venv("runtime_supervision.engagement_shadow")
 
 
+def reduced_filter_shadow():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.reduced_filter_shadow")
+
+
+def reduced_filter_replay():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.reduced_filter_replay")
+
+
 def runtime_identity():
     root = Path(os.environ.get(
         "CR_VENV", "/home/chen-lab/Yifan/cr-venv")).expanduser().absolute()
