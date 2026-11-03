@@ -62,12 +62,20 @@ def compute_device_diagnostics(info: ComputeDevice) -> dict[str, str]:
     }
     if info.device.type == "cuda":
         scale = 1024.0*1024.0
+        # One nested-dict read, the same values as memory_allocated/reserved/
+        # max_memory_allocated. Those call memory_stats(), whose self-referencing
+        # closure leaves ~127 cyclic objects per call; with GC deferred while
+        # armed that grew the controller by ~0.6 MB/s (2026-11-03).
+        stats = torch.cuda.memory_stats_as_nested_dict(info.device)
+
+        def current(name, field="current"):
+            return stats.get(name, {}).get("all", {}).get(field, 0)
         values.update({
             "cuda_memory_allocated_mb": format(
-                torch.cuda.memory_allocated(info.device)/scale, ".3f"),
+                current("allocated_bytes")/scale, ".3f"),
             "cuda_memory_reserved_mb": format(
-                torch.cuda.memory_reserved(info.device)/scale, ".3f"),
+                current("reserved_bytes")/scale, ".3f"),
             "cuda_peak_memory_allocated_mb": format(
-                torch.cuda.max_memory_allocated(info.device)/scale, ".3f"),
+                current("allocated_bytes", "peak")/scale, ".3f"),
         })
     return values
