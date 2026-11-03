@@ -81,3 +81,13 @@ def runtime_identity():
             environment)
     return importlib.import_module(
         "runtime_supervision.runtime_identity").main()
+
+
+def prior_refit():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.prior_refit")
+
+
+def prior_identification():
+    from catheter_control.bootstrap import run_in_venv
+    return run_in_venv("runtime_supervision.prior_identification")
