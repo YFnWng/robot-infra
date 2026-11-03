@@ -12,6 +12,7 @@
 #include "position_move_tracker.h"
 #include "stall_detector.h"
 #include "stall_retry.h"
+#include "velocity_update_plan.h"
 #ifndef TKCTL_STREAMED_POSITION_ENABLED
 #if TKCTL_ENCODER_RECOVERY_SEED_ENABLED
 #define TKCTL_STREAMED_POSITION_ENABLED 0
@@ -25,6 +26,16 @@
 #else
 #define TKCTL_NATIVE_LIVE_PROBE_ENABLED 1
 #endif
+#endif
+// Test image only: velocity updates keep running motors running. A speed
+// change sends only C, a reversal sends S then C without disabling, and only
+// axes starting from rest get the stop/settle/configure/enable sequence. Set
+// to 1 for the on-the-fly characterization build; production stays 0.
+#ifndef TKCTL_ONTHEFLY_VELOCITY_ENABLED
+#define TKCTL_ONTHEFLY_VELOCITY_ENABLED 0
+#endif
+#if TKCTL_ONTHEFLY_VELOCITY_ENABLED && TKCTL_ENCODER_RECOVERY_SEED_ENABLED
+#error "On-the-fly velocity updates are forbidden in the incident recovery image"
 #endif
 DriverEvidence::Buffer driverEvidence;
 #if TKCTL_STREAMED_POSITION_ENABLED && TKCTL_ENCODER_RECOVERY_SEED_ENABLED
@@ -248,6 +259,9 @@ constexpr char FIRMWARE_BUILD_ID[] =
     "native_live_update_bracket_probe_v1|"
     "driver_native_evidence_v1|"
 #endif
+#endif
+#if TKCTL_ONTHEFLY_VELOCITY_ENABLED
+    "onthefly_velocity_v1|"
 #endif
     __DATE__ "T" __TIME__;
 #endif
@@ -2235,6 +2249,43 @@ void sendMotorCmds() {
     const uint8_t activeMask = velocityActiveMask();
     setStoppedMonitorCommands(activeMask);
 
+#if TKCTL_ONTHEFLY_VELOCITY_ENABLED
+    VelocityUpdatePlan::AxisState axes[numHWSerials];
+    for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
+      axes[axis] = {(activeMask & (1U << axis)) != 0, motorEnabled[axis],
+                    controlModeValid[axis], directionValid[axis],
+                    targetDir[axis], currentDir[axis]};
+    }
+    const VelocityUpdatePlan::Plan plan =
+        VelocityUpdatePlan::plan(axes, numHWSerials, true);
+    bool success = true;
+    // Running axes first, without disabling them: a reversal sends S while the
+    // driver stays enabled, then every running axis refreshes its speed.
+    for (uint8_t axis = 0; success && axis < numHWSerials; ++axis) {
+      const uint8_t bit = static_cast<uint8_t>(1U << axis);
+      if ((plan.reverse_mask & bit) != 0) {
+        success = configureMotorDirection(axis, true) && configureMotorSpeed(axis);
+      } else if ((plan.speed_mask & bit) != 0) {
+        success = configureMotorSpeed(axis);
+      }
+    }
+    // Only axes starting from rest receive the full start sequence.
+    if (success && plan.start_mask != 0) {
+      stopMotorMask(plan.start_mask, true);
+      delay(MOTOR_DIRECTION_SETTLE_MS);
+      success = CoordinatedStart::run(
+          plan.start_mask, numHWSerials,
+          [&](uint8_t axis) {
+            return initializeMotorDriver(axis) &&
+                   configureMotorDirection(axis, true) &&
+                   configureMotorSpeed(axis);
+          },
+          [&](uint8_t mask) { return coordinatedEnableMask(mask); },
+          [&](uint8_t) { stopMotorMask(activeMask, true); });
+    }
+    // Fail closed: a failed update leaves no active axis running.
+    if (!success) stopMotorMask(activeMask, true);
+#else
     bool coordinatedStartRequired = false;
     for (uint8_t axis = 0; axis < numHWSerials; ++axis) {
       if ((activeMask & (1U << axis)) == 0) continue;
@@ -2270,6 +2321,7 @@ void sendMotorCmds() {
         }
       }
     }
+#endif
     if (success) setActiveMonitorCommands(activeMask);
     newJointVelCmd = false;
 
