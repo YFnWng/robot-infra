@@ -81,6 +81,16 @@ Total motion is 12.3 min. Notes:
 - Block B centres on its start, so it must start at insertion 20 mm with the tendon at 0. Every block
   ends there.
 - Block D's reversals reach only 7.35 mm of tendon. Block C adds full-range reversals at 0 and 15 mm.
+- **Stack during the blocks (checked 2026-11-03).** On hardware each block requires
+  already-running `manager`, `device_serial_com`, `marker_tracking` and a disarmed
+  `catheter_mppi`. The collection preflight reads that controller's `catheter_control/mppi` status:
+  disarmed, adaptation off, estimator TRACKING, accepted marker counts.
+  - The reduced-filter dry-run node does not publish that status and shares the node name, so it
+    cannot be the controller during the blocks.
+  - Run them in one research session with the standard disarmed v171 controller. Optionally add
+    `reduced_filter_shadow:=true` to record live reduced-filter timing under motion; planner timing
+    is not recorded.
+  - Accepting the dry-run status in the preflight would be a reviewed interlock change.
 
 ## Simulation check (2026-11-02, passed)
 
@@ -346,3 +356,58 @@ j_T per tendon range, transmitted inputs:
 - The input definition for the tip-response fit: excluding take-up on hardware, where the truth
   transmission is unknown.
 - How to represent the state dependence of j_T in a prior.
+
+## Hardware prior session (2026-11-03, user-authorized)
+
+**Stack.**
+- Research session `catheter_sessions/prior_identification_l1b_20261103T183522575594Z`, domain 42.
+- Stack `hardware_grouped_no_rotation_farther_tendon_12`: v171 controller disarmed, adaptation off,
+  bounded task GC on.
+- `reduced_filter_shadow:=true`, video on, command output false; production firmware, motors
+  qualified.
+- Before motion, `home_check` passed at the boot pose (encoders [0, 0, 0] and still). Its reference is
+  `home_reference.json` in that session.
+- Final state: `complete`, all processes 0, qualification passed, 3.4 GB.
+
+| Block | Session | Wall time (sim) | Completeness | Return error |
+| --- | --- | --- | --- | --- |
+| A, start move [0, 0, 0] → [20, 0, 0], then still | `20261103_133735_causal_proximal` | 38 s (37) | PASS | 0.0000 mm |
+| B, insertion | `20261103_133813_causal_proximal` | 223 s (224) | PASS | 0.0017 mm |
+| C, full tendon sweeps | `20261103_134156_causal_proximal` | 419 s (417) | PASS | 0.0085 mm |
+| D, partial reversals | `20261103_134855_causal_proximal` | 80 s (79) | PASS | 0.0055 mm |
+
+- No faults, aborts or USB/camera events.
+- The robot ended at [20, 0, 0] with `MANAGER_READY`.
+- The only warnings are `START_MOTOR sent` and block D's tolerance-qualified start adjustment
+  (0.0009 mm tendon).
+
+**Quick re-fits (not installed).**
+
+| Re-fit | Data | Result |
+| --- | --- | --- |
+| Axis (`prior_refit axis`) | Block B: 2,206 images, 722 engaged chassis intervals | Direction [0.040, 0.033, 0.999], gain 0.94. The four markers agree within about 2°. **9.9° from the October prior**, matching the 10.1° found on the Oct 8 data |
+| Marker covariance (`prior_refit covariance`) | Block A: 31 s still window | October R too tight: mean Mahalanobis 13.0, nominal-95 % coverage 83.7 %. Re-fit full R: 12.1 and 94.9 %; +1.65 log density per frame. Consistent with the L1 dry-run re-fit |
+
+**Shadow observer (live reduced filter, observation only).**
+- It tracked through A and B and faulted 51.2 s into block C with `Finite queries inside fixed
+  spline support required`.
+- Block C drives the tendon past the real-time profile support (identified range plus 0.5 mm, about
+  11.27 mm). This is the known support limit, which this session's full-range data is meant to lift.
+- Filter step time:
+
+| Window | Images | Step P50 / P95 / P99 / max | Over 100 ms |
+| --- | --- | --- | --- |
+| Still, before A | 1,083 | 46.9 / 58.8 / 69.3 / 603 ms | 2 |
+| A | 379 | 51.2 / 66.7 / 74.5 / 78 ms | 0 |
+| B, insertion | 2,224 | 55.3 / 73.1 / 81.2 / 106 ms | 4 |
+| C until the fault | 497 | 54.1 / 74.2 / 89.7 / **1,506 ms** | 2 |
+
+- Under motion the step is about 15–30 % slower than still, and P99 approaches the 100 ms image
+  period.
+- One 1.5 s step at 18:42:15 UTC (about 19 s into C) is unexplained.
+- The observer's stderr also shows a divide by zero in law merging (`reduced_law_filter.py:328`) and
+  an invalid `slogdet`, without timestamps. Both need diagnosis before closed loop.
+
+**Next (offline).** Export A–D (estimated about 10 min, needs approval). Then rework the fit to the
+filter's model (shared axis column, positive knob gain, chassis play) before fitting the profiles and
+tip response.
