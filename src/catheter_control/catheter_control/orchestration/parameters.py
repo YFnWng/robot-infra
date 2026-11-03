@@ -188,6 +188,20 @@ def declare_parameters(node, *, source_name):
     node.declare_parameter("initialization_consecutive_inliers", 2)
     node.declare_parameter("maximum_marker_rejections", 3)
     node.declare_parameter("maximum_planner_deadline_misses", 3)
+    # Estimator backend. "v171" is the October controller. The research
+    # "reduced_filter_dry_run" plans without commanding (separate node class).
+    node.declare_parameter("estimator_backend", "v171")
+    # Reduced filter (dry run only). Artifact root: directory holding the
+    # filter's recorded priors. Image period in ms selects every third 30 fps
+    # frame at 90. Start-up queue in images. Tendon upper limit in logical mm,
+    # controller-only (manager limits unchanged). Report directory: optional.
+    node.declare_parameter(
+        "reduced_filter_artifact_root",
+        "/media/chen-lab/84BABCB7BABCA6D81/Yifan/catheter_sessions")
+    node.declare_parameter("reduced_filter_image_period_ms", 90.0)
+    node.declare_parameter("reduced_filter_startup_pending_images", 8)
+    node.declare_parameter("reduced_filter_tendon_upper_mm", 10.8)
+    node.declare_parameter("reduced_filter_report_dir", "")
     node.declare_parameter(
         "marker_topic", "/shape_tracking/markers")
     node.declare_parameter(

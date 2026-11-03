@@ -29,6 +29,7 @@ setup(
             "reaching_analysis = experiments.reaching_analysis:main",
             "path_session = experiments.path_session:main",
             "path_analysis = experiments.path_analysis:main",
+            "dry_run_targets = experiments.dry_run_targets:main",
         ],
     },
 )

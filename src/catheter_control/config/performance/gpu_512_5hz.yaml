@@ -1,0 +1,10 @@
+# 5 Hz planning for the reduced filter (user decision, 2026-11-02). The
+# deadline leaves the rest of the 200 ms period to the estimator owner.
+/**:
+  ros__parameters:
+    device: cuda
+    samples: 512
+    planning_deadline_s: 0.05
+    estimator_catchup_timeout_s: 0.35
+    plan_rate_hz: 5.0
+    command_rate_hz: 100.0

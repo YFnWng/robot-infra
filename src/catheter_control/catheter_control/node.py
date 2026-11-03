@@ -70,6 +70,10 @@ class CatheterControlNode(Node):
     def __init__(self):
         super().__init__("catheter_mppi")
         declare_parameters(self, source_name=SOURCE_NAME)
+        if str(self.get_parameter("estimator_backend").value) != "v171":
+            raise ValueError(
+                "this controller runs only estimator_backend=v171; the "
+                "reduced-filter dry run has its own node class")
         self.source = str(self.get_parameter("source_name").value)
         if self.source != SOURCE_NAME:
             raise ValueError(f"source_name must be {SOURCE_NAME!r}")
@@ -675,6 +679,11 @@ class CatheterControlNode(Node):
         if self.planner.config.planning_deadline_s >= 1.0/plan_rate:
             raise ValueError(
                 "planning deadline must be shorter than the plan period")
+        # A planned command must outlive the plan period, or the heartbeat
+        # latches planned_command_stale between consecutive plans.
+        if self.command_timeout_s <= 1.0/plan_rate:
+            raise ValueError(
+                "command_timeout_s must exceed the plan period")
         self._marker_schedule = CausalMarkerSchedule(
             marker_rate, self._steady())
         timer_started = self._steady()

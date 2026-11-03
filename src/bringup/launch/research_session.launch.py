@@ -24,6 +24,11 @@ def _setup(context):
         return LaunchConfiguration(name).perform(context)
 
     video = _boolean(value("video"))
+    reduced_filter_shadow = _boolean(value("reduced_filter_shadow"))
+    stall_diagnostics = _boolean(value("camera_stall_diagnostics"))
+    fused_policy = value("fused_timestamp_policy")
+    if fused_policy not in ("newest", "weighted_mean"):
+        raise ValueError("fused_timestamp_policy must be newest or weighted_mean")
     output_enabled = _boolean(value("command_output_enabled"))
     planner_process = value("planner_process_enabled")
     if planner_process:
@@ -58,7 +63,9 @@ def _setup(context):
         "-p", f"shape_tracking_root:={value('shape_tracking_root')}",
         "-p", "rig_ids:=['primary','oblique']",
         "-p", f"recording_enabled:={str(video).lower()}",
-        "-p", f"recording_session_dir:={video_dir}"]
+        "-p", f"recording_session_dir:={video_dir}",
+        "-p", f"fused_timestamp_policy:={fused_policy}",
+        "-p", f"stall_diagnostics_enabled:={str(stall_diagnostics).lower()}"]
     estimator_arguments = [
         f"{name}:={value(name)}"
         for name in ("estimator_device", "estimator_dtype", "mppi_temperature")
@@ -84,6 +91,16 @@ def _setup(context):
             f"recording_manifest_path:={session / 'controller_manifest.json'}",
             f"adapj_initialization_dir:={session / 'adapj_initialization'}",
             f"command_output_enabled:={str(output_enabled).lower()}"]}
+    if reduced_filter_shadow:
+        # Research observer: own process, private status only, never commands.
+        # The cr-venv wheel carries only the deployed runtime, so the research
+        # filter is imported from the source workspace for this process alone.
+        research_path = os.pathsep.join(
+            item for item in (value("research_code_root"), os.environ.get("PYTHONPATH", "")) if item)
+        commands["reduced_filter_shadow"] = [
+            "env", f"PYTHONPATH={research_path}",
+            "ros2", "run", "runtime_supervision", "reduced_filter_shadow",
+            "--outdir", str(session / "reduced_filter_shadow"), "--duration-s", "3600"]
     manifest = {
         "schema_version": 1, "session_id": session.name,
         "session_label": value("session_label"), "allocated_at": utc_now(),
@@ -105,6 +122,8 @@ def _setup(context):
         "camera_python": str(camera_python),
         "command_output_enabled": output_enabled,
         "startup_timeout_s": timeout, "commands": commands,
+        "reduced_filter_shadow": reduced_filter_shadow,
+        "research_code_root": value("research_code_root") if reduced_filter_shadow else "",
         "record_topics": topics,
         "required_topics": ["/device/state", "/shape_tracking/markers",
                             "/shape_tracking/marker_status", "/catheter_mppi/status"],
@@ -157,6 +176,21 @@ def generate_launch_description():
             Path(shape) / "camera_config_hd720.yaml")),
         DeclareLaunchArgument("session_root", default_value=SESSION_ROOT),
         DeclareLaunchArgument("video", default_value="true"),
+        DeclareLaunchArgument(
+            "camera_stall_diagnostics", default_value="false",
+            description="Add capture-loop, SDK-drop, GC and scheduling stall "
+                        "fields to marker_status (needs a supporting wheel)."),
+        DeclareLaunchArgument(
+            "fused_timestamp_policy", default_value="newest",
+            description="Fused marker stamp: newest (historical) or "
+                        "weighted_mean (needs a supporting wheel)."),
+        DeclareLaunchArgument(
+            "reduced_filter_shadow", default_value="false",
+            description="Also run the reduced-filter research observer (non-commanding; "
+                        "report under the session directory)."),
+        DeclareLaunchArgument(
+            "research_code_root", default_value="/home/chen-lab/Yifan",
+            description="Workspace containing the cr_meta_lnn source tree, used only by the observer."),
         DeclareLaunchArgument("command_output_enabled", default_value="false"),
         DeclareLaunchArgument("startup_timeout_s", default_value="60.0"),
         OpaqueFunction(function=_setup),

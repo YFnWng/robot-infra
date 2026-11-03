@@ -11,7 +11,7 @@ RECORD_TOPICS = [
     "/catheter_mppi/predicted_tip", "/catheter_mppi/response_trace",
     "/catheter_mppi/aligned_response_trace",
     "/catheter_mppi/estimator_trace", "/catheter_mppi/control_cycle_timing",
-    "/catheter_mppi/status", "/catheter_mppi/shadow_request",
+    "/catheter_mppi/status", "/catheter_mppi/dry_run_plan", "/catheter_mppi/shadow_request",
     "/catheter_mppi/shadow_decision", "/catheter_mppi/shadow_timing",
     "/catheter_mppi/shadow_status", "/catheter_mppi/shadow_worker_status",
     "/catheter_mppi/track_tip_trajectory/_action/feedback",

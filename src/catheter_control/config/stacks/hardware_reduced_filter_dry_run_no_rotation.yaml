@@ -1,0 +1,8 @@
+schema_version: 1
+name: hardware.reduced_filter.dry_run.no_rotation
+node_name: catheter_mppi
+description: Research dry run of the reduced filter with 5 Hz MPPI planning; never commands.
+layers:
+  controller: controller/modes/reduced_filter_dry_run.yaml
+  platform: platform/hardware_v175_no_rotation.yaml
+  performance: performance/gpu_512_5hz.yaml

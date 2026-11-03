@@ -393,12 +393,26 @@ def _setup(context, *_args, **_kwargs):
         effective_horizon_steps*effective_rollout_step_s+0.20)
     effective_model_manifest = str(
         effective_parameters.get("model_manifest", selection.manifest_path))
+    dry_run = effective_parameters.get("estimator_backend", "v171") == "reduced_filter_dry_run"
+    node_environment = {}
+    if dry_run:
+        # Research dry run: never commands, imports the filter from the source tree (user, 2026-11-02).
+        if command_output_enabled:
+            raise RuntimeError("the reduced-filter dry run cannot enable command output")
+        node_environment["PYTHONPATH"] = os.pathsep.join(
+            item for item in (value("research_code_root"), os.environ.get("PYTHONPATH", "")) if item)
+        manifest_value = value("recording_manifest_path")
+        if manifest_value:
+            report_dir = {"reduced_filter_report_dir": str(Path(manifest_value).expanduser().resolve().parent)}
+            node_parameters.append(report_dir)
+            effective_parameters.update(report_dir)
     node = Node(
         package="catheter_control",
-        executable="catheter_mppi",
+        executable="catheter_mppi_reduced_dry_run" if dry_run else "catheter_mppi",
         name="catheter_mppi",
         output="screen",
-        parameters=node_parameters)
+        parameters=node_parameters,
+        additional_env=node_environment)
     trajectory_node = Node(
         package="control_tasks",
         executable="catheter_tip_trajectory",
@@ -515,6 +529,9 @@ def generate_launch_description():
             description=(
                 "Optional insertion-conditioned allocation fitted around "
                 "frozen v171 distal tendon history.")),
+        DeclareLaunchArgument(
+            "research_code_root", default_value="/home/chen-lab/Yifan",
+            description="Workspace with the cr_meta_lnn source tree; used only by the reduced-filter dry run."),
         DeclareLaunchArgument(
             "stack_config", default_value="",
             description=(

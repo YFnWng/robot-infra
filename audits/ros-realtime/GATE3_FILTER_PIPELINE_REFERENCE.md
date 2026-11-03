@@ -91,7 +91,30 @@ f(v)=B(v)\beta,\qquad \beta\sim\mathcal N(\mu_\beta,P_\beta).
 $$
 
 Uniform cubic B-spline coefficients represent a projected GP prior. Query means
-and covariances are B*mu_beta and B*P_beta*B-transpose. Queries share coefficient
+and covariances are B*mu_beta and B*P_beta*B-transpose.
+
+Since 2026-11-02 (R1), B is evaluated at the actual oriented tendon input. On a
+node of the saved input grid this is the stored row, bit for bit. Between
+nodes it is direct basis evaluation. The saved grid fixes the identified data
+support [a, b] (0.000893 to 10.766078 mm on the current artifact), the
+slope-constraint locations and the dense-opening domain. Dense grid owners
+still require exact nodes.
+
+Support continuation (2026-11-02): with `profile_support_extension_mm` m, the
+same coefficients continue linearly beyond each end:
+
+$$
+\tilde B(x)=B(b)+(x-b)\,B'(b)\ \ (b<x\le b+m),\qquad
+\tilde B(x)=B(a)+(x-a)\,B'(a)\ \ (a-m\le x<a).
+$$
+
+Inputs beyond the continuation are rejected, and the estimator holds and then
+faults. The real-time path selects m = 0.5 mm; the scalar reference keeps
+m = 0. An admitted image beyond [a, b] withholds profile learning; lambda,
+engagement and tip-J learning are unchanged. Shared visit-prior origins may
+lie on the continuation. The minimum-slope constraint does not cover the
+continuation. The support should cover the joint-limit range plus a margin;
+the current artifact does not yet, pending full-range data. Queries share coefficient
 uncertainty; they are not fresh independent noise. The selected real fixture
 has22 coefficients; dimensions,artifacts and scales remain configuration-bound.
 
@@ -259,7 +282,10 @@ Paths are relative to cr_meta_lnn/training/hybrid/:
 | Memory / full conditional orchestration | scalar_chassis_memory.py, memory_marker_runtime.py |
 | Native replay/checkpoint/forecast | native_memory_marker_replay.py |
 | Reduced real-time filter,arrival-order wrapper | reduced_law_filter.py, reduced_filter_stream.py; ROS observer in `runtime_supervision/reduced_filter_shadow.py`, commanding nothing |
+| Batched four-step planner forecast (torch; same mean-only equations, scalar owner is the spec) | `distal_deformation_runtime.mean_forecast_snapshot`/`four_step_mean_forecast`, `spline_profile_gaussian.SplineMeanTensor`, `current_engagement_probability.engagement_log_transition_tensor`, `reduced_law_filter.ReducedFourStepForecast` |
 | Shared batched helpers imported by the scalar filter | batched_interface_assembly.py, batched_interface_transport.py, batched_knob_prediction.py, batched_gaussian_validation.py |
+| Planner rollout backend (fixed-shape kernels keyed by candidate count and active law count, 2026-11-02) | `reduced_filter_stream.ReducedFilterRolloutBackend`, `ReducedPlanRoot.law_count` |
+| Non-commanding ROS dry-run controller (robot-infra, 2026-11-02): filter ownership, plan roots, 5 Hz `CatheterMppi`. Since 2026-11-03, planning is commit-triggered: it runs in the owner callback right after a filter commit when `plan_due` (at least 0.9 × the plan period since the last plan), never on an independent timer | `catheter_control/orchestration/reduced_filter_owner.py`, `catheter_control/reduced_filter_dry_run.py`; see the [deployment gap audit](REALTIME_DEPLOYMENT_GAP_AUDIT.md#step-4-results-2026-11-02-non-commanding-dry-run-controller) and its [commit-triggered planning results](REALTIME_DEPLOYMENT_GAP_AUDIT.md#commit-triggered-planning-pattern-1-2026-11-03) |
 
 The array-native conditional shadow (`batched_interface_step.py` and its
 completion/transport stages) was archived on 2026-11-02, superseded by the

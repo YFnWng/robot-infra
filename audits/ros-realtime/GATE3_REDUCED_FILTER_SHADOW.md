@@ -28,7 +28,7 @@ Baseline: the batch replay of the same 1,221 images with the hold on. Tolerance 
 | Graph | Subscribes to the two replay state topics. Publishes only its status plus the standard ROS parameter and log topics. No service or action clients |
 | Static test | No control publisher, client or `SET_ZERO` vocabulary |
 
-The whole-session run used a 16-image queue. **With the default queue of 3 the short run failed the comparison:** cold startup (390 ms, then a 108 ms first step) dropped image 5, giving a 0.025 mm difference. So exact equivalence needs a queue that absorbs startup; the filter was not changed. The default stays 3, which bounds staleness and keeps the dropped image's encoder motion in the next interval.
+The whole-session run used a 16-image queue. **With the default queue of 3 the short run failed the comparison:** cold startup (390 ms, then a 108 ms first step) dropped image 5, giving a 0.025 mm difference. So exact equivalence needs a queue that absorbs startup; the filter was not changed. The default stays 3, which bounds staleness and keeps the dropped image's encoder motion in the next interval. **Update 2026-11-02:** a start-up-only allowance (`startup_pending_images`, observer default 8) now keeps queue 3 in steady state, and the start-up replay is bit-identical to queue 16 with no drop ([step 3](REALTIME_DEPLOYMENT_GAP_AUDIT.md#step-3-results-2026-11-02-start-up-without-dropped-images)).
 
 Timing, ROS replay, images after startup catch-up (index above 12), no planner running:
 

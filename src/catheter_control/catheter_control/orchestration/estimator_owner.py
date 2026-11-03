@@ -49,3 +49,14 @@ def marker_measurement(message: PointCloud, required_frame: str):
     if timestamp_ns <= 0:
         raise ValueError("invalid_marker_timestamp")
     return timestamp_ns, points, quality
+
+
+def encoder_history_qos():
+    """Best-effort input that keeps every encoder sample through a long filter step.
+
+    History-consuming estimators need each sample; sensor-data depth 5 holds only
+    about 28 ms at the device's ~180 Hz, so a GIL-holding step loses samples and
+    opens history gaps. Depth 512 holds about 2.8 s.
+    """
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+    return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=512, reliability=ReliabilityPolicy.BEST_EFFORT)

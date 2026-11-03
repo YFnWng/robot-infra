@@ -181,7 +181,15 @@ model-loading environment. It is not imported by live controller orchestration;
 `runtime_supervision.reduced_filter_shadow` is a non-commanding research observer of the
 reduced Gate 3 filter, whose mathematics and stream wrapper stay in `cr_meta_lnn`.
 `reduced_filter_replay` is its recorded test source, restricted to an isolated domain and
-topic prefix. Neither is selected by a launch profile.
+topic prefix. Neither is selected by a launch profile. The observer imports encoder conversion,
+the ordered inbox and the encoder input QoS from `catheter_control.orchestration`.
+
+`catheter_control.orchestration.reduced_filter_owner` (ROS-independent) owns reduced-filter
+ownership for planning: encoder conversion, the ordered input handoff, health mapping, plan-time
+roots under one lock and per-law-count kernel preparation. `catheter_control.reduced_filter_dry_run`
+is a separate, non-commanding `catheter_mppi` node class, selected only by
+`estimator_backend: reduced_filter_dry_run` through `control.launch.py`. It has no command
+publisher, manager client or arm service. `node.py` (the October controller) refuses that backend.
 
 Run the profiler with `ros2 run runtime_supervision compute_profile`.
 

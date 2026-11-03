@@ -12,6 +12,10 @@ import time
 from .recording_session import (
     recorder_readiness, qualify_recording, utc_now, write_manifest)
 
+# Optional research observers: started after the recorded stack, stopped first,
+# and their exit is recorded without failing the recording session.
+OBSERVER_ROLES = ("reduced_filter_shadow",)
+
 
 def recorder_subscriptions(node, required_topics):
     """Observe only the owned default recorder, not arbitrary subscribers."""
@@ -57,12 +61,12 @@ def finalize_session(session, manifest, processes, reason, ready_once):
     manifest.update(state="stopping", stop_reason=reason, stopped_at=utc_now())
     write_manifest(session / "session_manifest.json", manifest)
     outcomes = {}
-    for role in ("controller", "bag", "camera"):
+    for role in (*OBSERVER_ROLES, "controller", "bag", "camera"):
         if role in processes:
             outcomes[role] = processes[role].stop()
     evidence = qualify_recording(session, manifest)
     abnormal = any(result["escalated"] or result["returncode"] not in (0, -2)
-                   for result in outcomes.values())
+                   for role, result in outcomes.items() if role not in OBSERVER_ROLES)
     state = "complete" if (reason == "operator_stop" and ready_once
                            and evidence["passed"] and not abnormal) else "partial"
     if reason != "operator_stop" or abnormal:
@@ -152,6 +156,10 @@ def main(argv=None):
             for role in ("bag", "camera", "controller"):
                 processes[role] = RecordingProcess(
                     manifest["commands"][role], session / f"{role}.log")
+            for role in OBSERVER_ROLES:
+                if role in manifest["commands"]:
+                    processes[role] = RecordingProcess(
+                        manifest["commands"][role], session / f"{role}.log")
         manifest["state"] = "starting"
         write_manifest(path, manifest)
         print(f"[research session] {session}", flush=True)
@@ -159,8 +167,16 @@ def main(argv=None):
             rclpy.spin_once(node, timeout_sec=0.1)
             now = time.monotonic()
             for role, owned in processes.items():
-                if owned.process.poll() is not None:
-                    raise RuntimeError(f"{role} exited unexpectedly; see {role}.log")
+                if owned.process.poll() is None:
+                    continue
+                if role in OBSERVER_ROLES:
+                    exits = manifest.setdefault("observer_exits", {})
+                    if role not in exits:
+                        exits[role] = {"returncode": owned.process.poll(), "at": utc_now()}
+                        print(f"[research session] observer {role} exited; see {role}.log",
+                              flush=True)
+                    continue
+                raise RuntimeError(f"{role} exited unexpectedly; see {role}.log")
             if now >= next_query:
                 recorder_evidence = recorder_readiness(
                     session / "robot_bag", manifest["required_topics"],

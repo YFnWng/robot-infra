@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from runtime_supervision import reduced_filter_replay as replay
-from runtime_supervision.reduced_filter_shadow import ShadowInbox, encoder_sample
+from runtime_supervision.reduced_filter_shadow import ShadowInbox, encoder_sample, marker_quality_summary
 from catheter_control.safety.hardware_contract import ENCODER_RADIANS_PER_COUNT
 from control_interface_py.encoder_coordinates import counts_to_logical
 
@@ -86,3 +86,20 @@ def test_replay_events_are_arrival_ordered_and_keep_the_selected_images():
     events = replay.replay_events(sensors, np.array([10, 30], np.int64), start=0, stop=1, encoder_lead_ns=5)
     assert [e[0] for e in events] == sorted(e[0] for e in events)
     assert [e[2] for e in events if e[1]] == [0, 2] and 5 not in [e[2] for e in events if not e[1]]
+
+
+def test_marker_quality_is_summarized_for_the_report_only():
+    quality = dict(confidence=np.array([.9, .8, .7, .6]), reprojection_error_px=np.array([.1, .2, .3, .4]),
+                   source_rig_count=np.array([2., 2., 2., 1.]))
+    assert marker_quality_summary(quality) == dict(confidence=[.9, .8, .7, .6],
+        reprojection_error_px=[.1, .2, .3, .4], source_rig_count=[2., 2., 2., 1.])
+    tree = ast.parse((PACKAGE/'reduced_filter_shadow.py').read_text(encoding='utf-8'))
+    added = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and getattr(node.func, 'attr', None) == 'add_image']
+    assert [ast.unparse(node.args[1]) for node in added] == ['points']  # quality never reaches the filter
+
+
+def test_observer_selects_every_third_30fps_frame_by_default():
+    import inspect
+    from runtime_supervision import reduced_filter_shadow
+    assert "default=90." in inspect.getsource(reduced_filter_shadow.main)

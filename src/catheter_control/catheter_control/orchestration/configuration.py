@@ -31,6 +31,11 @@ ALLOWED_STACK_KEYS = {
 }
 FORBIDDEN_PARAMETERS = {"command_output_enabled"}
 ACTIVE_CONTROLLER_PARAMETERS = frozenset({
+    "estimator_backend",
+    "reduced_filter_artifact_root",
+    "reduced_filter_image_period_ms",
+    "reduced_filter_startup_pending_images",
+    "reduced_filter_tendon_upper_mm",
     "mppi_execution_mode",
     "synchronized_sheath_rotation",
     "control_method", "adapj_initialization_dir", "adapj_reference_step_mm",

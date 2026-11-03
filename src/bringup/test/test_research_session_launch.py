@@ -22,9 +22,10 @@ def module():
 @pytest.mark.parametrize("estimator_device,estimator_dtype", [("", ""), ("cpu", "float64")])
 @pytest.mark.parametrize("planner_process", ["", "false", "true"])
 @pytest.mark.parametrize("temperature", ["", "0.3"])
+@pytest.mark.parametrize("shadow", ["false", "true"])
 def test_composition_has_one_recorder_and_output_disabled(
         tmp_path, monkeypatch, estimator_device, estimator_dtype, planner_process,
-        temperature):
+        temperature, shadow):
     import launch.logging
     monkeypatch.setattr(launch.logging.launch_config, "_log_dir", str(tmp_path))
     source = module()
@@ -54,6 +55,8 @@ def test_composition_has_one_recorder_and_output_disabled(
         "mppi_temperature": temperature,
         "path_prediction_grid": "point",
         "model_manifest": "/tmp/explicit-engagement-manifest.json",
+        "camera_stall_diagnostics": "false", "fused_timestamp_policy": "newest",
+        "reduced_filter_shadow": shadow, "research_code_root": "/home/chen-lab/Yifan",
     })
     monkeypatch.setattr(source, "Node", lambda **kw: SimpleNamespace(**kw))
     actions = source._setup(context)
@@ -70,6 +73,9 @@ def test_composition_has_one_recorder_and_output_disabled(
     assert "path_prediction_grid:=point" in manifest["commands"]["controller"]
     assert manifest['point_rollout_step_override_s'] == '0.06666666666666667'
     assert 'point_rollout_step_override_s:=0.06666666666666667' in manifest['commands']['controller']
+    camera_command = manifest['commands']['camera']
+    assert 'fused_timestamp_policy:=newest' in camera_command  # defaults unchanged
+    assert 'stall_diagnostics_enabled:=false' in camera_command
     assert manifest['horizon_steps_override'] == '12'
     assert 'horizon_steps_override:=12' in manifest['commands']['controller']
     for name, value in (("estimator_device", estimator_device),
@@ -85,6 +91,15 @@ def test_composition_has_one_recorder_and_output_disabled(
     assert "model_manifest:=/tmp/explicit-engagement-manifest.json" in manifest['commands']['controller']
     assert "command_output_enabled:=false" in manifest["commands"]["controller"]
     assert manifest["commands"]["bag"].count("record") == 1
+    assert manifest["reduced_filter_shadow"] == (shadow == "true")
+    if shadow == "true":
+        observer = manifest["commands"]["reduced_filter_shadow"]
+        assert observer[0] == "env" and observer[1].startswith("PYTHONPATH=/home/chen-lab/Yifan")
+        assert observer[2:6] == ["ros2", "run", "runtime_supervision", "reduced_filter_shadow"]
+        assert "PYTHONPATH" not in " ".join(manifest["commands"]["controller"])
+        assert observer[observer.index("--outdir")+1].startswith(manifest["bag_directory"].rsplit("/", 1)[0])
+    else:
+        assert "reduced_filter_shadow" not in manifest["commands"]
     assert "recording_enabled:=true" in manifest["commands"]["camera"]
     assert "registration_refresh_enabled:=true" in manifest["commands"]["camera"]
     assert "registration_frames:=20" in manifest["commands"]["camera"]

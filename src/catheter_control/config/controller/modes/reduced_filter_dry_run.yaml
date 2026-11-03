@@ -1,0 +1,37 @@
+# Reduced-filter dry run (research, never commands). Standalone controller
+# layer, not combined with controller/base.yaml, because stack layers cannot
+# override one another and base.yaml carries October-only settings.
+#
+# The filter alone owns play and engaged response: October take-up,
+# backlash, gain and scheduler paths are off. Gate 3 lambda is not October
+# lambda, so the first-step lambda guard is 0 (user decision, 2026-11-02).
+# Plain sampling keeps the rollout batch at a fixed, prepared size.
+/**:
+  ros__parameters:
+    estimator_backend: reduced_filter_dry_run
+    # Shared task-GC policy (robot-infra AGENTS); the dry run never arms.
+    task_gc_enabled: true
+    task_gc_maximum_s: 300.0
+    task_gc_growth_mb: 256.0
+    adaptation_enabled: false
+    backlash_compensation_enabled: false
+    takeup_transaction_enabled: false
+    engaged_gain_enabled: false
+    reversal_scheduler_enabled: false
+    horizon_steps: 4
+    rollout_step_s: 0.04
+    mppi_point_rollout_step_s: 0.2
+    mppi_point_rollout_coarse_steps: true
+    mppi_point_prediction_tail_steps: 0
+    mppi_grouped_mode_sampling: false
+    mppi_engaged_gain_scenarios: false
+    mppi_engaged_gain_maximum_first_step_shift: 0.0
+    mppi_best_candidate_guard: true
+    mppi_capture_radius_mm: 2.5
+    mppi_capture_minimum_terminal_improvement_mm: 0.25
+    mppi_capture_hold_s: 0.3
+    reduced_filter_image_period_ms: 90.0
+    # Start-up only: initialization, a slow first step and kernel preparation
+    # for each new law count (CUDA graphs) together exceed 8 queued images.
+    reduced_filter_startup_pending_images: 16
+    reduced_filter_tendon_upper_mm: 10.8

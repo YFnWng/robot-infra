@@ -60,6 +60,11 @@ def catheter_mppi():
     return run_in_venv("catheter_control.node")
 
 
+def catheter_mppi_reduced_dry_run():
+    """Console entry point for the non-commanding reduced-filter dry run."""
+    return run_in_venv("catheter_control.reduced_filter_dry_run")
+
+
 def control_shadow_worker():
     """Console entry point for the non-commanding shadow adapter."""
     return run_in_venv("catheter_control.orchestration.shadow_worker")

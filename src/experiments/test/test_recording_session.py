@@ -137,6 +137,25 @@ def test_shutdown_order_and_recording_not_task_success(tmp_path, reason, ready, 
     assert json.loads((tmp_path / "session_manifest.json").read_text())["state"] == expected
 
 
+def test_observer_stops_first_and_its_exit_does_not_fail_the_recording(tmp_path):
+    manifest = finalized_bag(tmp_path)
+    order = []
+
+    class Owned:
+        def __init__(self, role, returncode=0):
+            self.role, self.returncode = role, returncode
+
+        def stop(self):
+            order.append(self.role)
+            return {"returncode": self.returncode, "escalated": False}
+
+    processes = {role: Owned(role) for role in ("camera", "bag", "controller")}
+    processes["reduced_filter_shadow"] = Owned("reduced_filter_shadow", returncode=1)
+    state = finalize_session(tmp_path, manifest, processes, "operator_stop", True)
+    assert order == ["reduced_filter_shadow", "controller", "bag", "camera"]
+    assert state == "complete"
+
+
 def test_real_process_is_gracefully_finalized_without_ros_or_hardware(tmp_path):
     script = (
         "import signal,time,sys; "

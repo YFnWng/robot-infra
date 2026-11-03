@@ -20,7 +20,11 @@ def test_controller_parameter_surface_is_complete_and_stable():
 
     names = [name for name, _ in node.declarations]
     values = dict(node.declarations)
-    assert len(names) == 142
+    assert len(names) == 148
+    assert values["estimator_backend"] == "v171"
+    assert values["reduced_filter_image_period_ms"] == 90.0
+    assert values["reduced_filter_startup_pending_images"] == 8
+    assert values["reduced_filter_tendon_upper_mm"] == 10.8
     assert values["synchronized_sheath_rotation"] is False
     assert values["backlash_tendon_takeup_joint_range_enabled"] is False
     assert values["backlash_minimum_distal_marker_deformation_mm"] == 0.3
