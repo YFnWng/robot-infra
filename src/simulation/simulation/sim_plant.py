@@ -6,7 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from catheter_control.safety.hardware_contract import (
-    ENCODER_RADIANS_PER_COUNT, HardwareContract,
+    ENCODER_DEGREES_PER_COUNT, ENCODER_RADIANS_PER_COUNT, HardwareContract,
+    MAX_MOTOR_RPM, MOTOR_AXIS_UNITS_PER_ENCODER_COUNT,
     MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM, N_AXES, ProjectedVelocity)
 
 
@@ -17,36 +18,151 @@ def _vector(name: str, value) -> np.ndarray:
     return result
 
 
-def position_servo_velocity(current, target, speed, tolerance,
-                            step_s: float) -> np.ndarray:
-    """Resolve one bounded velocity step for a simulated POS transaction.
+def firmware_position_tolerance(motor_degrees: float) -> np.ndarray:
+    """Per-axis POS completion tolerance, as the firmware sets it.
 
-    The real firmware executes an absolute position transaction at the six
-    supplied speed magnitudes. The model-in-loop device has a velocity-driven
-    plant, so it reproduces that contract with a stop-within-tolerance servo.
-    Encoder quantization is still applied by the plant itself.
+    The firmware uses ``|jointPRate| * POSITION_TOLERANCE_MOTOR_DEG`` on each
+    axis, i.e. a fixed motor-shaft angle in that axis's own units.
     """
-    position = _vector("current position", current)
-    destination = _vector("position target", target)
+    return (np.abs(MOTOR_AXIS_UNITS_PER_ENCODER_COUNT)
+            * float(motor_degrees)/ENCODER_DEGREES_PER_COUNT)
+
+
+def _firmware_round(value: np.ndarray) -> np.ndarray:
+    """``std::roundf`` for nonnegative values: halves round away from zero."""
+    return np.floor(value+0.5)
+
+
+def firmware_position_move(encoder_counts, target, speed):
+    """Start one simulated POS transaction as the firmware does.
+
+    Each driver receives a relative move of ``round(|residual|/jointPRate)``
+    whole motor degrees at ``round(speed/|jointVRate|)`` RPM, capped at the
+    firmware maximum. The manager's velocity projection (speed floor, limit
+    guard horizon, model-count guard) is not applied: the firmware executes
+    POS transactions itself. Returns shaft endpoint counts (possibly
+    fractional, since moves are whole degrees) and signed shaft RPM.
+    """
+    counts = _vector("encoder counts", encoder_counts)
+    destination = HardwareContract.logical_position_to_motor_axis_position(
+        _vector("position target", target))
     maximum = _vector("position speed", speed)
-    deadband = _vector("position tolerance", tolerance)
     if np.any(maximum < 0.0):
         raise ValueError("position speed must be nonnegative")
-    if np.any(deadband <= 0.0):
-        raise ValueError("position tolerance must be positive")
-    if not np.isfinite(step_s) or step_s <= 0.0:
-        raise ValueError("step_s must be finite and strictly positive")
-    error = destination-position
-    moving = np.abs(error) > deadband
-    if np.any(moving & (maximum <= 0.0)):
-        axes = np.flatnonzero(moving & (maximum <= 0.0)).tolist()
+    units_per_degree = MOTOR_AXIS_UNITS_PER_ENCODER_COUNT/ENCODER_DEGREES_PER_COUNT
+    degrees = (destination-counts*MOTOR_AXIS_UNITS_PER_ENCODER_COUNT)/units_per_degree
+    if np.any(np.abs(degrees) > 65535.0):
+        axes = np.flatnonzero(np.abs(degrees) > 65535.0).tolist()
+        raise ValueError(f"position move exceeds driver range on axes {axes}")
+    whole = _firmware_round(np.abs(degrees))
+    rpm = np.minimum(
+        _firmware_round(maximum/np.abs(MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM)),
+        MAX_MOTOR_RPM)
+    moving = whole > 0.0
+    if np.any(moving & (rpm <= 0.0)):
+        axes = np.flatnonzero(moving & (rpm <= 0.0)).tolist()
         raise ValueError(
             f"nonzero position error has zero speed on axes {axes}")
-    velocity = np.zeros(N_AXES, dtype=np.float64)
-    velocity[moving] = (
-        np.sign(error[moving])
-        * np.minimum(maximum[moving], np.abs(error[moving])/float(step_s)))
-    return velocity
+    direction = np.where(moving, np.sign(degrees), 0.0)
+    endpoint = counts+direction*whole/ENCODER_DEGREES_PER_COUNT
+    return endpoint, direction*rpm
+
+
+# Firmware POSITION_SETTLE_MS, POSITION_TIMEOUT_MS, POSITION_RETRY_IDLE_MS and
+# POSITION_MAX_CORRECTIONS (teensy_tekceleo.ino).
+POSITION_SETTLE_S = 0.1
+POSITION_TIMEOUT_S = 45.0
+POSITION_RETRY_IDLE_S = 0.5
+POSITION_MAX_CORRECTIONS = 4
+
+
+@dataclass(frozen=True)
+class PositionTrackerUpdate:
+    status: str | None  # None, "complete" or "timed_out"
+    stop_axes: np.ndarray  # bool per axis: stop this shaft now
+    retry_axes: np.ndarray  # bool per axis: issue a residual move
+
+
+class FirmwarePositionTracker:
+    """Port of the firmware ``PositionMoveTracker`` (without limit resume).
+
+    Positions are motor-axis coordinates. An active axis completes after it
+    stays within tolerance for the settle time and is then stopped on its own.
+    An axis idle outside tolerance gets a bounded residual correction if it
+    progressed by at least one tolerance; otherwise the transaction times out,
+    as it does after the hard timeout.
+    """
+
+    def __init__(self, settle_s: float = POSITION_SETTLE_S):
+        self.settle_s = float(settle_s)
+        self.running = False
+        self.active = np.zeros(N_AXES, dtype=bool)
+
+    def begin(self, now_s, active, target, tolerance, position):
+        self.active = np.asarray(active, dtype=bool).copy()
+        self.start_s = float(now_s)
+        self.target = _vector("tracker target", target).copy()
+        self.tolerance = _vector("tracker tolerance", tolerance).copy()
+        position = _vector("tracker position", position)
+        self.within = np.zeros(N_AXES, dtype=bool)
+        self.within_since = np.zeros(N_AXES)
+        self.retries = np.zeros(N_AXES, dtype=int)
+        self.segment_start_error = np.abs(self.target-position)
+        self.motion_anchor = position.copy()
+        self.last_motion = np.full(N_AXES, self.start_s)
+        self.running = True
+
+    def cancel(self):
+        self.active[:] = False
+        self.running = False
+
+    def update(self, now_s, position) -> PositionTrackerUpdate:
+        none = np.zeros(N_AXES, dtype=bool)
+        if not self.running:
+            return PositionTrackerUpdate(None, none, none.copy())
+        now_s = float(now_s)
+        position = _vector("tracker position", position)
+        if now_s-self.start_s >= POSITION_TIMEOUT_S:
+            return self._time_out()
+        stop, retry = none.copy(), none.copy()
+        for axis in np.flatnonzero(self.active):
+            error = abs(self.target[axis]-position[axis])
+            if error > self.tolerance[axis]:
+                self.within[axis] = False
+                if (abs(position[axis]-self.motion_anchor[axis])
+                        >= self.tolerance[axis]):
+                    self.motion_anchor[axis] = position[axis]
+                    self.last_motion[axis] = now_s
+                if now_s-self.last_motion[axis] < POSITION_RETRY_IDLE_S:
+                    continue
+                progress = self.segment_start_error[axis]-error
+                if (self.retries[axis] < POSITION_MAX_CORRECTIONS
+                        and progress >= self.tolerance[axis]):
+                    self.retries[axis] += 1
+                    self.segment_start_error[axis] = error
+                    self.motion_anchor[axis] = position[axis]
+                    self.last_motion[axis] = now_s
+                    retry[axis] = True
+                    continue
+                return self._time_out()
+            if not self.within[axis]:
+                self.within[axis] = True
+                self.within_since[axis] = now_s
+                continue
+            if now_s-self.within_since[axis] >= self.settle_s:
+                self.active[axis] = False
+                stop[axis] = True
+        status = None
+        if not np.any(self.active):
+            status = "complete"
+            self.running = False
+        return PositionTrackerUpdate(status, stop, retry)
+
+    def _time_out(self) -> PositionTrackerUpdate:
+        stop = self.active.copy()
+        self.cancel()
+        return PositionTrackerUpdate(
+            "timed_out", stop, np.zeros(N_AXES, dtype=bool))
 
 
 @dataclass(frozen=True)
@@ -164,7 +280,12 @@ class SimulatedActuatorPlant:
             # not re-floor its reconstructed logical velocity when one shaft
             # reaches its endpoint before another. Feedback bounds still apply.
             physical = self._shaft_rpm*MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM
-            if np.any(np.abs(physical) > self.contract.velocity_max+1e-6):
+            # The firmware rounds a speed to integer RPM, so a speed at the
+            # ceiling may realize up to half an RPM above it.
+            ceiling_rpm = _firmware_round(
+                self.contract.velocity_max
+                / np.abs(MOTOR_AXIS_UNITS_PER_SECOND_PER_RPM))
+            if np.any(np.abs(self._shaft_rpm) > ceiling_rpm):
                 self.stop()
                 raise RuntimeError('streamed physical RPM exceeds simulation ceiling')
             angle_rate = self._shaft_rpm*(2*np.pi/60)

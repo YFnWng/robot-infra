@@ -28,7 +28,9 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from catheter_control.safety.hardware_contract import load_hardware_contract
-from .sim_plant import SimulatedActuatorPlant, position_servo_velocity
+from .sim_plant import (
+    FirmwarePositionTracker, SimulatedActuatorPlant, firmware_position_move,
+    firmware_position_tolerance)
 from .sim_perturbations import ActuatorConfig, ActuatorPerturbation
 
 
@@ -44,8 +46,9 @@ class SimulatedDeviceNode(Node):
         self.declare_parameter("command_timeout_s", 0.25)
         self.declare_parameter("command_max_age_s", 0.10)
         self.declare_parameter("command_future_tolerance_s", 0.05)
-        self.declare_parameter(
-            "position_tolerance", [0.1, 0.5, 0.1, 0.1, 0.5, 0.5])
+        # Firmware POSITION_TOLERANCE_MOTOR_DEG: a POS transaction completes
+        # once every active axis is within this many motor-shaft degrees.
+        self.declare_parameter("position_tolerance_motor_deg", 3.0)
         self.declare_parameter("position_settle_s", 0.1)
         self.declare_parameter(
             "initial_encoder_counts", [0, 0, 0, 0, 0, 0])
@@ -70,16 +73,14 @@ class SimulatedDeviceNode(Node):
             str(self.get_parameter("limits_file").value),
             str(self.get_parameter("catheter").value))
         self.contract = contract
-        self.position_tolerance = np.asarray(
-            self.get_parameter("position_tolerance").value,
-            dtype=np.float64)
+        tolerance_deg = float(
+            self.get_parameter("position_tolerance_motor_deg").value)
+        if not math.isfinite(tolerance_deg) or tolerance_deg <= 0.0:
+            raise ValueError(
+                "position_tolerance_motor_deg must be finite and positive")
+        self.position_tolerance = firmware_position_tolerance(tolerance_deg)
         self.position_settle_s = float(
             self.get_parameter("position_settle_s").value)
-        if (self.position_tolerance.shape != (6,)
-                or not np.all(np.isfinite(self.position_tolerance))
-                or np.any(self.position_tolerance <= 0.0)):
-            raise ValueError(
-                "position_tolerance must contain six positive finite values")
         if (not math.isfinite(self.position_settle_s)
                 or self.position_settle_s <= 0.0):
             raise ValueError("position_settle_s must be finite and positive")
@@ -116,7 +117,9 @@ class SimulatedDeviceNode(Node):
         self._position_speed = None
         self._position_active = False
         self._position_terminal = False
-        self._position_within_since = None
+        self._position_tracker = FirmwarePositionTracker(self.position_settle_s)
+        self._position_endpoint = np.zeros(6)
+        self._position_rpm = np.zeros(6)
         self._position_mask = 0
         self._plant_reset_count = 0
         self.position_stream = None
@@ -263,11 +266,10 @@ class SimulatedDeviceNode(Node):
                     and np.allclose(target, self._position_target,
                                     rtol=0.0, atol=1e-6))
                 try:
-                    # Validate zero-speed axes before accepting the atomic
-                    # transaction. The actual command is recomputed in _tick.
-                    position_servo_velocity(
-                        self.plant.joint_position, target, speed,
-                        self.position_tolerance, self.plant.step_s)
+                    # Validate the whole transaction before accepting it, as
+                    # the firmware rejects every axis if any one is invalid.
+                    endpoint, signed_rpm = firmware_position_move(
+                        self.plant.encoder_counts, target, speed)
                 except ValueError as error:
                     self._cancel_position()
                     self.plant.stop()
@@ -276,16 +278,26 @@ class SimulatedDeviceNode(Node):
                     self.get_logger().error(
                         f"rejected simulated position transaction: {error}")
                     return
+                # A repeated absolute target is a heartbeat; the firmware does
+                # not rebuild the driver move on every control cycle.
                 if not same_target:
                     self._position_target = target.copy()
                     self._position_speed = speed.copy()
                     self._position_active = True
                     self._position_terminal = False
-                    self._position_within_since = None
-                    moving = (np.abs(target-self.plant.joint_position)
-                              > self.position_tolerance)
+                    active = signed_rpm != 0.0
+                    self._position_endpoint = self.plant.encoder_counts.copy()
+                    self._position_rpm = np.zeros(6)
+                    self._start_position_move(active, endpoint, signed_rpm)
+                    self._position_tracker.begin(
+                        self.plant.timestamp_ns*1e-9, active,
+                        self.contract.logical_position_to_motor_axis_position(
+                            target),
+                        self.position_tolerance,
+                        self.contract.encoder_counts_to_motor_axis_position(
+                            self.plant.encoder_counts))
                     self._position_mask = sum(
-                        (1 << int(axis)) for axis in np.flatnonzero(moving))
+                        (1 << int(axis)) for axis in np.flatnonzero(active))
                 self._last_arrival = time.monotonic()
                 self._watchdog_reported = False
             if accepted:
@@ -300,7 +312,7 @@ class SimulatedDeviceNode(Node):
         self._position_speed = None
         self._position_active = False
         self._position_terminal = False
-        self._position_within_since = None
+        self._position_tracker.cancel()
         self._position_mask = 0
 
     def _publish_position_status(self, status, target=None):
@@ -398,14 +410,55 @@ class SimulatedDeviceNode(Node):
         self.get_logger().info(response.message)
         return response
 
+    def _start_position_move(self, axes, endpoint, signed_rpm):
+        """Issue driver relative moves on ``axes``; other shafts keep theirs."""
+        self._position_endpoint[axes] = endpoint[axes]
+        self._position_rpm[axes] = signed_rpm[axes]
+        self.plant.set_native_position(
+            self._position_endpoint, self._position_rpm)
+
+    def _update_position_move(self, snapshot):
+        """Advance the firmware tracker; return a terminal status or None."""
+        update = self._position_tracker.update(
+            snapshot.timestamp_ns*1e-9,
+            self.contract.encoder_counts_to_motor_axis_position(
+                snapshot.encoder_counts))
+        if np.any(update.retry_axes):
+            try:
+                endpoint, signed_rpm = firmware_position_move(
+                    snapshot.encoder_counts, self._position_target,
+                    self._position_speed)
+                if np.any(signed_rpm[update.retry_axes] == 0.0):
+                    raise ValueError("residual correction rounds to zero")
+            except ValueError as error:
+                self._cancel_position()
+                self.plant.stop()
+                self._publish_position_status(
+                    ManagerEvent.POSITION_REJECTED, self._position_target)
+                self.get_logger().error(
+                    f"rejected simulated position correction: {error}")
+                return None
+            self._start_position_move(update.retry_axes, endpoint, signed_rpm)
+        if np.any(update.stop_axes):
+            self._position_endpoint[update.stop_axes] = (
+                snapshot.encoder_counts[update.stop_axes])
+            self._start_position_move(
+                update.stop_axes, self._position_endpoint,
+                np.zeros(6))
+        if update.status is None:
+            return None
+        self._position_active = False
+        self._position_terminal = True
+        self.plant.stop()
+        return (ManagerEvent.POSITION_COMPLETE if update.status == "complete"
+                else ManagerEvent.POSITION_TIMED_OUT)
+
     def _tick(self):
         completed_target = None
         with self._lock:
             timestamp_ns = max(
                 self.plant.timestamp_ns+1,
                 int(self.get_clock().now().nanoseconds))
-            integration_step_s = (
-                timestamp_ns-self.plant.timestamp_ns) * 1e-9
             if getattr(self, 'position_stream', None) is not None:
                 applied = np.rint(self.plant.last_projection.motor_radians_per_second/(2*np.pi/60)).astype(int)
                 if getattr(self, '_stream_active', False):
@@ -436,21 +489,6 @@ class SimulatedDeviceNode(Node):
                     self._watchdog_reported = True
                     self.get_logger().warn(
                         "simulated firmware watchdog stopped stale command")
-            if self._position_active:
-                try:
-                    command = position_servo_velocity(
-                        self.plant.joint_position, self._position_target,
-                        self._position_speed, self.position_tolerance,
-                        integration_step_s)
-                    self.plant.set_command(command)
-                except ValueError as error:
-                    target = self._position_target.copy()
-                    self._cancel_position()
-                    self.plant.stop()
-                    self.get_logger().error(
-                        f"simulated position transaction failed: {error}")
-                    self._publish_position_status(
-                        ManagerEvent.POSITION_REJECTED, target)
             try:
                 snapshot = self.plant.step(timestamp_ns)
             except (ValueError, RuntimeError) as error:
@@ -459,26 +497,15 @@ class SimulatedDeviceNode(Node):
                     f"simulated device fault: {type(error).__name__}: {error}")
                 return
             if self._position_active:
-                within = np.all(
-                    np.abs(self._position_target-snapshot.joint_position)
-                    <= self.position_tolerance)
-                now_monotonic = time.monotonic()
-                if within:
-                    if self._position_within_since is None:
-                        self._position_within_since = now_monotonic
-                    elif (now_monotonic-self._position_within_since
-                          >= self.position_settle_s):
-                        completed_target = self._position_target.copy()
-                        self._position_active = False
-                        self._position_terminal = True
-                        self.plant.stop()
-                else:
-                    self._position_within_since = None
+                terminal_status = self._update_position_move(snapshot)
+                if terminal_status is not None:
+                    completed_target = self._position_target.copy()
         if completed_target is not None:
-            self._publish_position_status(
-                ManagerEvent.POSITION_COMPLETE, completed_target)
+            self._publish_position_status(terminal_status, completed_target)
             self.get_logger().info(
-                "simulated position transaction complete")
+                "simulated position transaction "
+                + ("complete" if terminal_status
+                   == ManagerEvent.POSITION_COMPLETE else "timed out"))
         stamp = rclpy.time.Time(nanoseconds=timestamp_ns).to_msg()
         for predicate, values in (
                 (DeviceStream.POS, snapshot.joint_position),
