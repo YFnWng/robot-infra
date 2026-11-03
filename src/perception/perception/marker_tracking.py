@@ -19,6 +19,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import ChannelFloat32, CompressedImage, PointCloud
 import yaml
 
+from perception.stall_diagnostics import GcPauseMonitor, SchedulingProbe
+
 
 CAMERA_SETTING_KEYS = (
     "resolution", "fps", "sharpness", "exposure", "gain",
@@ -201,6 +203,37 @@ def rig_liveness_values(rig_ids, sequences, frame_arrivals,
     return values
 
 
+def _require_wheel_support(vision, timestamp_policy, stall_diagnostics):
+    """Fail at startup if an enabled option needs a newer shape_tracking wheel."""
+    import inspect
+    needed = []
+    if timestamp_policy != "newest" and "timestamp_policy" not in (
+            inspect.signature(vision["fuse_marker_estimates"]).parameters):
+        needed.append("fused_timestamp_policy")
+    if stall_diagnostics and "collect_loop_statistics" not in (
+            inspect.signature(vision["CameraCaptureWorker"]).parameters):
+        needed.append("stall_diagnostics_enabled")
+    if needed:
+        raise ValueError(
+            f"{', '.join(needed)} requires a shape_tracking wheel built from "
+            "catheter-shape-tracking with fused-stamp/loop-statistics support")
+
+
+def fused_timestamp_values(fused, newest_ns, policy):
+    """Fused-stamp policy and the weighted-mean lag behind the newest rig.
+
+    ``fused_weighted_stamp_lag_ms`` is reported under either policy, so
+    recordings quantify the newest-stamp bias without changing behaviour.
+    """
+    weighted = getattr(fused, "weighted_timestamp_ns", None)
+    return {
+        "fused_timestamp_policy": policy,
+        "fused_weighted_stamp_lag_ms": (
+            "unknown" if weighted is None
+            else f"{(int(newest_ns) - int(weighted))*1e-6:.3f}"),
+    }
+
+
 def frame_stage_timing_values(frames, selected_monotonic_ns):
     """Capture stages: wall-clock source age, monotonic ready-to-pair wait.
 
@@ -262,6 +295,11 @@ class MarkerTrackingNode(Node):
             "preview_topic_prefix", "/shape_tracking/preview")
         self.declare_parameter("recording_enabled", False)
         self.declare_parameter("recording_session_dir", "")
+        # Stamp of the fused marker message: "newest" (latest contributing rig,
+        # historical) or "weighted_mean" (time the fused points represent).
+        self.declare_parameter("fused_timestamp_policy", "newest")
+        # Opt-in stall diagnosis fields in marker_status (no behaviour change).
+        self.declare_parameter("stall_diagnostics_enabled", False)
 
         shape_root = str(self.get_parameter("shape_tracking_root").value)
         self.vision = _load_shape_tracking(shape_root)
@@ -296,6 +334,18 @@ class MarkerTrackingNode(Node):
                 "minimum_valid_rigs must be between 1 and rig count")
         self.feedback_timeout_s = float(
             self.get_parameter("feedback_timeout_s").value)
+        self.fused_timestamp_policy = str(
+            self.get_parameter("fused_timestamp_policy").value)
+        if self.fused_timestamp_policy not in ("newest", "weighted_mean"):
+            raise ValueError(
+                "fused_timestamp_policy must be 'newest' or 'weighted_mean'")
+        self.stall_diagnostics_enabled = bool(
+            self.get_parameter("stall_diagnostics_enabled").value)
+        self.gc_monitor = None
+        self.scheduling_probe = None
+        _require_wheel_support(
+            self.vision, self.fused_timestamp_policy,
+            self.stall_diagnostics_enabled)
 
         common, serials = load_live_camera_config(camera_config)
         missing = [rig for rig in requested_rigs if rig not in serials]
@@ -425,9 +475,14 @@ class MarkerTrackingNode(Node):
                         f"{rig_id} registration resolution is "
                         f"{registration.resolution}, opened "
                         f"{info['resolution']}")
+                # New options are passed only when enabled, so the default
+                # path runs unchanged against an older installed wheel.
+                worker_options = (
+                    {"collect_loop_statistics": True}
+                    if self.stall_diagnostics_enabled else {})
                 worker = self.vision["CameraCaptureWorker"](
                     rig_id, camera, preview_stride=1,
-                    on_frame_ready=self._notify_frame_ready)
+                    on_frame_ready=self._notify_frame_ready, **worker_options)
                 tracker = self.vision["StereoRingTracker"](
                     rig_id, registration,
                     minimum_confidence=float(
@@ -448,6 +503,11 @@ class MarkerTrackingNode(Node):
             if self.recording_enabled:
                 self._start_recording(
                     camera_config, registration_file, common, camera_infos)
+            if self.stall_diagnostics_enabled:
+                self.gc_monitor = GcPauseMonitor()
+                self.scheduling_probe = SchedulingProbe()
+                self.gc_monitor.start()
+                self.scheduling_probe.start()
             for worker in self.workers.values():
                 worker.start()
             self.started_monotonic = time.monotonic()
@@ -589,7 +649,9 @@ class MarkerTrackingNode(Node):
             estimates = [newest]
 
         fused = self.vision["fuse_marker_estimates"](
-            estimates, self.maximum_cross_rig_disagreement_mm)
+            estimates, self.maximum_cross_rig_disagreement_mm,
+            **({"timestamp_policy": self.fused_timestamp_policy}
+               if self.fused_timestamp_policy != "newest" else {}))
         if not isinstance(fused, estimate_type):
             self._reject(fused.reason, fused.detail)
             return
@@ -620,6 +682,11 @@ class MarkerTrackingNode(Node):
                 self.synchronizer.dropped_frames.values())),
         }
         values.update(frame_timing)
+        values.update(fused_timestamp_values(
+            fused, max(item.timestamp_ns for item in estimates),
+            self.fused_timestamp_policy))
+        if self.stall_diagnostics_enabled:
+            values.update(self._stall_diagnostic_values())
         if self.preview_enabled:
             values.update({
                 "preview_encoded": str(self.preview_encoded),
@@ -632,6 +699,22 @@ class MarkerTrackingNode(Node):
             DiagnosticStatus.WARN if partial_tracking else DiagnosticStatus.OK,
             "PARTIAL_MULTI_RIG_TRACKING" if partial_tracking else "TRACKING",
             values)
+
+    def _stall_diagnostic_values(self):
+        """Window maxima since the previous status plus cumulative counters."""
+        values = {}
+        for rig_id, worker in self.workers.items():
+            for key, value in worker.loop_statistics().items():
+                values[f"rig_{rig_id}_{key}"] = (
+                    "unknown" if value is None
+                    else f"{value:.3f}" if isinstance(value, float) else str(value))
+        for monitor in (self.gc_monitor, self.scheduling_probe):
+            if monitor is None:
+                continue
+            for key, value in monitor.window().items():
+                values[key] = (f"{value:.3f}" if isinstance(value, float)
+                               else str(value))
+        return values
 
     def _publish_ready_preview(self):
         """Publish completed JPEG work without waiting for the encoder."""
@@ -861,6 +944,10 @@ class MarkerTrackingNode(Node):
         if self.closed:
             return
         self.closed = True
+        for monitor in (getattr(self, "scheduling_probe", None),
+                        getattr(self, "gc_monitor", None)):
+            if monitor is not None:
+                monitor.stop()
         if self.recording_active:
             try:
                 self._stop_recording()
