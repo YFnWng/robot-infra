@@ -95,8 +95,10 @@ def test_composition_has_one_recorder_and_output_disabled(
     if shadow == "true":
         observer = manifest["commands"]["reduced_filter_shadow"]
         assert observer[0] == "env" and observer[1].startswith("PYTHONPATH=/home/chen-lab/Yifan")
-        assert observer[2:6] == ["ros2", "run", "runtime_supervision", "reduced_filter_shadow"]
+        assert observer[2:4] == ["OPENBLAS_NUM_THREADS=1", "OMP_NUM_THREADS=1"]   # single-threaded pools
+        assert observer[4:8] == ["ros2", "run", "runtime_supervision", "reduced_filter_shadow"]
         assert "PYTHONPATH" not in " ".join(manifest["commands"]["controller"])
+        assert "NUM_THREADS" not in " ".join(manifest["commands"]["camera"]+manifest["commands"]["controller"])
         assert observer[observer.index("--outdir")+1].startswith(manifest["bag_directory"].rsplit("/", 1)[0])
     else:
         assert "reduced_filter_shadow" not in manifest["commands"]

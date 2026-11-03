@@ -9,6 +9,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from bringup.recording import RECORD_TOPICS
+from bringup.research_filter_environment import REDUCED_FILTER_THREAD_ENVIRONMENT
 from experiments.recording_session import (
     SESSION_ROOT, allocate_session, utc_now, write_manifest)
 
@@ -99,6 +100,7 @@ def _setup(context):
             item for item in (value("research_code_root"), os.environ.get("PYTHONPATH", "")) if item)
         commands["reduced_filter_shadow"] = [
             "env", f"PYTHONPATH={research_path}",
+            *(f"{key}={item}" for key, item in REDUCED_FILTER_THREAD_ENVIRONMENT.items()),
             "ros2", "run", "runtime_supervision", "reduced_filter_shadow",
             "--outdir", str(session / "reduced_filter_shadow"), "--duration-s", "3600"]
     manifest = {
