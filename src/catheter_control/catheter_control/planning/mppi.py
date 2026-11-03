@@ -365,6 +365,15 @@ class CatheterMppi:
                 for name, value in memory["capture"].items():
                     setattr(self, name, deepcopy(value))
 
+    def candidate_counts(self) -> tuple[int, int]:
+        """Rollout batch sizes of plain sampling: the population, plus the
+        unshifted previous sequence once a plan exists. Fixed-shape backends
+        prepare exactly these before readiness."""
+        if self.config.grouped_mode_sampling or self.config.engaged_gain_scenarios:
+            raise ValueError(
+                "fixed candidate counts require plain sampling without gain scenarios")
+        return self.config.samples, self.config.samples+1
+
     def reset_capture_target(self) -> None:
         """End target-local hold state while retaining learned passive scale."""
         self._previous_sequence = None
@@ -1628,6 +1637,25 @@ class CatheterMppi:
                                   1e3*(perf_counter()-phase_started),
                                   0.0, 0.0))
         rollout_ms = 1e3*(perf_counter()-phase_started)
+        # A backend may refuse individual candidates (for example inputs outside its
+        # identified support). Refused candidates are blocked like any infeasible
+        # candidate; their placeholder tips only keep cost arithmetic finite and
+        # can never be selected or weighted. Refusing deterministic hold fails closed.
+        refused = getattr(prediction, "refused", None)
+        if refused is not None:
+            refused_t = torch.as_tensor(refused, device=tips.device).to(torch.bool)
+            if (gain_scenario_count != 1
+                    or tuple(refused_t.shape) != (candidate_count,)
+                    or bool(refused_t[0].detach().cpu())):
+                return self._safe_result(
+                    started, "invalid_rollout",
+                    phase_timings_ms=(sample_projection_ms, rollout_ms,
+                                      0.0, 0.0))
+            tips = torch.where(refused_t[:, None, None], tips[:1], tips)
+            if predicted_lambda is not None:
+                predicted_lambda = torch.where(
+                    refused_t[:, None], predicted_lambda[:1], predicted_lambda)
+            blocked_candidate |= refused_t.detach().cpu().numpy()
         if tip_offset is not None:
             # Common translation preserves candidate-relative model motion.
             tips = tips + torch.as_tensor(tip_offset, device=tips.device,

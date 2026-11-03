@@ -1715,6 +1715,41 @@ def test_engaged_input_cap_uses_registered_hold_not_history(contract, history_la
     assert np.isfinite(plan.command_logical_velocity).all()
 
 
+class RefusingRollout(LinearRollout):
+    """Backend that refuses chosen candidates with NaN tips and an explicit mask."""
+
+    def __init__(self, refuse):
+        self.refuse = refuse
+
+    def predict_sequence(self, *args):
+        result = super().predict_sequence(*args)
+        refused = torch.zeros(result.tip_base_m.shape[0], dtype=torch.bool)
+        refused[self.refuse(refused.shape[0])] = True
+        result.tip_base_m[refused] = torch.nan
+        return SimpleNamespace(tip_base_m=result.tip_base_m, markers_base_m=None, refused=refused)
+
+
+def test_backend_refused_candidates_are_blocked_never_selected(contract):
+    reference = CatheterMppi(LinearRollout(), contract, config(samples=32)).plan(
+        object(), [20, 0, 7, 40, 0, 0], [.004, 0, 0])
+    assert reference.valid and reference.selected_candidate_index > 0
+    chosen = reference.selected_candidate_index
+    planner = CatheterMppi(RefusingRollout(lambda n: [chosen]), contract, config(samples=32))
+    plan = planner.plan(object(), [20, 0, 7, 40, 0, 0], [.004, 0, 0])
+    assert plan.valid, plan.reason
+    assert plan.selected_candidate_index != chosen
+    assert plan.blocked_candidate_count >= reference.blocked_candidate_count + 1
+    assert np.isfinite(plan.best_tip_sequence_m).all()
+
+
+def test_backend_refusing_hold_or_a_wrong_mask_fails_closed(contract):
+    for refuse in (lambda n: [0], lambda n: slice(0, n)):
+        plan = CatheterMppi(RefusingRollout(refuse), contract, config(samples=8)).plan(
+            object(), [20, 0, 7, 40, 0, 0], [0, 0, 0])
+        assert not plan.valid and plan.reason == "invalid_rollout"
+        assert plan.command_logical_velocity == pytest.approx(np.zeros(6))
+
+
 def test_empty_final_eligibility_returns_invalid_hold(contract, monkeypatch):
     planner = CatheterMppi(LinearRollout(), contract, config(
         samples=8, grouped_mode_sampling=False, best_candidate_guard=False,
