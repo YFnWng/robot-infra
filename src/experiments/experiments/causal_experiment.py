@@ -83,6 +83,20 @@ class CausalExperimentConfig:
     tendon_sweep_limits: tuple[float, float] = (0.0, 15.0)
     allow_insertion_centering: bool = False
     max_duration_s: float = 950.0
+    # tendon_start: short raw-shaft pulses that characterize motor start-up
+    # (speed, rest, history, knob position, speed change, coupled leads).
+    # Positions and limits are absolute bend in mm; speeds are logical mm/s.
+    tendon_start_positions: tuple[float, ...] = (2.0, 6.0, 9.5)
+    tendon_start_bend_limits: tuple[float, float] = (0.5, 10.7)
+    tendon_start_pulse_s: float = 0.3
+    tendon_start_rest_s: float = 0.3
+    tendon_start_speeds: tuple[float, ...] = (2.0, 4.5)
+    tendon_start_middle_speed: float = 4.0
+    tendon_start_dwells_s: tuple[float, float, float] = (0.1, 1.0, 3.0)
+    tendon_start_insertion_speeds: tuple[float, ...] = (2.0, 10.0)
+    tendon_start_leads_s: tuple[float, ...] = (0.0, 0.04, 0.08)
+    tendon_start_combined_repeats: int = 2
+    tendon_start_static_s: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -99,12 +113,30 @@ class CausalExperimentEpisode(IdentificationEpisode):
     timing_raw_delays_s: tuple[float, float] | None = None
     insertion_plateau_mm: float | None = None
     branch_order: str | None = None
+    # Optional piecewise-constant raw-shaft profile ``(duration_s, v_raw0,
+    # v_raw2)`` from local time zero. It replaces the single delayed pulse per
+    # shaft, so one episode can hold a rest, a start, a speed change while
+    # running or a lead between shafts. Only the tendon_start schedule sets it.
+    timing_raw_profile: tuple[tuple[float, float, float], ...] | None = None
 
     @property
     def is_timing_episode(self) -> bool:
         return self.timing_raw_start is not None
 
+    def _profile_axis_state(self, axis: int, local_t: float):
+        position = float(self.timing_raw_start[axis])
+        elapsed = 0.0
+        for duration, *speeds in self.timing_raw_profile:
+            speed = float(speeds[axis])
+            if local_t < elapsed + duration:
+                return position + speed*max(0.0, local_t - elapsed), speed, 0.0
+            position += speed*duration
+            elapsed += duration
+        return position, 0.0, 0.0
+
     def _timing_axis_state(self, axis: int, local_t: float):
+        if self.timing_raw_profile is not None:
+            return self._profile_axis_state(axis, float(local_t))
         start = float(self.timing_raw_start[axis])
         end = float(self.timing_raw_end[axis])
         speed = float(self.timing_raw_speeds[axis])
@@ -140,6 +172,8 @@ class CausalExperimentEpisode(IdentificationEpisode):
         return position, velocity, acceleration
 
     def _timing_axis_active(self, axis: int, local_t: float) -> bool:
+        if self.timing_raw_profile is not None:
+            return self._profile_axis_state(axis, float(local_t))[1] != 0.0
         delta = self.timing_raw_end[axis] - self.timing_raw_start[axis]
         if abs(delta) <= 1e-12:
             return False
@@ -159,6 +193,9 @@ class CausalExperimentEpisode(IdentificationEpisode):
     def command_speed_limits(self, local_t: float):
         if not self.is_timing_episode:
             return super().command_speed_limits(local_t)
+        if self.timing_raw_profile is not None:
+            raw0, raw2 = np.abs(self.timing_raw_velocity(local_t))
+            return np.array([raw0 + raw2, 0.0, raw2])
         raw0 = (self.timing_raw_speeds[0]
                 if self._timing_axis_active(0, local_t) else 0.0)
         raw2 = (self.timing_raw_speeds[1]
@@ -169,6 +206,12 @@ class CausalExperimentEpisode(IdentificationEpisode):
     def maximum_command_speed_limits(self):
         if not self.is_timing_episode:
             return super().maximum_command_speed_limits
+        if self.timing_raw_profile is not None:
+            # The ceiling sums magnitudes even when the two shafts move in
+            # opposite directions; logical insertion is raw0 + raw2.
+            raw0, raw2 = np.max(np.abs(np.asarray(
+                [segment[1:] for segment in self.timing_raw_profile])), axis=0)
+            return np.array([raw0 + raw2, 0.0, raw2])
         raw0, raw2 = self.timing_raw_speeds
         return np.array([raw0 + raw2, 0.0, raw2])
 
@@ -187,7 +230,7 @@ class CausalExperimentGenerator:
         "full", "phase_0_2", "stationary", "insertion",
         "tendon_motor", "compensated_bend", "timing",
         "chassis_knob_backdrive", "insertion_rotation",
-        "compensated_bend_insertion_sweep",
+        "compensated_bend_insertion_sweep", "tendon_start", "tendon_reversal",
     })
     SCHEDULE_ALIASES = {
         "phase_1": "stationary",
@@ -300,6 +343,8 @@ class CausalExperimentGenerator:
             "chassis_knob_backdrive": (0, 2),
             "insertion_rotation": (0, 1),
             "compensated_bend_insertion_sweep": (),
+            "tendon_start": (),
+            "tendon_reversal": (),
         }[self.schedule]
         if any(self.amplitudes[axis] + 1e-12 < minimum[axis]
                for axis in required_axes):
@@ -552,6 +597,253 @@ class CausalExperimentGenerator:
             "static_end", center, self.config.static_s))
         return episodes
 
+    def _raw_profile_episode(self, name, basis, tier, repetition, start,
+                             profile):
+        """One raw-shaft profile episode starting at relative logical ``start``.
+
+        Every segment must give each logical axis either zero speed or a speed
+        inside the reliable band, so the manager projection cannot change the
+        raw command (the collection node aborts if it would).
+        """
+        start = np.asarray(start, dtype=float)
+        segments = tuple((float(d), float(a), float(b))
+                         for d, a, b in profile if d > 0.0)
+        if not segments:
+            raise ValueError(f"{name}: empty raw profile")
+        for duration, raw0, raw2 in segments:
+            logical = np.array([raw0 + raw2, 0.0, raw2])
+            moving = np.abs(logical) > 1e-12
+            if (not math.isfinite(duration)
+                    or np.any(np.abs(logical[moving])
+                              < self.minimum_speeds[moving] - 1e-9)
+                    or np.any(np.abs(logical)
+                              > self.maximum_speeds + 1e-9)):
+                raise ValueError(
+                    f"{name}: segment {(duration, raw0, raw2)} gives logical "
+                    f"speed {logical.tolist()} outside the reliable band")
+        raw_start = np.array([start[0] - start[2], start[2]])
+        raw_end = raw_start + np.sum(
+            [[d*a, d*b] for d, a, b in segments], axis=0)
+        speeds = np.max(np.abs([[a, b] for _, a, b in segments]), axis=0)
+        onsets = []
+        for axis in (1, 2):
+            elapsed, onset = 0.0, 0.0
+            for segment in segments:
+                if segment[axis] != 0.0:
+                    onset = elapsed
+                    break
+                elapsed += segment[0]
+            onsets.append(onset)
+        episode = CausalExperimentEpisode(
+            name=name, start_s=0.0,
+            duration_s=float(sum(segment[0] for segment in segments)),
+            segments=(), excitation_basis=basis, speed_tier=tier,
+            repetition=repetition, timing_raw_start=tuple(raw_start.tolist()),
+            timing_raw_end=tuple(raw_end.tolist()),
+            timing_raw_speeds=tuple(speeds.tolist()),
+            timing_raw_delays_s=tuple(onsets), timing_raw_profile=segments)
+        end = np.array([raw_end[0] + raw_end[1], start[1], raw_end[1]])
+        return episode, end
+
+    def _build_tendon_start_episodes(self):
+        """Motor start-up characterization from short raw pulses.
+
+        At every knob position: tendon-only pulses at each speed, both
+        directions, same-direction and after-reversal history (++-- or --++,
+        chosen so excursions head toward the middle of the range). At the
+        middle position also: rest-time levels, an intermediate speed, speed
+        changes without stopping, insertion-only references and coupled starts
+        with the tendon leading. Raw shaft 0 is held for every tendon-only
+        pulse and setup move.
+        """
+        cfg = self.config
+        pulse, rest = float(cfg.tendon_start_pulse_s), float(
+            cfg.tendon_start_rest_s)
+        speeds = [float(v) for v in cfg.tendon_start_speeds]
+        slow = speeds[0]
+        positions = [float(v) for v in cfg.tendon_start_positions]
+        middle_index = len(positions)//2
+        midpoint = 0.5*sum(cfg.tendon_start_bend_limits)
+        add, move_to_bend, finish = self._raw_profile_session("tendon_start")
+
+        for index, position in enumerate(positions):
+            move_to_bend(f"tendon_start_enter_p{index}", position)
+            order = (-1, -1, 1, 1) if position > midpoint else (1, 1, -1, -1)
+            for speed in speeds:
+                for repetition in range(1, cfg.repeats + 1):
+                    for k, sign in enumerate(order):
+                        add(f"tendon_start_p{index}_{speed:g}mms_rep"
+                            f"{repetition}_{k}", "tendon_start", f"{speed:g}",
+                            repetition, [(rest, 0, 0), (pulse, 0, sign*speed)])
+            if index != middle_index:
+                continue
+            short, medium, long = (float(v) for v in cfg.tendon_start_dwells_s)
+            for dwell in (short, medium):
+                for repetition in range(1, cfg.repeats + 1):
+                    for k, sign in enumerate(order):
+                        add(f"tendon_start_dwell_{dwell:g}s_rep{repetition}_{k}",
+                            "tendon_start_dwell", f"{slow:g}", repetition,
+                            [(dwell, 0, 0), (pulse, 0, sign*slow)])
+            for repetition in range(1, cfg.repeats + 1):
+                for sign in (order[0], order[2]):
+                    add(f"tendon_start_dwell_{long:g}s_rep{repetition}_lead_{sign:+d}",
+                        "tendon_start_dwell", f"{slow:g}", repetition,
+                        [(rest, 0, 0), (pulse, 0, sign*slow)])
+                    add(f"tendon_start_dwell_{long:g}s_rep{repetition}_{sign:+d}",
+                        "tendon_start_dwell", f"{slow:g}", repetition,
+                        [(long, 0, 0), (pulse, 0, sign*slow)])
+            fast = float(cfg.tendon_start_middle_speed)
+            for repetition in range(1, cfg.repeats + 1):
+                for k, sign in enumerate(order):
+                    add(f"tendon_start_mid_{fast:g}mms_rep{repetition}_{k}",
+                        "tendon_start", f"{fast:g}", repetition,
+                        [(rest, 0, 0), (pulse, 0, sign*fast)])
+            for repetition in range(1, 2*cfg.repeats + 1):
+                sign = order[0] if repetition % 2 else -order[0]
+                add(f"tendon_start_speed_change_rep{repetition}",
+                    "tendon_start_speed_change", f"{slow:g}-{fast:g}",
+                    repetition, [(rest, 0, 0), (pulse, 0, sign*slow),
+                                 (pulse, 0, sign*fast), (pulse, 0, sign*slow)])
+            for speed in (float(v) for v in cfg.tendon_start_insertion_speeds):
+                for repetition in range(1, cfg.repeats + 1):
+                    for sign in (1, -1):
+                        add(f"tendon_start_insertion_{speed:g}mms_rep"
+                            f"{repetition}_{sign:+d}", "tendon_start_insertion",
+                            f"{speed:g}", repetition,
+                            [(rest, 0, 0), (pulse, sign*speed, 0)])
+            pairs = ((slow, slow), (-2*slow, slow), (-slow, -slow),
+                     (2*slow, -slow))
+            for lead in (float(v) for v in cfg.tendon_start_leads_s):
+                for repetition in range(1, cfg.tendon_start_combined_repeats + 1):
+                    for raw0, raw2 in pairs:
+                        profile = ([(rest, 0, 0), (pulse, raw0, raw2)]
+                                   if lead == 0.0 else
+                                   [(rest, 0, 0), (lead, 0, raw2),
+                                    (pulse - lead, raw0, raw2), (lead, raw0, 0)])
+                        add(f"tendon_start_combined_lead_{round(lead*1e3):03d}ms_"
+                            f"rep{repetition}_{raw0:+g}_{raw2:+g}",
+                            f"tendon_start_combined_lead_{round(lead*1e3):03d}ms",
+                            f"{slow:g}", repetition, profile)
+        return finish()
+
+    def _raw_profile_session(self, prefix):
+        """Shared frame for raw-profile schedules.
+
+        Returns ``add`` (append one raw-profile episode from the current
+        state), ``move_to_bend`` (setup move to an absolute bend holding raw
+        shaft 0) and ``finish`` (exit to the run start, end hold, raw shaft 0
+        return and bend-band checks). Static holds bracket the schedule.
+        """
+        cfg = self.config
+        setup_speed = min(self.slow_speeds[0], self.slow_speeds[2])
+        setup_speeds = np.array(
+            [setup_speed, self.slow_speeds[1], setup_speed])
+        episodes = [self._hold(
+            f"{prefix}_static_start", np.zeros(3), cfg.tendon_start_static_s)]
+        state = {"p": np.zeros(3)}
+
+        def add(name, basis, tier, repetition, profile):
+            episode, end = self._raw_profile_episode(
+                name, basis, tier, repetition, state["p"], profile)
+            episodes.append(episode)
+            state["p"] = end
+
+        def move_to_bend(name, absolute_bend):
+            target = state["p"].copy()
+            delta = absolute_bend - (self.start_position[2] + target[2])
+            target[[0, 2]] += delta  # [d,0,d] holds raw shaft 0
+            episodes.append(self._episode(
+                name, "shaft_2", "slow", 0, [state["p"], target],
+                setup_speeds, endpoint_holds=False, final_hold=0.5))
+            state["p"] = target
+
+        def finish():
+            final = state["p"]
+            if not np.isclose(final[0] - final[2], 0.0, atol=1e-9):
+                raise ValueError(f"{prefix} raw shaft 0 does not return to start")
+            episodes.append(self._episode(
+                f"{prefix}_exit", "shaft_2", "slow", 0, [final, np.zeros(3)],
+                setup_speeds, endpoint_holds=False, final_hold=0.5))
+            episodes.append(self._hold(
+                f"{prefix}_static_end", np.zeros(3), cfg.tendon_start_static_s))
+            self._validate_tendon_start(episodes)
+            return episodes
+
+        return add, move_to_bend, finish
+
+    def _build_tendon_reversal_episodes(self):
+        """On-the-fly reversal characterization at the middle knob position.
+
+        Each reversal changes the raw shaft sign without an intermediate zero
+        command. Matched pairs separated by a rest are the in-session
+        from-rest reference. Blocks: tendon reversals at each speed (with the
+        rest-separated reference), tendon reversals combined with a speed
+        change, insertion-shaft reversals, and tendon reversals while the
+        insertion shaft keeps running. On legacy firmware every reversal is a
+        coordinated restart; on the on-the-fly test image it is direction then
+        speed without disabling. Raw shaft 0 returns to the run start.
+        """
+        cfg = self.config
+        pulse, rest = float(cfg.tendon_start_pulse_s), float(
+            cfg.tendon_start_rest_s)
+        speeds = [float(v) for v in cfg.tendon_start_speeds]
+        slow, fast = speeds[0], speeds[-1]
+        positions = [float(v) for v in cfg.tendon_start_positions]
+        add, move_to_bend, finish = self._raw_profile_session("tendon_reversal")
+        move_to_bend("tendon_reversal_enter", positions[len(positions)//2])
+        for speed in speeds:
+            for repetition in range(1, cfg.repeats + 1):
+                for sign in (1, -1):
+                    add(f"tendon_reversal_{speed:g}mms_rep{repetition}_{sign:+d}",
+                        "tendon_reversal", f"{speed:g}", repetition,
+                        [(rest, 0, 0), (pulse, 0, sign*speed),
+                         (pulse, 0, -sign*speed)])
+                    add(f"tendon_reversal_rest_{speed:g}mms_rep{repetition}_{sign:+d}",
+                        "tendon_reversal_rest", f"{speed:g}", repetition,
+                        [(rest, 0, 0), (pulse, 0, sign*speed), (rest, 0, 0),
+                         (pulse, 0, -sign*speed)])
+        for repetition in range(1, cfg.repeats + 1):
+            for sign in (1, -1):
+                # The two orders cancel, so each pair returns to the position.
+                for first, second in ((slow, fast), (fast, slow)):
+                    add(f"tendon_reversal_speed_change_{first:g}-{second:g}mms_"
+                        f"rep{repetition}_{sign:+d}",
+                        "tendon_reversal_speed_change", f"{first:g}-{second:g}",
+                        repetition, [(rest, 0, 0), (pulse, 0, sign*first),
+                                     (pulse, 0, -sign*second)])
+        for speed in (float(v) for v in cfg.tendon_start_insertion_speeds):
+            for repetition in range(1, cfg.repeats + 1):
+                for sign in (1, -1):
+                    add(f"tendon_reversal_insertion_{speed:g}mms_rep{repetition}_"
+                        f"{sign:+d}", "tendon_reversal_insertion", f"{speed:g}",
+                        repetition, [(rest, 0, 0), (pulse, sign*speed, 0),
+                                     (pulse, -sign*speed, 0)])
+        for repetition in range(1, cfg.tendon_start_combined_repeats + 1):
+            # Logical insertion raw0 + raw2 stays at 2*slow +- slow: inside the band.
+            for raw0 in (2*slow, -2*slow):
+                for sign in (1, -1):
+                    add(f"tendon_reversal_with_insertion_rep{repetition}_"
+                        f"{raw0:+g}_{sign:+d}", "tendon_reversal_with_insertion",
+                        f"{slow:g}", repetition,
+                        [(rest, 0, 0), (pulse, raw0, sign*slow),
+                         (pulse, raw0, -sign*slow)])
+        return finish()
+
+    def _validate_tendon_start(self, episodes):
+        """Every pulse stays inside the declared absolute bend band."""
+        low, high = (float(v) for v in self.config.tendon_start_bend_limits)
+        for episode in episodes:
+            if episode.timing_raw_profile is None:
+                continue
+            times = np.r_[0.0, np.cumsum(
+                [segment[0] for segment in episode.timing_raw_profile])]
+            bend = np.array([episode.state(t)[0][2] for t in times])
+            bend += self.start_position[2]
+            if bend.min() < low - 1e-9 or bend.max() > high + 1e-9:
+                raise ValueError(
+                    f"{episode.name}: bend {bend.min():.3f}..{bend.max():.3f} "
+                    f"outside [{low}, {high}]")
+
     def _build_compensated_bend_insertion_sweep(self):
         """Sweep compensated bending at four fixed insertion plateaus.
 
@@ -672,6 +964,14 @@ class CausalExperimentGenerator:
         if self.schedule == "timing":
             return self._with_episode_starts(
                 self._build_timing_episodes(center, bias))
+
+        if self.schedule == "tendon_start":
+            return self._with_episode_starts(
+                self._build_tendon_start_episodes())
+
+        if self.schedule == "tendon_reversal":
+            return self._with_episode_starts(
+                self._build_tendon_reversal_episodes())
 
         if self.schedule == "compensated_bend_insertion_sweep":
             return self._with_episode_starts(
@@ -851,7 +1151,8 @@ class CausalExperimentGenerator:
                 episode.repetition,
                 episode.timing_raw_start, episode.timing_raw_end,
                 episode.timing_raw_speeds, episode.timing_raw_delays_s,
-                episode.insertion_plateau_mm, episode.branch_order))
+                episode.insertion_plateau_mm, episode.branch_order,
+                episode.timing_raw_profile))
             start_s += episode.duration_s
         return tuple(result)
 
@@ -1020,6 +1321,9 @@ class CausalExperimentGenerator:
                 "planned_raw_onset_delays_s": (
                     None if episode.planned_raw_onset_delays_s is None else
                     list(episode.planned_raw_onset_delays_s)),
+                "raw_profile": (
+                    None if episode.timing_raw_profile is None else
+                    [list(segment) for segment in episode.timing_raw_profile]),
             } for episode in self._episodes],
         }
 

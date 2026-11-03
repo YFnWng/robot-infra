@@ -17,7 +17,7 @@ from launch.actions import (
     RegisterEventHandler)
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
-from launch.events.process import SignalProcess, matches_name
+from launch.events.process import SignalProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -216,9 +216,11 @@ def _setup(context, *_args, **_kwargs):
 
         def runner_exit(_event, _context):
             state["runner_finished"] = True
+            # Match the action itself: launch appends "-N" to process names,
+            # so matching by the "causal_rosbag_record" name never fires.
             return EmitEvent(event=SignalProcess(
                 signal_number=signal.SIGINT,
-                process_matcher=matches_name("causal_rosbag_record")))
+                process_matcher=lambda action: action is recorder))
 
         def recorder_exit(_event, _context):
             if not state["runner_finished"]:
