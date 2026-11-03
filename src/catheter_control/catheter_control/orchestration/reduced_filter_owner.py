@@ -106,16 +106,24 @@ class ReducedFilterOwner:
                 return None
             self.last_result = result
             self.faulted = self.faulted or result.status == 'fault'
-            # Kernel shapes depend on the active law count. Prepare each new count here, in the estimator
-            # owner after a step and never during a solve; the first is inside the start-up queue allowance.
+            # Kernel shapes depend on the active law count. At the first preparation (inside the start-up
+            # queue allowance) every count up to the estimator's maximum is prepared, the others from a
+            # shape-only example root, so no preparation runs inside a later step. A count not prepared
+            # yet (unknown maximum) is still prepared here, after a step and never during a solve.
             if result.status in ('initialized', 'tracking'):
                 laws = self._law_count()
                 if laws not in self.prepared_law_counts:
-                    started = self.clock()
-                    root = self.backend.root(self.stream, int(self.stream.aligner.committed[0]))
-                    self.backend.prepare(root, self.candidate_counts, self.step_s)
-                    self.prepared_law_counts.add(laws)
-                    self.preparations.append((laws, self.clock()-started))
+                    committed_ns = int(self.stream.aligner.committed[0])
+                    maximum = int(self.stream.estimator.options.get('maximum_laws', laws))
+                    for count in [laws] + [k for k in range(1, maximum+1) if k != laws]:
+                        if count in self.prepared_law_counts:
+                            continue
+                        started = self.clock()
+                        root = (self.backend.root(self.stream, committed_ns) if count == laws
+                                else self.backend.example_root(self.stream, committed_ns, count))
+                        self.backend.prepare(root, self.candidate_counts, self.step_s)
+                        self.prepared_law_counts.add(count)
+                        self.preparations.append((count, self.clock()-started))
             return result
 
     def _law_count(self):

@@ -1,0 +1,7 @@
+# First closed-loop tests of the reduced-filter backend (user decision,
+# 2026-11-03): half of hardware_v175_no_rotation's controller velocity caps,
+# rotation 0. Manager and firmware limits are unchanged.
+/**:
+  ros__parameters:
+    marker_estimator: ukf
+    controller_velocity_max: [5.0, 0.0, 2.25, 2.0, 12.5, 12.5]

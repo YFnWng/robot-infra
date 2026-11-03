@@ -45,6 +45,10 @@ from .orchestration.estimator_owner import marker_measurement, stamp_ns
 from .orchestration.parameters import declare_parameters
 from .orchestration.runtime import load_runtime_pair
 from .orchestration.planner_process import ProcessPlanner
+from .orchestration.reduced_filter_owner import OrderedInbox, ReducedFilterOwner
+from .orchestration.reduced_filter_settings import (
+    load_reduced_filter, plan_due, reduced_filter_contract, reduced_planner_config,
+    require_filter_owned_switches_off)
 from .transmission.engaged_gain import EngagedGainConfig
 from .safety.hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
 from .safety.lifecycle import (
@@ -62,6 +66,13 @@ from .planning.tracking import TipForecastMonitor, tip_tracking_error_mm
 
 
 SOURCE_NAME = "catheter_mppi"
+# Commanding reduced-filter backend: the filter owns estimation, play and response; this node keeps the
+# command heartbeat, arming, mode claim, gates and fault handling (user-approved design, 2026-11-03).
+REDUCED_BACKEND = "reduced_filter"
+# Owner health -> readiness-gate health. HOLDING is a transient rejection: the gates tolerate it while the
+# root refuses, so that cycle commands zero; a persisting hold fails marker freshness into the bounded pause.
+REDUCED_GATE_HEALTH = {"TRACKING": "TRACKING", "HOLDING": "DEGRADED"}
+REDUCED_OWNER_PERIOD_S = 0.005
 
 
 class CatheterControlNode(Node):
@@ -70,10 +81,12 @@ class CatheterControlNode(Node):
     def __init__(self):
         super().__init__("catheter_mppi")
         declare_parameters(self, source_name=SOURCE_NAME)
-        if str(self.get_parameter("estimator_backend").value) != "v171":
+        backend = str(self.get_parameter("estimator_backend").value)
+        if backend not in ("v171", REDUCED_BACKEND):
             raise ValueError(
-                "this controller runs only estimator_backend=v171; the "
+                f"this controller runs estimator_backend=v171 or {REDUCED_BACKEND}; the "
                 "reduced-filter dry run has its own node class")
+        self.reduced_filter = backend == REDUCED_BACKEND
         self.source = str(self.get_parameter("source_name").value)
         if self.source != SOURCE_NAME:
             raise ValueError(f"source_name must be {SOURCE_NAME!r}")
@@ -109,6 +122,13 @@ class CatheterControlNode(Node):
                 "estimator_initial_roll_hypotheses").value)
         if not self.frame_id:
             raise ValueError("frame_id must not be empty")
+        if self.reduced_filter:
+            require_filter_owned_switches_off(
+                lambda name: self.get_parameter(name).value)
+            if (self.control_method != "mppi"
+                    or self.mppi_execution_mode != "velocity"):
+                raise ValueError(
+                    "the reduced-filter backend runs MPPI velocity control only")
 
         self._steady = time.monotonic
         self._lock = threading.RLock()
@@ -310,20 +330,33 @@ class CatheterControlNode(Node):
             adaptation_maximum_direction_deviation_deg=float(
                 self.get_parameter(
                     "adaptation_maximum_direction_deviation_deg").value))
-        self.runtime_bundle, self.planner_runtime_bundle = load_runtime_pair(
-            str(self.get_parameter("model_manifest").value),
-            estimator_device=str(self.estimator_compute_device.device),
-            estimator_dtype=str(self.get_parameter("estimator_dtype").value).strip() or "float32",
-            planner_device=str(self.compute_device.device), options=runtime_options,
-            experimental_engagement=self.engagement_control_enabled)
-        if self.engagement_control_enabled:
-            runtime_options = {}
-        self.runtime = self.runtime_bundle.runtime
-        self.planner_runtime = self.planner_runtime_bundle.runtime
-        if self.engagement_control_enabled:
-            self.runtime.use_external_tendon_confirmation()
-        self.model_diagnostics = self.runtime.diagnostics()
-        self.model_valid = True
+        if self.reduced_filter:
+            # The reduced filter replaces the v171 runtime pair; validity comes
+            # only from the filter owner's health (see _reduced_owner_tick).
+            self.runtime_bundle = self.planner_runtime_bundle = None
+            self.runtime = self.planner_runtime = None
+            self.reduced_backend, self.reduced_stream = load_reduced_filter(
+                str(self.get_parameter("reduced_filter_artifact_root").value),
+                float(self.get_parameter("reduced_filter_image_period_ms").value),
+                int(self.get_parameter("reduced_filter_startup_pending_images").value),
+                str(self.compute_device.device))
+            self.model_diagnostics = {}
+            self.model_valid = False
+        else:
+            self.runtime_bundle, self.planner_runtime_bundle = load_runtime_pair(
+                str(self.get_parameter("model_manifest").value),
+                estimator_device=str(self.estimator_compute_device.device),
+                estimator_dtype=str(self.get_parameter("estimator_dtype").value).strip() or "float32",
+                planner_device=str(self.compute_device.device), options=runtime_options,
+                experimental_engagement=self.engagement_control_enabled)
+            if self.engagement_control_enabled:
+                runtime_options = {}
+            self.runtime = self.runtime_bundle.runtime
+            self.planner_runtime = self.planner_runtime_bundle.runtime
+            if self.engagement_control_enabled:
+                self.runtime.use_external_tendon_confirmation()
+            self.model_diagnostics = self.runtime.diagnostics()
+            self.model_valid = True
         self.contract = load_hardware_contract(
             str(self.get_parameter("limits_file").value),
             str(self.get_parameter("catheter").value))
@@ -348,6 +381,12 @@ class CatheterControlNode(Node):
             velocity_max=resolved_velocity_max,
             synchronized_sheath_rotation=bool(self.get_parameter(
                 "synchronized_sheath_rotation").value))
+        if self.reduced_filter:
+            # Same controller-only limits as the dry run: no rotation, tendon
+            # upper limit inside the filter's support (manager limits unchanged).
+            self.contract = reduced_filter_contract(
+                self.contract, controller_velocity_max, float(
+                    self.get_parameter("reduced_filter_tendon_upper_mm").value))
         if self.contract.model_encoder_count_lower is None:
             raise ValueError(
                 "selected catheter profile lacks v171 model encoder bounds")
@@ -550,6 +589,8 @@ class CatheterControlNode(Node):
                 cooldown_s=float(self.get_parameter(
                     "reversal_scheduler_cooldown_s").value)))
         self.planner = CatheterMppi(
+            self.reduced_backend, self.contract, reduced_planner_config(self)
+        ) if self.reduced_filter else CatheterMppi(
             self.planner_runtime, self.contract,
             MppiConfig(
                 always_engaged_rollout=(self.takeup_transaction_enabled
@@ -637,6 +678,16 @@ class CatheterControlNode(Node):
                 identity=self.runtime_bundle.identity.manifest_sha256,
                 threads=(self.torch_intraop_threads, self.torch_interop_threads))
         self.reset_pending = False
+        if self.reduced_filter:
+            self.reduced_owner = ReducedFilterOwner(
+                self.reduced_stream, self.reduced_backend,
+                candidate_counts=self.planner.candidate_counts(),
+                step_s=self.planner.config.point_rollout_step_s, clock=time.perf_counter)
+            self.reduced_inbox = OrderedInbox()
+            # Committed image of the last plan; plan_due runs on image stamps.
+            self.reduced_last_plan_image_ns = None
+            # Set when a tick reaches the planner, so a skipped tick keeps the due image.
+            self.reduced_plan_attempted = False
 
         self.adapj = None
         if self.control_method == "adapj":
@@ -666,6 +717,7 @@ class CatheterControlNode(Node):
         self.heartbeat_group = MutuallyExclusiveCallbackGroup()
         self._create_ros_interfaces()
         plan_rate = float(self.get_parameter("plan_rate_hz").value)
+        self.plan_rate_hz = plan_rate
         command_rate = float(self.get_parameter("command_rate_hz").value)
         diagnostic_rate = float(
             self.get_parameter("diagnostic_rate_hz").value)
@@ -687,19 +739,32 @@ class CatheterControlNode(Node):
         self._marker_schedule = CausalMarkerSchedule(
             marker_rate, self._steady())
         timer_started = self._steady()
-        self._timer_probes = {
-            "estimator": PeriodicTimerProbe(
-                1.0/encoder_rate, timer_started),
-            "plan": PeriodicTimerProbe(1.0/plan_rate, timer_started),
-            "heartbeat": PeriodicTimerProbe(
-                1.0/command_rate, timer_started),
-        }
-        self.estimator_timer = self.create_timer(
-            1.0/encoder_rate, self._estimator_tick,
-            callback_group=self.estimator_group)
-        self.plan_timer = self.create_timer(
-            1.0/plan_rate, self._plan_tick,
-            callback_group=self.plan_group)
+        if self.reduced_filter:
+            # One 5 ms owner callback holds the filter and plans right after a
+            # committed image (commit-triggered); there is no plan timer.
+            self._timer_probes = {
+                "estimator": PeriodicTimerProbe(REDUCED_OWNER_PERIOD_S, timer_started),
+                "heartbeat": PeriodicTimerProbe(
+                    1.0/command_rate, timer_started),
+            }
+            self.estimator_timer = self.create_timer(
+                REDUCED_OWNER_PERIOD_S, self._reduced_owner_tick,
+                callback_group=self.estimator_group)
+            self.plan_timer = None
+        else:
+            self._timer_probes = {
+                "estimator": PeriodicTimerProbe(
+                    1.0/encoder_rate, timer_started),
+                "plan": PeriodicTimerProbe(1.0/plan_rate, timer_started),
+                "heartbeat": PeriodicTimerProbe(
+                    1.0/command_rate, timer_started),
+            }
+            self.estimator_timer = self.create_timer(
+                1.0/encoder_rate, self._estimator_tick,
+                callback_group=self.estimator_group)
+            self.plan_timer = self.create_timer(
+                1.0/plan_rate, self._plan_tick,
+                callback_group=self.plan_group)
         self.heartbeat_timer = self.create_timer(
             1.0/command_rate, self._heartbeat_tick,
             callback_group=self.heartbeat_group)
@@ -995,6 +1060,11 @@ class CatheterControlNode(Node):
         if not valid:
             self._fault_if_active("encoder_feedback_out_of_range")
             return
+        if getattr(self, "reduced_filter", False):
+            # The reduced filter consumes every encoder sample in arrival order;
+            # encoder_time advances only when its owner absorbs one.
+            self.reduced_inbox.put(("encoder", timestamp_ns, counts.tolist(), now))
+            return
         with self._lock:
             # The device publishes near 180 Hz. Keep only the newest sample;
             # the learned recurrence is advanced by a bounded-rate timer.
@@ -1168,6 +1238,9 @@ class CatheterControlNode(Node):
             return
         self._record_header_age("marker", message)
         arrival = self._steady()
+        if getattr(self, "reduced_filter", False):
+            self.reduced_inbox.put(("marker", timestamp_ns, points*1000.0, arrival))
+            return
         quality = dict(quality, callback_arrival_ros_ns=self.get_clock().now().nanoseconds)
         with self._lock:
             if timestamp_ns <= self._simulation_reset_source_floor_ns:
@@ -1450,6 +1523,67 @@ class CatheterControlNode(Node):
         self._process_marker_sample(marker)
         self._process_encoder_sample(self._take_encoder_sample())
 
+    @instrument_timer("estimator")
+    def _reduced_owner_tick(self):
+        """Sole owner of the reduced filter (reduced_filter backend only).
+
+        Absorbs encoder and marker inputs in arrival order, advances at most one image, maps the owner's
+        health onto the existing readiness gates, and plans right after a committed image when the plan
+        is due (image-stamp cadence) and the owner is caught up. Each gate field is written only by the
+        event it certifies: encoder_time when an encoder sample is absorbed, marker_time and
+        accepted_observations when an image commits as tracking.
+        """
+        from cr_meta_lnn.deployment.v171_streaming_runtime import MarkerUpdateResult
+        owner = self.reduced_owner
+        events, overflowed = self.reduced_inbox.drain()
+        if overflowed:
+            owner.mark_history_lost()
+            self._fault_if_active("reduced_filter_input_overflow")
+        absorbed_encoder_at = None
+        for kind, stamp, values, arrival in events:
+            try:
+                if kind == "encoder":
+                    owner.add_encoder(stamp, values)
+                    absorbed_encoder_at = arrival
+                else:
+                    owner.add_image(stamp, values)
+            except ValueError as error:
+                self._fault_if_active(f"reduced_filter_input:{error}"[:120])
+        if absorbed_encoder_at is not None:
+            with self._lock:
+                self.encoder_time = absorbed_encoder_at
+        result = owner.process()
+        health = owner.health()
+        with self._lock:
+            self.consecutive_rejections = int(health.consecutive_rejections)
+            self.estimator_health = REDUCED_GATE_HEALTH.get(
+                health.estimator_health, health.estimator_health)
+            self.model_valid = health.estimator_health != "FAULT"
+            if result is not None:
+                accepted = result.status in ("initialized", "tracking")
+                self.last_marker_result = MarkerUpdateResult(
+                    accepted, str(result.reason or result.status), self.estimator_health, 4)
+                if result.status == "tracking":
+                    self.accepted_observations += 1
+                    self.marker_time = self._steady()
+                    self.runtime_initialized = True
+                elif (result.status == "holding" and self.armed
+                        and not self.fault_latched
+                        and self.state == ControllerState.ACTIVE):
+                    # A rejected image never authorizes motion: hold zero until
+                    # an image commits again (persisting holds fail freshness).
+                    self.last_command.fill(0.0)
+                    self.last_effective_command.fill(0.0)
+                    self.last_command_time = self._steady()
+                    self.state_reason = "reduced_filter_holding_zero"
+        if (result is not None and result.status == "tracking" and health.ready
+                and plan_due(self.reduced_last_plan_image_ns, int(result.source_ns),
+                             1.0/self.plan_rate_hz)):
+            self.reduced_plan_attempted = False
+            self._plan_tick()
+            if self.reduced_plan_attempted:
+                self.reduced_last_plan_image_ns = int(result.source_ns)
+
     def _marker_diagnostic_cb(self, message: DiagnosticArray):
         relevant = [status for status in message.status
                     if status.name == "automation/four_ring_markers"]
@@ -1691,6 +1825,10 @@ class CatheterControlNode(Node):
     def _reset_simulation_state_cb(
             self, _request: Trigger.Request, response: Trigger.Response):
         """Reset estimator/control memory only on an explicitly simulated node."""
+        if getattr(self, "reduced_filter", False):
+            response.success = False
+            response.message = "reduced_filter_backend_has_no_simulation_reset"
+            return response
         # Match the planner's lock order (_plan_lock -> _lock) so a reset can
         # never deadlock against a timer callback finishing its disarmed tick.
         if not self._plan_lock.acquire(timeout=0.25):
@@ -2094,13 +2232,36 @@ class CatheterControlNode(Node):
                     None if self.observed_tip is None else
                     self.observed_tip.copy())
 
-            # The estimator owner publishes complete replace-only snapshots.
-            # Reading one never waits for marker correction or rewind/replay.
-            with self._timed_lock(self._snapshot_lock, "plan_snapshot"):
-                root = self._planner_snapshot
-                snapshot_source_time = self._planner_snapshot_source_time
-                tip_readout_offset = self._planner_tip_readout_offset_m
-                transmission_snapshot = self._planner_transmission_snapshot
+            if getattr(self, "reduced_filter", False):
+                # Same thread as the owner (commit-triggered): the root is the
+                # filter's committed state plus the measured encoder prefix.
+                rooted = self.reduced_owner.plan_root()
+                if rooted.root is None:
+                    with self._lock:
+                        if self.state == ControllerState.ACTIVE:
+                            self.last_command.fill(0.0)
+                            self.last_effective_command.fill(0.0)
+                            self.last_command_time = self._steady()
+                            self.state_reason = "reduced_filter_root_refused_zero"
+                    return
+                if reference_source == "PATH":
+                    with self._lock:
+                        self._fault_locked("reduced_filter_path_reference_unsupported")
+                    return
+                root = rooted.root
+                position = np.asarray(rooted.joint_position, dtype=np.float64)
+                with self._lock:
+                    snapshot_source_time = self.encoder_time
+                tip_readout_offset = None
+                transmission_snapshot = None
+            else:
+                # The estimator owner publishes complete replace-only snapshots.
+                # Reading one never waits for marker correction or rewind/replay.
+                with self._timed_lock(self._snapshot_lock, "plan_snapshot"):
+                    root = self._planner_snapshot
+                    snapshot_source_time = self._planner_snapshot_source_time
+                    tip_readout_offset = self._planner_tip_readout_offset_m
+                    transmission_snapshot = self._planner_transmission_snapshot
             if root is None or snapshot_source_time is None:
                 with self._lock:
                     self._fault_locked("planner_snapshot_unavailable")
@@ -2113,6 +2274,8 @@ class CatheterControlNode(Node):
                         return
                     self._fault_locked("planner_snapshot_stale")
                 return
+            root_timestamp_ns = (
+                root.plan_ns if getattr(self, "reduced_filter", False) else root.timestamp_ns)
             if reference_source == "PATH":
                 if path_reference is None:
                     with self._lock:
@@ -2120,7 +2283,7 @@ class CatheterControlNode(Node):
                     return
                 try:
                     target, target_tangent = path_reference.sample(
-                        root.timestamp_ns,
+                        root_timestamp_ns,
                         self.planner.config.horizon_steps,
                         self.planner.config.step_s, self._steady())
                 except ValueError as error:
@@ -2134,28 +2297,45 @@ class CatheterControlNode(Node):
                     root_markers = root_markers.detach().cpu().numpy()
                 capture_tip = (np.asarray(root_markers[-1], dtype=np.float64)
                     + tip_readout_offset)
-            if not self.planner_process_enabled:
-                root = self._planner_root_on_device(root)
-            plan = self.planner.plan(
-                root, position, target,
-                x_only=(reference_source == "PATH" and path_reference.x_only),
-                xz_only=(reference_source == "PATH" and path_reference.xz_only),
-                target_tangent_base=(
-                    None if reference_source != "PATH"
-                    or path_reference.final_hold else target_tangent),
-                observed_tip_base_m=observed_tip,
-                tip_readout_offset_m=tip_readout_offset,
-                capture_tip_base_m=capture_tip,
-                previous_logical_velocity=previous,
-                deadline_started_s=callback_started,
-                transmission_state=(transmission_snapshot if self.engagement_control_enabled else self.backlash_snapshot),
-                takeup_motor_radians_per_second=(
-                    self.backlash_compensator.motor_radians_per_second(
-                        self.contract)),
-                blocked_motor_direction=blocked_motor_direction,
-                direction_lease=reversal_state.lease_direction,
-                approved_reversal_direction=(
-                    reversal_state.approved_direction))
+            if getattr(self, "reduced_filter", False):
+                # The dry run's validated call: the filter alone owns play,
+                # take-up and response, so no October transmission inputs.
+                self.reduced_plan_attempted = True
+                try:
+                    plan = self.planner.plan(
+                        root, position, target, deadline_started_s=callback_started)
+                except ValueError as error:
+                    with self._lock:
+                        if self.state == ControllerState.ACTIVE:
+                            self.last_command.fill(0.0)
+                            self.last_effective_command.fill(0.0)
+                            self.last_command_time = self._steady()
+                            self.state_reason = "reduced_filter_planner_error_zero"
+                    self.get_logger().warn(f"reduced-filter plan refused, commanding zero: {error}")
+                    return
+            else:
+                if not self.planner_process_enabled:
+                    root = self._planner_root_on_device(root)
+                plan = self.planner.plan(
+                    root, position, target,
+                    x_only=(reference_source == "PATH" and path_reference.x_only),
+                    xz_only=(reference_source == "PATH" and path_reference.xz_only),
+                    target_tangent_base=(
+                        None if reference_source != "PATH"
+                        or path_reference.final_hold else target_tangent),
+                    observed_tip_base_m=observed_tip,
+                    tip_readout_offset_m=tip_readout_offset,
+                    capture_tip_base_m=capture_tip,
+                    previous_logical_velocity=previous,
+                    deadline_started_s=callback_started,
+                    transmission_state=(transmission_snapshot if self.engagement_control_enabled else self.backlash_snapshot),
+                    takeup_motor_radians_per_second=(
+                        self.backlash_compensator.motor_radians_per_second(
+                            self.contract)),
+                    blocked_motor_direction=blocked_motor_direction,
+                    direction_lease=reversal_state.lease_direction,
+                    approved_reversal_direction=(
+                        reversal_state.approved_direction))
             if self.planner_process_enabled:
                 for name, seconds in self.planner.process_timings_s.items():
                     self._timing.record_seconds(name, seconds)
@@ -2168,7 +2348,7 @@ class CatheterControlNode(Node):
                     plan = self.planner.enforce_deadline(
                         plan, callback_started)
                     self._publish_control_cycle_timing_locked(
-                        plan, callback_started, root.timestamp_ns)
+                        plan, callback_started, root_timestamp_ns)
                     if not self.armed or self.fault_latched:
                         return
                     self._complete_planner_warmup_locked(plan)
@@ -2176,7 +2356,8 @@ class CatheterControlNode(Node):
             # Diagnostic readout from the same immutable estimator root used
             # by the solve. Keep root fit offset separate from predicted motion.
             model_start_tip = None
-            if plan.valid and plan.command_tip_sequence_m is not None:
+            if (plan.valid and plan.command_tip_sequence_m is not None
+                    and not getattr(self, "reduced_filter", False)):
                 root_points = self.runtime.markers_for_state(root)
                 if torch.is_tensor(root_points):
                     root_points = root_points.detach().cpu().numpy()
@@ -2187,7 +2368,7 @@ class CatheterControlNode(Node):
                 plan = self.planner.enforce_deadline(
                     plan, callback_started)
                 self._publish_control_cycle_timing_locked(
-                    plan, callback_started, root.timestamp_ns)
+                    plan, callback_started, root_timestamp_ns)
                 if not self.armed or self.fault_latched:
                     return
                 if (self.estimator_catchup_started_at is not None
@@ -2211,7 +2392,7 @@ class CatheterControlNode(Node):
                         not self.planner_process_enabled
                         or self._planner_reference_matches_locked(
                             reference_source, target, path_reference,
-                            root.timestamp_ns, self._steady()))
+                            root_timestamp_ns, self._steady()))
                 except ValueError as error:
                     self._fault_locked(str(error))
                     return
@@ -2326,7 +2507,7 @@ class CatheterControlNode(Node):
                     if getattr(self, 'mppi_execution_mode', 'velocity') == 'position_stream':
                         try:
                             self.position_stream_command_id = (self.position_stream_command_id % 0xffffffff)+1
-                            position_anchor_counts = root_encoder_counts(self._raw_encoder_history, root.timestamp_ns)
+                            position_anchor_counts = root_encoder_counts(self._raw_encoder_history, root_timestamp_ns)
                             dt = (self.planner.config.point_rollout_step_s
                                   if self.reference_source == 'POINT' and self.planner.config.point_rollout_step_s > 0
                                   else self.planner.config.step_s)
@@ -2344,7 +2525,7 @@ class CatheterControlNode(Node):
                         and self.observed_tip is not None
                         and self.observed_tip_timestamp_ns is not None):
                     self.tip_forecast_monitor.add(
-                        root.timestamp_ns,
+                        root_timestamp_ns,
                         self.observed_tip_timestamp_ns,
                         (self.planner.config.point_rollout_step_s
                          if reference_source != "PATH"
@@ -3262,8 +3443,18 @@ class CatheterControlNode(Node):
                 values.update(self.planner.worker_diagnostics())
             values["estimator_compute_device"] = str(self.estimator_compute_device.device)
             values["planner_compute_device"] = str(self.compute_device.device)
-            values["estimator_compute_dtype"] = str(self.runtime.dtype)
-            values["planner_compute_dtype"] = str(self.planner_runtime.dtype)
+            if getattr(self, "reduced_filter", False):
+                values["estimator_backend"] = REDUCED_BACKEND
+                values["estimator_compute_dtype"] = "float64"   # the filter runs in numpy
+                values["planner_compute_dtype"] = str(self.reduced_backend.dtype)
+                values["reduced_filter_kernel_preparations_ms"] = json.dumps(
+                    {str(laws): round(seconds*1e3, 1)
+                     for laws, seconds in self.reduced_owner.preparations})
+                values["reduced_filter_images_dropped"] = str(
+                    self.reduced_stream.aligner.images_dropped)
+            else:
+                values["estimator_compute_dtype"] = str(self.runtime.dtype)
+                values["planner_compute_dtype"] = str(self.planner_runtime.dtype)
             values.update({
                 key: (str(value) if isinstance(value, int)
                       else f"{value:.6g}")

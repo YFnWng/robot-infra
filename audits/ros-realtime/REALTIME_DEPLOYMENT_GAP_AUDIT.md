@@ -560,9 +560,12 @@ passed, 2 skipped. Lint clean.
    `prior_refit covariance`.
 5. Stop the session. Run `dry_run_analysis` and `prior_refit covariance` on
    the session.
-6. With separate motion authorization: chassis travel beyond the 7.05 mm
-   play width in both directions, with the tendon still, for
-   `prior_refit axis`.
+6. The axis re-fit needs no separate session. Block B of the scripted prior
+   session (`insertion`, ±15 mm around 20 mm with the tendon at 0) covers
+   chassis travel beyond the 7.05 mm play in both directions, and
+   `prior_identification fit` runs `refit_axis` on it
+   ([plan](PRIOR_IDENTIFICATION_SESSION_PLAN.md)). That session needs motion
+   authorization.
 
 ## L1 results (2026-11-03, non-actuating)
 
@@ -836,7 +839,248 @@ had 0 messages; `plan_overdue` 0.
 **Not covered:**
 - One run. Live, non-actuating, still robot; no motion or closed loop.
 - The one-off two-law kernel preparation stall (about 0.3–0.5 s, once) still runs inside the first
-  two-law filter step and would delay that plan.
+  two-law filter step and would delay that plan. Fixed below.
+
+### All kernel law counts prepared at start-up (2026-11-03)
+
+**Change.**
+- `cr_meta_lnn` `ReducedFilterRolloutBackend.example_root(stream, plan_ns, law_count)`: a shape-only
+  root from the first current law, repeated `law_count` times with equal weights, built through the
+  existing `reduced_forecast_snapshot`. It is used only to prepare kernels, never planned on.
+- `root()` is unchanged in behaviour; its body moved into `_root(stream, plan_ns, laws)`.
+- `robot-infra` `ReducedFilterOwner.process()`: at the first preparation it prepares every law count
+  up to `estimator.options['maximum_laws']` (2 on the real-time path). The current count still comes
+  from the real root; the others come from the example root. The lazy per-step preparation remains
+  for a count not yet prepared.
+
+**Why it is exact.** `PreparedTensorKernel` captures by input shape and copies each call's snapshot
+into its owned buffers, so the example's values are never used for planning.
+
+**Pass/fail check (passed).** A CUDA-graph kernel prepared from the repeated-law example reproduces
+the eager forecast on a genuinely different two-law state (other gain, tip response, positions and
+weights 0.7/0.3) exactly: atol 0, same refused mask. Also checked: equal-weight copies forecast the
+same as the single law (within 1e-12 mm), and existing root, backend, stream, forecast and
+identification tests are unchanged. In all, 7 + 25 tests pass in `cr_meta_lnn` and 41 in
+`robot-infra`, including a new owner test that both counts are prepared at the first step and none
+later.
+
+**Cost.** The first preparation now takes about 0.8 s (measured on hardware: 1 law 490–570 ms,
+2 laws 330–410 ms). That is inside the dry-run start-up allowance of 16 images (about 1.6 s at the
+100 ms cadence). Not yet observed live.
+
+### Planner timing under motion: offline replay of the prior session (2026-11-03)
+
+**Setup.**
+- `/device/state` and `/shape_tracking/markers` from the hardware prior session's research bag
+  (`prior_identification_l1b_20261103T183522575594Z`), played in isolated domain 218.
+- Window: 110 s (21 s before block A) to the block C support fault at 443 s.
+- Fed into the dry-run node (same `control.launch.py` command) with `dry_run_targets`.
+- Output: `catheter_sessions/reduced_filter_dry_run_replay_l1b_20261103T190120Z`.
+- The cameras were not running, so camera load is absent. No hardware was involved.
+
+**Results.**
+- 1,643 plans at 5 Hz, all valid, 0 deadline misses; 0 images dropped.
+- Both kernel law counts were prepared at start-up (431 and 277 ms). This verifies the start-up
+  preparation change end to end.
+- The filter faulted at the expected support limit in C.
+
+| Window | Plans | Plan tick P50 / P99 / max | Filter step P50 / P99 / max | Filter + plan P99 / max |
+| --- | --- | --- | --- | --- |
+| Before A (still) | 90 | 12.2 / 16.8 / 17.1 ms | 37.0 / 56.9 / 99.7 ms | 65.2 / 74.0 ms |
+| A | 190 | 12.0 / 14.0 / 17.8 ms | 37.3 / 49.8 / 53.1 ms | 64.3 / 67.3 ms |
+| B, insertion | 1,111 | 12.2 / 17.4 / 20.6 ms | 39.8 / 54.7 / 64.7 ms | 69.2 / 76.3 ms |
+| C, to the fault | 252 | 12.6 / 17.5 / 18.4 ms | 40.7 / 64.1 / 100.1 ms | 79.0 / 88.6 ms |
+
+- Rollout P50 / P99: 4.8–4.9 / 5.7–6.1 ms.
+- Unphased remainder P99: at most 4.5 ms.
+- Root age P50 / P95 / max: 34.3 / 41.9 / 73.5 ms.
+- Plan interval P1 / P50 / P99 / max: 186 / 200 / 235 / **293 ms**.
+
+**Reading.**
+- **Planner:** its timing does not depend on the motion state. P99 stays at or below 17.5 ms in every
+  block (max 20.6 ms), including engaged two-law states.
+- **Filter step:** it rises modestly with motion.
+- **The live 1.5 s step is not deterministic computation.** It did not recur on the same data; the
+  replay maximum is 100 ms. That points to a live environmental cause, still open.
+- **Budget estimate under live load (inference, not measured).** Live filter steps under motion were
+  about 1.35 times the replay's (P50 51–55 vs 37–41 ms; P99 81–90 vs 55–64 ms). Filter plus plan at
+  P99 would then be about 100–110 ms, near or above the 100 ms image period. Planning still never
+  blocks, but a cycle over 100 ms delays the next image's commit and stretches the plan interval.
+- **For the commanding integration:** the command timeout must exceed the worst plan interval with
+  margin. The replay already shows 293 ms.
+
+### Live dry run under scripted motion (2026-11-03, user-authorized)
+
+**Setup.**
+- Research session `catheter_sessions/live_motion_dry_run_l1b_20261103T191340984285Z` on domain 42:
+  camera at 30 fps, the disarmed v171 controller (satisfying the causal preflight interlock),
+  recorder, video off.
+- Scripted motion: blocks B (`insertion`) and D (`tendon_reversal`) through the causal runner. Both
+  PASS, with return errors 0.0008 and 0.0023 mm; no USB events; final state `MANAGER_READY` at
+  [19.997, 0, 0].
+- The unmodified dry-run node and `dry_run_targets` ran on domain 219, fed by a one-way relay
+  (scratchpad `livemotion/relay.py`) of `/device/state` and `/shape_tracking/markers` with the
+  original stamps. Nothing was relayed back.
+- Load is conservative: the v171 controller also ran. Host load1 median 6.9 (P95 12.5), mean core
+  utilization 32 %, package up to 70 °C.
+
+**Results (`dry_run_domain219/`).**
+- 1,596 plans, **all valid, 0 deadline misses**; 1 image dropped.
+- Both kernel law counts prepared at start-up (541 and 381 ms).
+
+| Window | Plans | Plan tick P50 / P95 / P99 / max | Filter step P50 / P95 / P99 / max | Filter + plan P99 / max | Cycles over 100 ms |
+| --- | --- | --- | --- | --- | --- |
+| Before motion | 33 | 22.0 / 25.6 / 26.5 / 26.6 ms | 47.6 / 59.3 / 66.2 / 121.7 ms | 77.5 / 78.3 ms | 0 |
+| B, insertion | 1,104 | 20.7 / 25.4 / 27.8 / 32.6 ms | 53.6 / 69.3 / 76.5 / 96.6 ms | 101.7 / 124.3 ms | 14 |
+| D, reversals | 382 | 21.1 / 26.5 / 30.2 / 32.8 ms | 56.6 / 77.2 / 95.0 / 268.9 ms | 129.9 / 287.5 ms | 14 |
+| After motion | 77 | 20.8 / 24.6 / 25.7 / 26.0 ms | 45.6 / 56.0 / 63.6 / 74.3 ms | 87.2 / 94.2 ms | 0 |
+
+- Rollout P99 7.9 ms; unphased P99 9.8 ms.
+- Root age P50 / P95 / max: 32.3 / 40.2 / 114.2 ms.
+- **Plan interval P1 / P50 / P99 / max: 181 / 200 / 287 / 637 ms**; 57 intervals over 250 ms.
+
+**Reading.**
+- **Planning holds its deadline live under motion and extra load.** The worst plan is 32.8 ms against
+  50 ms.
+- **Filter plus plan exceeds the 100 ms image period** in 28 cycles, as the replay-based estimate
+  predicted.
+
+**The interval tail comes from the trigger rule, not from planning:**
+- Seven of the eight intervals over 300 ms span three commits whose image stamps are a regular
+  100 ms apart. `plan_due` compares wall time between plan starts against 0.9 × the period. With
+  commit-processing jitter, commit k+2 can arrive less than 180 ms of wall time after commit k, so
+  the plan slips to k+3 (300 ms).
+- The 637 ms interval included a plan skipped because the owner was not ready (pending images). A
+  skip still resets the due time.
+- One 416 ms interval came from a 269 ms filter step.
+
+**Proposed refinement (needs approval).** Measure `plan_due` on the committed image stamps instead of
+wall time: plan on every second committed image. Do not reset the due time when a plan is skipped.
+The interval tail would then reflect only processing delay, not quantization.
+
+### Image-stamp plan trigger and live block D rerun (2026-11-03)
+
+**Change (approved; `reduced_filter_dry_run.py`).**
+- `plan_due(last_plan_image_ns, image_ns, period)` compares committed image stamps: at least
+  0.9 × the period of image time.
+- `_plan_tick` returns whether a plan ran. A skip (warm-up, no target, not ready) keeps the due time,
+  so the next commit retries.
+- `plan_overdue` keeps a wall-clock record.
+- 25 tests pass, including image-stamp cadence and skip-retry tests; `catheter_control` rebuilt.
+
+**Run.** Block D only (user request), same live setup as above. Session
+`catheter_sessions/live_motion_dry_run_d_l1b_20261103T193159319465Z`. The initialization move went
+from [0, 0, 0] (the robot was moved back to 0 by the user) to [20, 0, 0]. D PASS, return error
+0.0023 mm, no USB events, session `complete`.
+
+| Block D | Wall-time trigger (previous run) | Image-stamp trigger |
+| --- | --- | --- |
+| Plans valid / misses | 382 / 0 | 422 / 0 |
+| Plan interval P50 / P99 / max | 202 / 299 / 416 ms | 201 / **237** / 1,006 ms |
+| Intervals over 250 ms | 26 | **3** |
+| Plan tick P99 / max | 30.2 / 32.8 ms | 27.5 / 29.2 ms |
+| Filter step P50 / P99 / max | 56.6 / 95.0 / 268.9 ms | 55.4 / 80.5 / **839.7 ms** |
+
+**Reading.**
+- The quantization tail is gone.
+- The remaining long gap (1.0 s) is one 839.7 ms filter step. Images queued behind it, so 9 plans
+  were skipped as not ready and retried at the next commits.
+
+**Open: rare long filter steps under motion.** Three so far today: 1.5 s (shadow, block C), 269 ms
+(block D) and 840 + 547 ms (this block D).
+- They occur in normal tracking while the engagement probability moves away from zero
+  (0 → 0.001; 0.088 → 0), with ordinary host load.
+- The law-merge divide-by-zero and invalid `slogdet` warnings appear in the same runs.
+- A filter-side engagement or law-transition path is suspected but not confirmed. The offline
+  replay did not cover block D.
+- Next: replay block D offline through the filter to test whether the long steps are deterministic,
+  and localize them.
+
+**Cleanup note.** After the run the dry-run node itself, not only its launch, needed a direct SIGINT
+to exit. It then finished cleanly and wrote its report.
+
+### Root cause of the long filter steps: BLAS/OpenMP thread oversubscription (2026-11-03)
+
+**Offline replay.** The block D research bag (scratchpad `livemotion/filter_replay.py`) was fed
+through `load_stream` with the dry-run settings (90 ms, queue 3, start-up 16, torch 2 threads).
+Inputs went in recorded arrival order through `encoder_sample` and `marker_measurement`, up to
+14:33:30 local: 664 results, about 25 s of compute.
+- The replay processes instantly, so image selection drifts from live. 287 committed images are
+  common; lambda is identical on the first 254 and within 0.015 after.
+- The two images that took 839.7 and 547.3 ms live took 66.3 and 66.2 ms. No tracking step exceeded
+  97 ms. The computation is not slow on those inputs.
+- GC is not the cause: generation-2 collections in the filter process take 41–44 ms.
+
+**Environment.** No thread limits are set:
+- numpy's OpenBLAS uses 20 threads per process;
+- torch's OpenMP uses 12 (the dry-run stack sets torch intra-op to 2);
+- live, several such processes share the 20 logical CPUs (dry run, v171 controller, camera, shadow).
+
+During the live slow seconds the controller's busiest thread used only 22–41 % CPU: it was waiting,
+not computing.
+
+**Controlled test.** The same replay ran with two competing BLAS processes (256×256 products) as a
+camera/controller stand-in:
+
+| Condition | Step P50 / P95 / P99 / max | Steps over 100 ms | Over 150 ms | Wall time |
+| --- | --- | --- | --- | --- |
+| Alone, default pools | 35.0 / 42.2 / 47.4 / 96.7 ms | 0 | 0 | 25 s |
+| Competing load, default pools | 37.0 / **202.1 / 235.5 / 592.3 ms** | **103** | **95** | 45 s |
+| Competing load, `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1` | 35.7 / 43.7 / 49.7 / 97.7 ms | 0 | 0 | 25 s |
+
+**Conclusion.**
+- Oversubscribed BLAS/OpenMP pools reproduce long filter steps of hundreds of milliseconds.
+- Single-threaded pools remove them entirely under the same load, with no loss of speed (P50
+  35.7 ms vs 35.0 ms alone).
+- Single-threaded BLAS is also the condition under which the filter is bit-reproducible (see the
+  prior-identification regressions).
+- The competing load here is harsher than the live stack, so the live magnitude is not claimed from
+  this test.
+
+**Proposed fix (needs approval; a runtime-environment change).** Set `OPENBLAS_NUM_THREADS=1` and
+`OMP_NUM_THREADS=1` for the reduced-filter processes: the dry-run controller and the shadow observer.
+- Confirm with a live block D run.
+- The camera and the v171 controller also bring 20-thread pools, so limiting them is a separate
+  checked step. The v171 timing must be re-measured before changing it.
+
+The numerical warnings (law-merge divide by zero, invalid `slogdet`) also occur in the offline
+replay, so they are deterministic filter behaviour. They are a separate correctness item, not the
+timing cause.
+
+**Fix applied (approved, 2026-11-03).**
+- New owner `bringup/research_filter_environment.py`: `REDUCED_FILTER_THREAD_ENVIRONMENT`.
+- Applied by `control.launch.py` to the dry-run controller node and by `research_session.launch.py`
+  to the shadow observer command.
+- The camera and the v171 controller are unchanged.
+- 29 launch tests pass, including checks that only these processes get the limits. `bringup` was
+  rebuilt; the installed launches use it.
+
+**Live confirmation (block D, user-authorized).**
+- Session `catheter_sessions/live_motion_dry_run_d2_l1b_20261103T194736050663Z`, same setup as the
+  14:32 run.
+- The dry-run node's environment was verified: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`.
+- D PASS, return error 0.0023 mm, no USB events, session `complete`, cleanup left no processes.
+
+| Block D, live | Default pools (14:32) | Single-thread pools (14:48) |
+| --- | --- | --- |
+| Filter step max, whole session | 839.7 ms (2 over 150 ms) | **134.1 ms (0 over 150 ms)** |
+| Filter step P50 / P99 in D | 55.4 / 80.5 ms | 54.3 / 80.7 ms |
+| Plan interval P50 / P99 / max | 200.6 / 236.8 / 1,005.6 ms | 200.5 / 233.8 / **282.9 ms** |
+| Plans skipped not ready; overdue counts | 9; 20 | **0; 0** |
+| Plans valid / misses; plan tick max | 422 / 0; 29.2 ms | 424 / 0; 29.5 ms |
+| Host load1 median | 6.8 | **3.3** |
+
+**Reading.**
+- The long-step tail is gone and the median is unchanged.
+- Host load halved, as fewer pool threads compete.
+- Filter plus plan still exceeds 100 ms in about 10 cycles (P99 103.6 ms), with the v171 controller
+  running alongside. That is a modest commit delay, never a blocked plan.
+- One run per condition.
+- Remaining before closed loop:
+  - the commanding-path integration, with a command timeout comfortably above the worst observed
+    interval (about 300 ms);
+  - the law-merge numerical warnings;
+  - optionally, the same thread limits for the camera and v171 processes, as a separate checked step.
 
 ## Lab sessions after that
 
@@ -857,3 +1101,167 @@ had 0 messages; `plan_overdue` 0.
 - **Whether the simulator can host an offline end-to-end loop** (it has no
   marker generator consistent with the filter model): unknown; inspect
   `simulation` before relying on it.
+
+## Commanding-path integration (2026-11-03)
+
+**Design (user-approved, including three decisions).**
+- `node.py` gains `estimator_backend: reduced_filter`. It reuses unchanged: the command heartbeat at
+  100 Hz with per-tick limit projection, the `planned_command_stale` fault, arming with task GC, the
+  mode claim, release, fault latching, the manager handlers, the `command_output_enabled` gate and
+  the estimator-independent readiness gates.
+- No commanding path was added to the dry-run node, which would have duplicated the safety path.
+- **Decision 1:** HOLDING is a recoverable zero, then a bounded pause, then a fault.
+- **Decision 2:** `command_timeout_s` 0.40 s and `marker_timeout_s` 0.25 s, with half speed caps for
+  first tests.
+- **Decision 3:** encoder-derived joint position for planning.
+
+**Implementation.**
+- **Shared owner.** `orchestration/reduced_filter_settings.py` holds the limits, planner config,
+  forbidden switches, `plan_due` and the loader, moved unchanged from the dry run.
+- **Construction refusals.** Any filter-owned switch (including `reversal_scheduler_enabled`) or the
+  planner process; any control method other than MPPI velocity. The runtime pair is replaced by
+  `load_reduced_filter`; the contract gets the controller-only limits (tendon ≤ 10.8 mm, rotation 0).
+- **Inputs.** Encoder and marker callbacks enqueue into an `OrderedInbox`. A 5 ms
+  `_reduced_owner_tick` absorbs them in order, advances at most one image and maps health. Gate
+  fields are written only by the event they certify:
+  - `encoder_time` when an encoder sample is absorbed;
+  - `marker_time` and `accepted_observations` when a `tracking` image commits;
+  - `estimator_health` and `consecutive_rejections` from the owner (HOLDING maps to `DEGRADED`);
+  - `model_valid` while the owner has not faulted;
+  - `last_marker_result` as a `MarkerUpdateResult`.
+- **Zero paths.**
+  - A held image while ACTIVE commands zero.
+  - Input overflow marks the history lost and faults an active controller.
+- **Planning.** In the owner callback after a committed image, when `plan_due` (image stamps) holds
+  and the owner is ready; a skipped tick keeps the due image. `_plan_tick` reduced branches:
+  - the root comes from `owner.plan_root()`; a refusal commands zero and is not counted as an
+    attempt;
+  - PATH references are refused;
+  - the dry run's planner call (root, joint position, target, deadline) is used;
+  - a planner `ValueError` commands zero;
+  - the v171-only root readouts, device copy and forecast monitor are skipped.
+  - The commit logic (freshness and readiness re-check, deadline-miss handling, warm-up, mode
+    claim) is shared.
+- **Status and services.** Status carries the backend, kernel preparations and dropped images. The
+  simulator reset service is refused. The new zero reasons are registered as motion holds.
+- **Configuration.**
+  - `controller/modes/reduced_filter.yaml`;
+  - `platform/hardware_v175_no_rotation_half_speed.yaml`, with caps [5, 0, 2.25, 2, 12.5, 12.5];
+  - stack `hardware_reduced_filter_no_rotation_half_speed`;
+  - `command_timeout_s` and `marker_timeout_s` added to the stack whitelist.
+- **Launch.** `control.launch.py` gives this backend the research `PYTHONPATH` and single-thread
+  pools; only the dry run refuses command output.
+
+**Verification (offline).**
+- **v171 regression.** Before the change, the full `catheter_control` suite gave 787 passed, 2
+  skipped. After it, the same 787 tests still pass.
+- **New `test_reduced_filter_backend.py` (14 tests),** on the real callbacks:
+  - gate fields written only by their events;
+  - HOLDING gives zero and a tolerated transient;
+  - an owner fault invalidates the model gate;
+  - overflow faults;
+  - image-stamp plan cadence with skip-retry;
+  - each reduced gate fails closed (initializing, model, encoder, marker freshness, health,
+    repeated rejection);
+  - commit to command with the dry run's planner call and the encoder-derived position;
+  - refused root and planner error give zero;
+  - PATH is refused;
+  - the heartbeat repeats a fresh command and faults `planned_command_stale` after 0.40 s (the
+    first test of that fault);
+  - the stack settings;
+  - every forbidden switch is refused;
+  - no SET_ZERO in `node.py`.
+- **Launch tests:** 30, including the commanding stack.
+- Lint clean on the changed files; `catheter_control` and `bringup` rebuilt; installed copies
+  identical.
+
+**Not yet done.** No run of the commanding backend on hardware or in a live stack. Next, in order:
+1. A live armed run with `command_output_enabled:=false`: the full command loop runs internally,
+   nothing is published.
+2. The first powered closed loop (L2) at half speed caps.
+Each needs its own authorization.
+
+### Step 1: live armed run with command output disabled (2026-11-03, user-authorized)
+
+**Setup.**
+- Research session `catheter_sessions/reduced_backend_armed_no_output_20261103T202357665801Z` on
+  domain 42: stack `hardware_reduced_filter_no_rotation_half_speed`, `command_output_enabled:=false`,
+  camera at 30 fps, video off.
+- The robot was still; motor interface up; `MANAGER_READY`.
+- Targets: the 4 points of `farther_tendon_12_grouped.yaml` at 2 Hz, 10 s each (scratchpad
+  `armedrun/targets_and_monitor.py`, targets only).
+- Arming went through the normal `/catheter_mppi/set_armed` service once the filter tracked (14
+  accepted images). The run lasted 180 s, then the controller was disarmed.
+
+**Results.**
+- **Nothing reached the manager or the robot:** `/teleop/control`, `/teleop/position_control`,
+  `/teleop/event`, `/manager/control` and `/device/command_tx` all had 0 messages.
+- **State:** DISARMED, then ACTIVE (`active`) within about 1 s of arming, then ACTIVE for the whole
+  180 s. No fault, `fault_snapshot` none, 0 marker rejections, 1 image dropped. Disarm returned
+  `DISARMED`; session `complete`; no processes left.
+- **Plans:** 899 committed at 5.0 Hz, all valid; 0 consecutive deadline misses. The only invalid plan
+  was the discarded warm-up (59.2 ms).
+- **Timing:**
+  - Planner P50 / P95 / P99 18.8 / 24.9 / 28.1 ms; every real plan under 40 ms.
+  - Rollout P50 / P99 5.6 / 12.2 ms.
+  - Plan interval P50 / P99 / max 199.9 / 221.5 / 353.5 ms, with one interval over 300 ms. That is
+    inside the 0.40 s command timeout; no `planned_command_stale`.
+
+**Finding: GC-deferred memory growth.**
+- While armed, the task-GC policy defers cyclic GC (as designed). Peak RSS growth reached
+  **199.8 MB in about 180 s** (about 1.1 MB/s), against the 256 MB limit.
+- At that rate `task_gc_rss_growth_limit` would fault the controller after about 230 s armed, before
+  the 300 s duration limit.
+- This is fail-safe (a fault stops output), but it limits closed-loop tasks with this backend to
+  about 3.5 minutes.
+- The source (cyclic garbage in the reduced filter or the planner path) is not yet identified.
+  Changing the growth limit is a policy decision; reducing the garbage is a code fix.
+
+**Not covered.** No motion (robot still), no published commands. The first powered closed loop (L2)
+is the next authorization.
+
+### Root cause of the armed memory growth, and fix (2026-11-03)
+
+**Diagnosis.**
+- **Offline, filter only (GC disabled, block D recording):** 600 images and 300 plan roots left 0
+  unreachable objects; memory was flat after a one-off 10 MB.
+- **With the real planner** (CUDA-graph backend, built from the commanding stack): about 83 MB within
+  the first 50 plans (first-use GPU/torch allocation), then nearly flat; 762 small cyclic objects.
+- **An idle rclpy node** with 5 ms and 10 ms timers on the same executor: 0 unreachable objects.
+- **Full controller replay with `tracemalloc`** (scratchpad `memdiag/`; the tracer's overhead
+  distorted timing and memory):
+  - 1.78 M objects while GC was deferred, 0.22 M after GC was restored;
+  - the top allocation sites were inside `torch.cuda.memory_stats()`, called by
+    `orchestration/compute_device.py`.
+
+**Cause.**
+- `torch.cuda.memory_allocated`, `memory_reserved` and `max_memory_allocated` each call
+  `memory_stats()`. It flattens the statistics through a self-referencing nested closure, a reference
+  cycle that holds the whole result list until cyclic GC runs.
+- `compute_device_diagnostics()` made three such calls on every 10 Hz status tick: **381 unreachable
+  objects per call**, about 3.8k objects/s, about 0.6 MB/s while GC is deferred.
+- The v171 controller uses the same diagnostics, so its armed growth (about 74 MiB in 3 minutes,
+  2026-10-07) very likely has the same source.
+
+**Fix (approved).**
+- `compute_device_diagnostics()` reads the same three values from one
+  `torch.cuda.memory_stats_as_nested_dict()` call. Values are identical; 0 cyclic objects.
+- New test: values equal to the torch accessors, and 50 calls leave 0 unreachable objects with GC
+  disabled.
+- Full `catheter_control` suite: 802 passed, 2 skipped (787 baseline plus 15 new).
+
+**Live confirmation** (armed, `command_output_enabled:=false`, robot still; session
+`catheter_sessions/reduced_backend_armed_no_output_20261103T204822943083Z`).
+- Nothing on the wire (`/teleop/control`, `/teleop/event`, `/manager/control`, `/device/command_tx`
+  0). 900 plans; states only `warming_planner`, then `active`; no fault; session `complete`.
+
+| Armed memory growth | Before fix (20:23Z run) | After fix (20:48Z run) |
+| --- | --- | --- |
+| Step in the first 20 s | about 90 MB | 87.5 MB |
+| Steady slope after 20 s | 0.63 MB/s | **0.008 MB/s** |
+| Growth after 180 s | 199.8 MB | 88.8 MB |
+| Time to the 256 MB limit | about 230 s | beyond the 300 s duration limit |
+
+**Remaining.** The one-off step is first-use GPU allocation counted because the GC baseline is taken
+at arming, before the warm-up plan. Excluding it would be a separate change to the shared GC policy;
+it is not needed for 300 s tasks.

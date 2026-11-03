@@ -36,6 +36,7 @@ def test_dry_run_stack_selects_its_executable_and_source_tree(monkeypatch, tmp_p
     node = nodes[0]
     assert node.executable == "catheter_mppi_reduced_dry_run" and node.name == "catheter_mppi"
     assert node.additional_env["PYTHONPATH"].startswith("/home/chen-lab/Yifan")
+    assert (node.additional_env["OPENBLAS_NUM_THREADS"], node.additional_env["OMP_NUM_THREADS"]) == ("1", "1")
     assert {"reduced_filter_report_dir": str(manifest.parent)} in node.parameters
 
 
@@ -50,3 +51,13 @@ def test_october_stack_keeps_its_executable_and_environment(monkeypatch, tmp_pat
                  command_output_enabled="false")[0]
     assert node.executable == "catheter_mppi" and node.additional_env == {}
     assert not any("reduced_filter_report_dir" in item for item in node.parameters if isinstance(item, dict))
+
+
+def test_commanding_reduced_stack_runs_catheter_mppi_with_the_research_environment(monkeypatch, tmp_path):
+    for output in ("false", "true"):   # command output stays launch-controlled; only the dry run refuses it
+        node = setup(monkeypatch, tmp_path, stack_config="hardware_reduced_filter_no_rotation_half_speed",
+                     command_output_enabled=output)[0]
+        assert node.executable == "catheter_mppi" and node.name == "catheter_mppi"
+        assert node.additional_env["PYTHONPATH"].startswith("/home/chen-lab/Yifan")
+        assert (node.additional_env["OPENBLAS_NUM_THREADS"], node.additional_env["OMP_NUM_THREADS"]) == ("1", "1")
+        assert not any("reduced_filter_report_dir" in item for item in node.parameters if isinstance(item, dict))

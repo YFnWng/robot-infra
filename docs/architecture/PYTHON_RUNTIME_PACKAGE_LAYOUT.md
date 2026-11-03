@@ -189,7 +189,29 @@ ownership for planning: encoder conversion, the ordered input handoff, health ma
 roots under one lock and per-law-count kernel preparation. `catheter_control.reduced_filter_dry_run`
 is a separate, non-commanding `catheter_mppi` node class, selected only by
 `estimator_backend: reduced_filter_dry_run` through `control.launch.py`. It has no command
-publisher, manager client or arm service. `node.py` (the October controller) refuses that backend.
+publisher, manager client or arm service. `node.py` refuses that backend.
+
+`catheter_control.orchestration.reduced_filter_settings` owns the settings shared by both
+reduced-filter controllers:
+
+- the controller-only limits;
+- the planner configuration;
+- the switches the filter makes illegal;
+- the image-stamp `plan_due` cadence;
+- the stream and backend loader.
+
+`node.py` also runs a commanding backend, `estimator_backend: reduced_filter` (stack
+`hardware_reduced_filter_no_rotation_half_speed`, added 2026-11-03):
+
+- **Estimation:** `ReducedFilterOwner` replaces the v171 runtime pair. A 5 ms owner callback
+  (`_reduced_owner_tick`) maps owner health onto the existing readiness gates.
+- **Planning:** commit-triggered, in that callback; there is no plan timer.
+- **Unchanged:** the existing command heartbeat, arming, mode claim, release, fault latching and task
+  GC. Command output stays launch-controlled.
+- **v171:** the path is unchanged, as shown by the unchanged existing test suite.
+
+`bringup.research_filter_environment` owns the single-threaded BLAS/OpenMP environment of the
+reduced-filter processes.
 
 Run the profiler with `ros2 run runtime_supervision compute_profile`.
 

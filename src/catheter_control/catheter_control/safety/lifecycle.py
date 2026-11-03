@@ -123,7 +123,9 @@ def controller_motion_held(reason: str) -> bool:
         "model_posterior_not_ready", "model_posterior_changed_during_plan_zero",
         "takeup_active", "takeup_confirmation_hold", "takeup_complete_replan",
         "takeup_saturated_replan", "replanning_after_takeup",
-        "replanning_after_takeup_response", "replanning_after_takeup_saturation"}
+        "replanning_after_takeup_response", "replanning_after_takeup_saturation",
+        "reduced_filter_holding_zero", "reduced_filter_root_refused_zero",
+        "reduced_filter_planner_error_zero"}
 
 
 def paired_source_skew_s(position_timestamp_ns: int | None,

@@ -119,6 +119,10 @@ ACTIVE_CONTROLLER_PARAMETERS = frozenset({
     "estimator_catchup_timeout_s",
     "plan_rate_hz",
     "command_rate_hz",
+    # Reduced-filter commanding backend: 5 Hz commit-triggered plans and a
+    # 100 ms image cadence (user decision, 2026-11-03).
+    "command_timeout_s",
+    "marker_timeout_s",
 })
 
 

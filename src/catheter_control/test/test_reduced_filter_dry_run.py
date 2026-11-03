@@ -9,7 +9,7 @@ import pytest
 from catheter_control.orchestration.configuration import ACTIVE_CONTROLLER_PARAMETERS, locate_stack, resolve_stack
 from catheter_control.orchestration.reduced_filter_owner import ReducedFilterOwner, encoder_sample
 from catheter_control.planning.mppi import CatheterMppi, MppiConfig
-from catheter_control.reduced_filter_dry_run import dry_run_contract
+from catheter_control.orchestration.reduced_filter_settings import reduced_filter_contract
 from catheter_control.safety.hardware_contract import load_hardware_contract
 from control_interface_py.encoder_coordinates import counts_to_logical
 
@@ -35,8 +35,9 @@ class Aligner:
 class Stream:
     """Scripted ReducedFilterStream: process() returns queued (status, committed stamp[, law count])."""
 
-    def __init__(self, results):
+    def __init__(self, results, maximum_laws=None):
         self.aligner, self.results, self.estimator = Aligner(), list(results), None
+        self.options = {} if maximum_laws is None else {'maximum_laws': maximum_laws}
 
     def process(self):
         if not self.results:
@@ -44,7 +45,8 @@ class Stream:
         status, committed, *laws = self.results.pop(0)
         if status in ('initialized', 'tracking'):
             self.aligner.committed = (committed, None, None)
-            self.estimator = SimpleNamespace(laws=SimpleNamespace(means=np.zeros((laws[0] if laws else 1, 2))))
+            self.estimator = SimpleNamespace(laws=SimpleNamespace(means=np.zeros((laws[0] if laws else 1, 2))),
+                                             options=self.options)
         if self.aligner.pending:
             self.aligner.pending.pop(0)
         return SimpleNamespace(status=status, reason=None if status == 'tracking' else status,
@@ -63,6 +65,10 @@ class Backend:
         self.roots.append(plan_ns)
         return SimpleNamespace(plan_ns=plan_ns, law_count=len(stream.estimator.laws.means))
 
+    def example_root(self, stream, plan_ns, law_count):
+        self.roots.append(plan_ns)
+        return SimpleNamespace(plan_ns=plan_ns, law_count=law_count, example=True)
+
     def prepare(self, root, counts, step_s):
         self.prepared.append((root.plan_ns, root.law_count, list(counts), step_s))
         self.kernels |= {(c, root.law_count) for c in counts}
@@ -71,8 +77,8 @@ class Backend:
         return all((c, root.law_count) in self.kernels for c in counts)
 
 
-def owner(results, backend=None):
-    return ReducedFilterOwner(Stream(results), backend or Backend(), candidate_counts=(512, 513), step_s=.2,
+def owner(results, backend=None, maximum_laws=None):
+    return ReducedFilterOwner(Stream(results, maximum_laws), backend or Backend(), candidate_counts=(512, 513), step_s=.2,
                               clock=iter(np.arange(0, 100, .001)).__next__)
 
 
@@ -100,6 +106,18 @@ def test_each_new_law_count_is_prepared_in_the_owner_before_planning():
     assert o.health().ready and o.plan_root().reason is None
     o.backend.kernels.clear()
     assert o.plan_root().reason == 'kernel_not_prepared'
+
+
+def test_every_law_count_is_prepared_at_the_first_step():
+    backend = Backend()
+    o = owner([('initialized', 10, 1), ('tracking', 20, 2), ('tracking', 30, 1)], backend, maximum_laws=2)
+    o.add_encoder(35, COUNTS)
+    o.process()
+    assert [(row[0], row[1]) for row in backend.prepared] == [(10, 1), (10, 2)]   # current count from the real root
+    assert [count for count, _ in o.preparations] == [1, 2]
+    o.process()
+    o.process()
+    assert len(backend.prepared) == 2 and o.health().ready   # no preparation inside a later two-law step
 
 
 def test_holding_is_not_ready_and_fault_latches():
@@ -141,13 +159,13 @@ def test_encoder_sample_is_the_shared_conversion_owner():
 
 def test_dry_run_contract_is_controller_only_and_refuses_rotation():
     contract = load_hardware_contract(LIMITS, 'imricor_test')
-    limited = dry_run_contract(contract, [10., 0., 4.5, 4., 25., 25.], 10.8)
+    limited = reduced_filter_contract(contract, [10., 0., 4.5, 4., 25., 25.], 10.8)
     assert limited.position_upper[2] == 10.8 and limited.velocity_max[1] == 0.0
     assert contract.position_upper[2] == 15.0   # hardware profile untouched
     with pytest.raises(ValueError, match='rotation'):
-        dry_run_contract(contract, [10., 7., 4.5, 4., 25., 25.], 10.8)
+        reduced_filter_contract(contract, [10., 7., 4.5, 4., 25., 25.], 10.8)
     with pytest.raises(ValueError, match='tendon'):
-        dry_run_contract(contract, [10., 0., 4.5, 4., 25., 25.], 15.5)
+        reduced_filter_contract(contract, [10., 0., 4.5, 4., 25., 25.], 15.5)
 
 
 def test_plain_sampling_has_two_fixed_candidate_counts():
@@ -229,22 +247,36 @@ def test_repeated_sigint_during_shutdown_still_writes_the_report():
     assert events == ['shutdown', 'report', 'destroy']
 
 
-def test_plans_follow_commits_at_the_plan_period():
-    from catheter_control.reduced_filter_dry_run import plan_due
+def test_plans_follow_committed_image_stamps_at_the_plan_period():
+    from catheter_control.orchestration.reduced_filter_settings import plan_due
 
-    def plan_times(commit_ms, period_ms=200.0, duration_ms=2000.0):
+    def plan_images(commit_ms, period_ms=200.0, count=40, skip=()):
+        """Committed image stamps every commit_ms; skipped plans keep the due time, as in _owner_tick."""
         last, planned = None, []
-        for k in range(int(duration_ms/commit_ms)+1):
-            now = k*commit_ms/1e3
-            if plan_due(last, now, period_ms/1e3):
-                last = now
-                planned.append(round(k*commit_ms, 6))
+        for k in range(count):
+            image_ns = int(round(k*commit_ms*1e6))
+            if plan_due(last, image_ns, period_ms/1e3) and k not in skip:
+                last = image_ns
+                planned.append(k)
         return planned
-    assert plan_times(100.0)[:4] == [0.0, 200.0, 400.0, 600.0]   # every second commit at 10 Hz
-    intervals = {round(b-a, 6) for a, b in zip(plan_times(95.0), plan_times(95.0)[1:])}
-    assert intervals == {190.0}                                    # never faster than 0.9 x period
-    intervals = {round(b-a, 6) for a, b in zip(plan_times(100/3), plan_times(100/3)[1:])}
-    assert intervals == {200.0}
+    assert plan_images(100.0)[:4] == [0, 2, 4, 6]                    # every second commit at 10 Hz
+    assert {b-a for a, b in zip(plan_images(95.0), plan_images(95.0)[1:])} == {2}   # 190 ms, never faster
+    assert {b-a for a, b in zip(plan_images(100/3), plan_images(100/3)[1:])} == {6}
+    assert plan_images(100.0, skip={2})[:4] == [0, 3, 5, 7]           # a skipped plan is retried next commit
+
+
+def test_skipped_plans_do_not_advance_the_due_image():
+    tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
+    owner_tick = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_owner_tick')
+    guarded = [n for n in ast.walk(owner_tick) if isinstance(n, ast.If) and 'self._plan_tick()' in ast.unparse(n.test)]
+    assert len(guarded) == 1 and 'plan_due(self.last_plan_image_ns' in ast.unparse(guarded[0].test)
+    assigned = [ast.unparse(n) for n in ast.walk(owner_tick) if isinstance(n, ast.Assign)
+                and any('last_plan_image_ns' in ast.unparse(t) for t in n.targets)]
+    inside = [ast.unparse(n) for n in guarded[0].body]
+    assert assigned and all(a in inside for a in assigned)
+    plan_tick = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_plan_tick')
+    returns = sorted(ast.unparse(n.value) for n in ast.walk(plan_tick) if isinstance(n, ast.Return))
+    assert returns == ['False', 'False', 'True'] and ast.unparse(plan_tick.body[-1]) == 'return True'
 
 
 def test_planning_runs_in_the_owner_callback_not_an_independent_timer():

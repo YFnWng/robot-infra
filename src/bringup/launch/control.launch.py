@@ -20,6 +20,7 @@ from catheter_control.orchestration.configuration import (
     resolve_stack)
 from catheter_control.orchestration.runtime import resolve_model_selection
 from bringup.recording import RECORD_TOPICS
+from bringup.research_filter_environment import REDUCED_FILTER_THREAD_ENVIRONMENT
 
 
 def _default_model_manifest():
@@ -393,14 +394,18 @@ def _setup(context, *_args, **_kwargs):
         effective_horizon_steps*effective_rollout_step_s+0.20)
     effective_model_manifest = str(
         effective_parameters.get("model_manifest", selection.manifest_path))
-    dry_run = effective_parameters.get("estimator_backend", "v171") == "reduced_filter_dry_run"
+    backend = effective_parameters.get("estimator_backend", "v171")
+    dry_run = backend == "reduced_filter_dry_run"
     node_environment = {}
-    if dry_run:
-        # Research dry run: never commands, imports the filter from the source tree (user, 2026-11-02).
-        if command_output_enabled:
-            raise RuntimeError("the reduced-filter dry run cannot enable command output")
+    if dry_run and command_output_enabled:
+        raise RuntimeError("the reduced-filter dry run cannot enable command output")
+    if backend in ("reduced_filter_dry_run", "reduced_filter"):
+        # Both reduced-filter controllers import the research filter from the source tree (user,
+        # 2026-11-02) and run single-threaded BLAS/OpenMP pools (2026-11-03).
         node_environment["PYTHONPATH"] = os.pathsep.join(
             item for item in (value("research_code_root"), os.environ.get("PYTHONPATH", "")) if item)
+        node_environment.update(REDUCED_FILTER_THREAD_ENVIRONMENT)
+    if dry_run:
         manifest_value = value("recording_manifest_path")
         if manifest_value:
             report_dir = {"reduced_filter_report_dir": str(Path(manifest_value).expanduser().resolve().parent)}

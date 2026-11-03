@@ -9,7 +9,6 @@ status are published on private topics only.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -31,69 +30,18 @@ from std_msgs.msg import String
 import torch
 
 from control_interface.msg import DeviceStream
-from control_interface_py.encoder_coordinates import UNITS_PER_COUNT
 
 from .orchestration.estimator_owner import encoder_history_qos, marker_measurement, stamp_ns
 from .orchestration.parameters import declare_parameters
 from .orchestration.reduced_filter_owner import OrderedInbox, ReducedFilterOwner
-from .planning.mppi import CatheterMppi, MppiConfig
-from .safety.hardware_contract import ENCODER_RADIANS_PER_COUNT, load_hardware_contract
+from .orchestration.reduced_filter_settings import (
+    PLAN_OVERDUE_PERIODS, load_reduced_filter, plan_due, reduced_filter_contract, reduced_planner_config,
+    require_filter_owned_switches_off)
+from .planning.mppi import CatheterMppi
+from .safety.hardware_contract import load_hardware_contract
 
 SOURCE_NAME = "autonomy"
 BACKEND = "reduced_filter_dry_run"
-
-
-def dry_run_contract(contract, controller_velocity_max, tendon_upper_mm):
-    """Controller-only limits: configured velocity caps and the tendon upper limit."""
-    velocity_max = np.where(np.asarray(controller_velocity_max) < 0.0, contract.velocity_max,
-                            np.asarray(controller_velocity_max, dtype=np.float64))
-    if np.any(velocity_max > contract.velocity_max):
-        raise ValueError("controller_velocity_max cannot exceed hardware limits")
-    if velocity_max[1] != 0.0:
-        raise ValueError("the reduced filter models no rotation; rotation velocity must be 0")
-    if not (contract.position_lower[2] < tendon_upper_mm <= contract.position_upper[2]):
-        raise ValueError("reduced_filter_tendon_upper_mm must lie inside the hardware tendon range")
-    upper = contract.position_upper.copy()
-    upper[2] = float(tendon_upper_mm)
-    return replace(contract, velocity_max=velocity_max, position_upper=upper,
-                   velocity_min=np.minimum(contract.velocity_min, velocity_max))
-
-
-PLAN_DUE_FRACTION = 0.9   # plans quantize to commit times; never faster than 1/(0.9*period)
-PLAN_OVERDUE_PERIODS = 2.0
-
-
-def plan_due(last_plan_s, now_s, period_s):
-    """Plan after this commit? First commit, or at least PLAN_DUE_FRACTION of a period since the last plan."""
-    return last_plan_s is None or now_s-last_plan_s >= PLAN_DUE_FRACTION*period_s
-
-
-def planner_config(node):
-    def value(name):
-        return node.get_parameter(name).value
-    config = MppiConfig(
-        horizon_steps=int(value("horizon_steps")), step_s=float(value("rollout_step_s")),
-        point_rollout_step_s=float(value("mppi_point_rollout_step_s")),
-        point_rollout_coarse_steps=bool(value("mppi_point_rollout_coarse_steps")),
-        point_prediction_tail_steps=int(value("mppi_point_prediction_tail_steps")),
-        samples=int(value("samples")), temperature=float(value("mppi_temperature")),
-        noise_std=tuple(float(v) for v in value("mppi_noise_std")),
-        noise_correlation=float(value("mppi_noise_correlation")),
-        exploration_fraction=float(value("mppi_exploration_fraction")),
-        engaged_gain_scenarios=bool(value("mppi_engaged_gain_scenarios")),
-        engaged_gain_maximum_first_step_shift=float(value("mppi_engaged_gain_maximum_first_step_shift")),
-        capture_radius_mm=float(value("mppi_capture_radius_mm")),
-        capture_minimum_terminal_improvement_mm=float(value("mppi_capture_minimum_terminal_improvement_mm")),
-        capture_hold_s=float(value("mppi_capture_hold_s")),
-        grouped_mode_sampling=bool(value("mppi_grouped_mode_sampling")),
-        best_candidate_guard=bool(value("mppi_best_candidate_guard")),
-        seed=int(value("mppi_seed")), planning_deadline_s=float(value("planning_deadline_s")))
-    if (config.horizon_steps != 4 or not config.point_rollout_coarse_steps or config.point_rollout_step_s <= 0
-            or config.point_prediction_tail_steps != 0):
-        raise ValueError("the reduced backend forecasts exactly four coarse steps with no tail")
-    if config.engaged_gain_maximum_first_step_shift != 0.0:
-        raise ValueError("Gate 3 lambda is not October lambda: the first-step lambda guard must be 0")
-    return config
 
 
 class ReducedFilterDryRunNode(Node):
@@ -109,12 +57,7 @@ class ReducedFilterDryRunNode(Node):
             raise ValueError(f"estimator_backend must be {BACKEND}")
         if bool(value("command_output_enabled")):
             raise ValueError("the reduced-filter dry run never commands; command_output_enabled must be false")
-        if bool(value("planner_process_enabled")):
-            raise ValueError("plan roots stay in this process; planner_process_enabled must be false")
-        for name in ("backlash_compensation_enabled", "takeup_transaction_enabled", "engaged_gain_enabled",
-                     "reversal_scheduler_enabled", "engagement_control_enabled", "adaptation_enabled"):
-            if bool(value(name)):
-                raise ValueError(f"{name} must be false: the filter alone owns play and response")
+        require_filter_owned_switches_off(value)
         self.frame_id = str(value("frame_id"))
         self.plan_rate_hz = float(value("plan_rate_hz"))
         period_ms = float(value("reduced_filter_image_period_ms"))
@@ -123,9 +66,9 @@ class ReducedFilterDryRunNode(Node):
             raise ValueError("positive plan rate, image period in [0,1000) ms and start-up queue of at least 3 required")
         torch.set_num_threads(int(value("torch_intraop_threads")))
         torch.set_num_interop_threads(int(value("torch_interop_threads")))
-        self.contract = dry_run_contract(load_hardware_contract(str(value("limits_file")), str(value("catheter"))),
+        self.contract = reduced_filter_contract(load_hardware_contract(str(value("limits_file")), str(value("catheter"))),
                                          value("controller_velocity_max"), float(value("reduced_filter_tendon_upper_mm")))
-        config = planner_config(self)
+        config = reduced_planner_config(self)
         if config.planning_deadline_s >= 1.0/self.plan_rate_hz:
             raise ValueError("planning deadline must be shorter than the plan period")
         self.device = str(value("device"))
@@ -142,7 +85,8 @@ class ReducedFilterDryRunNode(Node):
         self.target = None
         self.target_lock = threading.Lock()
         self.warmed, self.warmup_ms = False, None
-        self.last_plan_s = None
+        self.last_plan_s = None          # wall clock of the last plan, for the overdue diagnostic only
+        self.last_plan_image_ns = None   # committed image of the last plan; drives plan_due
         input_group, owner_group, io_group = (MutuallyExclusiveCallbackGroup() for _ in range(3))
         self.create_subscription(DeviceStream, "/device/state", self._device_cb, encoder_history_qos(),
                                  callback_group=input_group)
@@ -159,13 +103,7 @@ class ReducedFilterDryRunNode(Node):
             f"{self.plan_rate_hz:g} Hz, tendon upper {self.contract.position_upper[2]:g} mm")
 
     def _load_owner(self, artifact_root, period_ms, startup):
-        from cr_meta_lnn.training.hybrid.reduced_filter_stream import ReducedFilterRolloutBackend, load_stream
-        stream = load_stream(artifact_root, minimum_image_period_ns=int(period_ms*1e6), maximum_pending_images=3,
-                             startup_pending_images=startup)
-        backend = ReducedFilterRolloutBackend(
-            stream.transmission, tendon_mm_per_shaft_rad=float(UNITS_PER_COUNT[2]/ENCODER_RADIANS_PER_COUNT),
-            device=self.device, dtype=torch.float32, mode="cuda_graph" if self.device.startswith("cuda") else "eager")
-        return backend, stream
+        return load_reduced_filter(artifact_root, period_ms, startup, self.device)
 
     def _device_cb(self, message):
         if message.predicate != DeviceStream.ENC:
@@ -219,10 +157,12 @@ class ReducedFilterDryRunNode(Node):
             position_mm=None if result.position_mm is None else result.position_mm.tolist(),
             lambda_value=result.lambda_value, probability_engaged=result.probability_engaged,
             consecutive_rejections=result.consecutive_rejections))
-        now = time.perf_counter()
-        if plan_due(self.last_plan_s, now, 1.0/self.plan_rate_hz):
-            self.last_plan_s = now
-            self._plan_tick()
+        # A skipped plan (warm-up, no target, not ready) keeps the due time, so the next commit retries.
+        if (result.source_ns is not None
+                and plan_due(self.last_plan_image_ns, int(result.source_ns), 1.0/self.plan_rate_hz)
+                and self._plan_tick()):
+            self.last_plan_image_ns = int(result.source_ns)
+            self.last_plan_s = time.perf_counter()
 
     def _warm_up(self):
         """One discarded plan at first readiness, so first-call costs never meet a deadline."""
@@ -243,16 +183,17 @@ class ReducedFilterDryRunNode(Node):
         self.warmed = True
 
     def _plan_tick(self):
+        """One plan cycle; True when it ran (a plan row was produced), False when skipped."""
         started = time.perf_counter()
         health = self.owner.health()
         if health.ready and not self.warmed:
             self._warm_up()
-            return
+            return False
         with self.target_lock:
             target = None if self.target is None else self.target.copy()
         if target is None or not health.ready:
             self.counts["plan_skipped:" + ("no_target" if target is None else health.estimator_health.lower())] += 1
-            return
+            return False
         rooted = self.owner.plan_root()
         row = dict(wall_ns=time.time_ns(), root_ms=rooted.seconds*1e3, estimator_health=health.estimator_health)
         if rooted.root is None:
@@ -281,6 +222,7 @@ class ReducedFilterDryRunNode(Node):
         self.counts["plan_deadline_missed"] += int(row.get("deadline_missed", False))
         self.plan_rows.append(row)
         self.plan_pub.publish(String(data=json.dumps(row)))
+        return True
 
     def summary(self):
         health = self.owner.health()

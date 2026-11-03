@@ -1,0 +1,8 @@
+schema_version: 1
+name: hardware.reduced_filter.no_rotation.half_speed
+node_name: catheter_mppi
+description: Commanding reduced-filter backend with commit-triggered 5 Hz MPPI at half controller speed caps.
+layers:
+  controller: controller/modes/reduced_filter.yaml
+  platform: platform/hardware_v175_no_rotation_half_speed.yaml
+  performance: performance/gpu_512_5hz.yaml
